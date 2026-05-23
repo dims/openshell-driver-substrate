@@ -3,13 +3,19 @@
 Agent Substrate (gVisor + checkpoint/restore via runsc) compute driver
 for OpenShell.
 
-This repository depends on a small change in OpenShell that adds an
-operator-opt-in escape hatch (`OPENSHELL_BEST_EFFORT_FAILURES`) so the
-supervisor tolerates the bootstrap subsystems gVisor degrades. The
-change is filed upstream as
-[`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548)
-(3 files, +51/-7). Cargo's `openshell-core` dep is pinned to the
-corresponding `dims/OpenShell` fork tip.
+This repository depends on a small change in OpenShell that lets the
+supervisor tolerate the bootstrap subsystems gVisor degrades. Two
+alternative shapes are filed upstream; one of them will land:
+
+- [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548)
+  `[WIP]` — `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate (3 files,
+  +51/-7).
+- [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549)
+  — `SandboxFailureHandler` trait + `set_failure_handler` (3 files,
+  +71/-7). Programmatic override only — no env var, no CLI flag.
+
+Cargo's `openshell-core` dep is pinned to the corresponding
+`dims/OpenShell` fork tip.
 
 ## What's in the box
 
@@ -110,6 +116,7 @@ external SSH driver / per-actor JWTs). See
 
 | PR | Effect |
 |---|---|
-| [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` | The `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate this crate depends on. 3 files, +51/-7. Default strict; opt-in via the env var. |
+| [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` | `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate. 3 files, +51/-7. Default strict; opt-in via the env var. **Alternative shape; one of #1548 / #1549 will land.** |
+| [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) | `SandboxFailureHandler` trait + `StrictHandler` default + `set_failure_handler` setter. 3 files, +71/-7. Programmatic override only — no env var, no CLI flag, no `main.rs` changes. **Alternative shape; one of #1548 / #1549 will land.** |
 | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | `ateom-gvisor` `eth0` move/restore idempotency + deferred rollback. Without it, the test harness alternates between green and red runs. |
 | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` automatically, so a `WorkerPool` is usable out of `--deploy-ate-system`. Closes the manual `ko publish` operator step. |

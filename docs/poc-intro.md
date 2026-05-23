@@ -2,7 +2,7 @@
 
 **Status:** working end-to-end on a kind cluster as of 2026-05-23.
 **Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (tip `2b68a6d`).
-**Companion change in OpenShell:** [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` — single commit, 3 files / +51/-7, env-var-gated, upstreamable.
+**Companion change in OpenShell:** two alternative shapes filed, one will land — [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` (env-var gate, 3 files / +51/-7) and [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) (`SandboxFailureHandler` trait + setter, 3 files / +71/-7).
 **Companion change in Agent Substrate:** [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) — single commit, eth0 race fix in `ateom-gvisor`.
 **Operator-handshake follow-up:** [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) — `install-ate-kind.sh` builds + pushes the `ateom-gvisor` image so a `WorkerPool` is usable straight out of `--deploy-ate-system`.
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
@@ -84,7 +84,7 @@ Three repos co-operate to produce the boxed picture above:
 | component | repo | what it is |
 |---|---|---|
 | Compute driver + integration harness | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) | The new repo. A Rust crate (the driver) plus a feature-observation test harness that builds the patched supervisor image from the OpenShell source tree. **This is the bulk of the POC.** |
-| Env-var-gated bootstrap (one commit) | [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` | Adds the `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate + idempotent `drop_privileges` fast-path. 3 files, +51/-7. **Default stays strict — zero behavioural change for upstream callers.** Upstreamable as-is. |
+| Bootstrap-failure handling (alternative shapes; one lands) | [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` *or* [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) | Both add idempotent `drop_privileges` + a way to tolerate the three host-refused bootstrap subsystems. #1548: `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate (3 files, +51/-7). #1549: `SandboxFailureHandler` trait + `set_failure_handler` setter (3 files, +71/-7, programmatic-only). **Default stays strict — zero behavioural change for upstream callers — under either shape.** |
 | ateom-gvisor eth0 race fix (one commit) | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | A substrate-side bug fix the POC exposed. **Not OpenShell-specific.** Upstreamable as-is. |
 | Operator-handshake follow-up | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` so a `WorkerPool` is usable straight out of `--deploy-ate-system`. Closes the manual `ko publish` step documented in §7c. |
 
@@ -267,21 +267,20 @@ Supervisor-side coverage: a feature-observation harness (`tests/integration/`) b
 
 The driver crate itself stands alone in the new repo. The other two pieces are surgical single-commit changes to the canonical projects.
 
-### 6.1. OpenShell: [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`
+### 6.1. OpenShell: [`#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` *or* [`#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) — alternative shapes
 
-**Scope.** 3 files in `crates/openshell-sandbox/src/`, net +51/−7. Two orthogonal threads, each motivated by needing the supervisor to boot inside an outer sandbox without giving up the supervisor's value-add:
+**Scope.** Both shapes touch the same 3 files in `crates/openshell-sandbox/src/`. Both make `drop_privileges` idempotent and both reroute the three host-refusable bootstrap call sites (netns create in `lib.rs`, supervisor seccomp in `lib.rs`, workload seccomp in `sandbox/linux/mod.rs`). They differ only in how an integration opts in:
 
-1. **`OPENSHELL_BEST_EFFORT_FAILURES` env-var gate.** Adds a private `best_effort_failures()` helper (a `OnceLock`-cached read of `std::env::var_os`) and a `pub(crate) fn handle_bootstrap_failure(subsystem, err)` that either re-raises the error (strict default) or logs a single `tracing::warn` and returns `Ok(())` (when the env var is set). Three call sites that previously hard-failed are routed through the helper:
-   - `lib.rs`: network namespace creation when `unshare(CLONE_NEWNET)` returns EPERM under gVisor.
-   - `lib.rs`: the supervisor seccomp prelude when `seccomp(SECCOMP_SET_MODE_FILTER)` returns EINVAL under gVisor.
-   - `sandbox/linux/mod.rs`: the workload seccomp filter, same EINVAL.
-2. **Idempotent `drop_privileges` fast-path.** When `geteuid()/getegid()` already equal the policy's target uid/gid, the `initgroups`/`setresgid`/`setresuid` syscalls are no-ops that the kernel still rejects with EPERM under reduced capability sets. Short-circuiting matches the implicit contract of "drop privileges to X" when the process is already at X. Standalone correctness fix in `process.rs`.
+1. **[`#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) — env-var gate (3 files, +51/−7).** Adds a private `best_effort_failures()` helper that reads `OPENSHELL_BEST_EFFORT_FAILURES` once via `OnceLock` + `std::env::var_os`, and a `pub(crate) fn handle_bootstrap_failure(subsystem, err)` that either re-raises the error (strict default) or logs a `tracing::warn` and returns `Ok(())` (when the env var is set). The driver injects `OPENSHELL_BEST_EFFORT_FAILURES=1` into every `ActorTemplate.spec.containers[0].env` it synthesizes.
+2. **[`#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) — `SandboxFailureHandler` trait (3 files, +71/−7).** Adds `pub enum SandboxFailureKind`, `pub trait SandboxFailureHandler`, `pub struct StrictHandler` (the default), and `pub fn set_failure_handler(Box<dyn …>)`. Outer-sandbox integrations link this crate and register a handler once at process start. No env var, no CLI flag, no `main.rs` changes. Slightly larger diff but offers per-kind policy: a handler can tolerate netns + workload seccomp while still aborting on supervisor seccomp, for instance.
 
-The driver injects `OPENSHELL_BEST_EFFORT_FAILURES=1` into every `ActorTemplate.spec.containers[0].env` it synthesizes; the harness's Dockerfile bakes the same value into `ENV`. Either source is sufficient.
+Both shapes bundle the **idempotent `drop_privileges` fast-path** (when `geteuid()/getegid()` already equal the policy target, skip `initgroups(3)` which otherwise fails under reduced caps — a standalone correctness fix).
 
-**Why it's upstreamable.** Zero behavioural change for default callers — the helper short-circuits to the original `Err(...)` path when the env var is unset, and `OnceLock` ensures the check costs one branch on the steady-state hot path. All 777 sandbox unit tests pass unchanged. The `openshell-sandbox` binary's `--help` output is byte-identical. Only an operator who explicitly opts in via the env var sees the new behaviour.
+**Why either is upstreamable.** Default behaviour unchanged in both: the env-var version short-circuits to the original `Err(...)` when the var is unset; the trait version installs `StrictHandler` lazily for any process that doesn't call `set_failure_handler`. All 777 sandbox unit tests pass against both. The stock `openshell-sandbox --help` output is byte-identical to upstream `main` in both cases.
 
-A previous iteration of this change (`dims/OpenShell@69d2054`, preserved at the `chore/gvisor-degraded-netns-v2-trait` branch as a rollback point) used a `SandboxFailureHandler` trait + a `set_failure_handler()` registration call + a substrate-side `DegradedHandler` impl + a wrapper binary that registered the handler. That iteration was 6 files / +480/-375 and required a `main.rs → cli.rs` extraction so the wrapper binary could reuse the CLI. The env-var design collapses all of that to a single env-var read, no API change, no public surface added to OpenShell. Also bundled into the previous iteration but **deferred** out of `b6d3a35` to keep the diff minimal: a `landlock::prepare()` probe-and-skip that would replace the misleading "Applying Landlock"/"Built ruleset" log pair with a single `OCSF CONFIG:SKIPPED` event when the kernel doesn't implement Landlock. Strictly cosmetic; functionally fs sandboxing is gone under gVisor either way. Can land as a small follow-up commit (~21 lines).
+**Deferred follow-up under either shape:** a `landlock::prepare()` probe-and-skip that replaces the misleading "Applying Landlock"/"Built ruleset" log pair with a single `OCSF CONFIG:SKIPPED` event when the kernel doesn't implement Landlock. Strictly cosmetic; functionally fs sandboxing is gone under gVisor either way. Can land as a ~21-line follow-up commit on top of whichever PR merges.
+
+**Historical context.** An earlier iteration (preserved at the `chore/gvisor-degraded-netns-v2-trait` branch, `dims/OpenShell@69d2054`) had the trait shape *plus* a wrapper binary in `openshell-driver-substrate` *plus* a `main.rs → cli.rs` extraction so the wrapper could reuse the CLI — 6 files / +480/−375. The trait shape in `#1549` drops the `cli.rs` extraction; the wrapper-binary responsibility, if needed, stays on our side of the wire.
 
 ### 6.2. Substrate: [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66)
 
@@ -474,7 +473,7 @@ grpcurl -insecure \
 
 In rough priority order:
 
-1. **~~Upstream the OpenShell env-var gate.~~** Filed as [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately. *(awaiting review)*
+1. **~~Upstream the OpenShell change.~~** Two alternative shapes filed; one will land — [`#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` (env-var gate, +51/−7) and [`#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) (`SandboxFailureHandler` trait + setter, +71/−7). Default stays strict under either; only opt-in callers see the new behaviour. The Landlock cosmetic-log follow-up lands on top of whichever merges. *(both awaiting review)*
 2. **~~Upstream the substrate eth0 fix.~~** Filed as [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66). The bug is not OpenShell-specific. *(green CI, awaiting review)*
 3. **~~Land an `ateom-gvisor` build path in `install-ate-kind.sh`~~** (substrate-side). Filed as [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67). Removes the manual `ko publish` operator step. *(green CI, awaiting review)*
 4. **~~Stand up an OpenShell gateway in the cluster.~~** Done. Harness landed on `main` as commit `b7b059b` under `tests/integration/gateway/`. F1/F2/F3 PASS-verified; F4 (SSH attach) and F5 (cross-sandbox IDOR) deferred until the harness grows an external SSH driver / per-actor token plumbing.
