@@ -485,7 +485,7 @@ In rough priority order:
 
 ## 10. Further reading
 
-- Per-feature evidence + sharp-edges register: `~/notes/2026-05-23-openshell-features-findings.md`. Lists each Tier-1/2 test with status, the SE-1..SE-7 enumeration of caveats, and the disposition of each.
-- Current snapshot of branch tips, commit SHAs, and cluster fixture: `~/notes/2026-05-23-openshell-on-substrate-state.md`.
+- Per-feature evidence + sharp-edges register: `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md`. Lists each Tier-1/2 test with status, the SE-1..SE-7 enumeration of caveats, and the disposition of each.
+- Current snapshot of branch tips, commit SHAs, and cluster fixture: `~/notes/openshell-on-substrate/2026-05-23-openshell-on-substrate-state.md`.
 - Cluster bring-up runbook (kind on macOS, plus the Shorewall recovery recipe for NVIDIA-managed Linux hosts): `~/notes/2026-05-21-agent-substrate-kind-local-dev.md`.
-- Original feature-test plan: `~/notes/2026-05-23-openshell-features-test-plan.md`.
+- Original feature-test plan: `~/notes/openshell-on-substrate/2026-05-23-openshell-features-test-plan.md`.
