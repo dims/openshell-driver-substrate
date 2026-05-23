@@ -16,19 +16,25 @@ The plumbing is a Rust crate (`openshell-driver-substrate`) that implements Open
 
 In one sentence: **"OpenShell's per-request sandbox becomes a checkpoint/restore-backed Substrate actor."**
 
-## 2. Why it matters
+## 2. Why OpenShell is better *with* Substrate than without
 
-Today an OpenShell sandbox is a fresh process tree spun up per request (or per session). The supervisor sets up landlock, seccomp, an HTTP CONNECT proxy, an OPA policy engine, and an OCSF audit pipeline; only then does the workload start. Cold start is dominated by that bootstrap.
+OpenShell today runs the supervisor as a per-sandbox process tree on whatever host the gateway launches it on. Substrate replaces that "host" with a cluster-managed gVisor actor. The differences are concrete:
 
-Putting the supervisor inside a Substrate actor changes the model:
+| Dimension | OpenShell alone (today) | OpenShell on Substrate (this POC) |
+|---|---|---|
+| **Cold-start time per sandbox** | Multi-second: spawn supervisor → install landlock → install seccomp → bind proxy → load OPA → set up ephemeral TLS CA → fork workload. Every sandbox pays the full cost. | **~1 s**: `runsc restore` from a per-template golden snapshot. The supervisor's proxy, TLS CA, policy engine, and audit pipeline are *already running* in the restored process — they were captured live, not replayed from config. |
+| **Idle sandbox cost** | An idle sandbox is still a live process tree consuming RAM + an entry in the host's process table. Killing it loses its state. | `SuspendActor` → `runsc checkpoint` → snapshot uploaded → worker slot freed. Idle sandbox has **zero compute cost**; only storage cost for the snapshot. `ResumeActor` later brings it back, with state intact. |
+| **State preservation across stop** | None. A stopped sandbox is gone; the next request starts a fresh one. | Filesystem state under the policy's `read_write` paths, in-RAM state, the supervisor's process state — all preserved by gVisor's checkpoint and brought back on resume. The supervisor and workload see continuous execution. |
+| **Sandbox migration** | Bound to the launching host. If the host goes away, so does the sandbox. | Suspend on worker A → resume on worker B. Substrate's controller picks the new worker. The actor is unaware it moved; its socket-table FDs are recreated by runsc. |
+| **Multi-tenancy isolation** | One layer: the OpenShell supervisor's in-process policy + landlock + seccomp. A workload that escapes the supervisor (e.g. via a `/proc` race) reaches the host kernel. | **Two layers**: gVisor's userspace-kernel boundary *plus* OpenShell's policy engine. A workload that escapes the supervisor still has to break gVisor. The two layers fail independently. |
+| **Scheduling** | One-shot, on whichever node the gateway was running on. | Substrate's controller schedules actors onto pools. Distinct pools can mean distinct hardware (e.g. CPU pool vs GPU pool, region A vs region B). |
+| **Operational model** | The gateway manages lifecycle directly: it tracks every sandbox it launched, decides when to kill them, handles cleanup. | The cluster manages lifecycle: WorkerPools provide capacity, the substrate controller reconciles. The gateway just emits intents (`CreateSandbox`, `StopSandbox`); cleanup of leaked actors becomes a substrate-side problem, not a gateway-side one. |
+| **Failure recovery** | A crashed sandbox is gone; the gateway has to retry from scratch. | A crashed worker pod is reconciled by the controller; suspended actors survive worker pod replacement; only mid-resume actors are at risk (and the eth0-fix commit in substrate handles the partial-Run case). |
+| **Audit continuity** | OCSF events live in the sandbox process's log file; lost on kill. | OCSF events flow to the supervisor's stderr → captured by ateom-gvisor → captured by the worker pod's stdout → persisted by Kubernetes log rotation. Suspend/resume preserves the events emitted by the still-running supervisor. |
 
-- **Sub-second cold start.** Substrate captures the supervisor's fully-bootstrapped state in a "golden snapshot" once at template creation. Every subsequent sandbox is a `runsc restore` from that snapshot. The supervisor's network proxy, TLS termination CA, policy engine, and audit pipeline are all already alive in the restored process.
-- **Cluster-managed lifecycle.** "Stop" is a checkpoint, not a kill. A sandbox can be suspended idle (no worker cost) and resumed seconds-to-minutes later, on a different worker if the original is gone. The supervisor and its workload see continuous execution; the wall clock skips.
-- **Multi-actor concurrency.** A single worker pod with gVisor + ateom-gvisor can host many actors. The driver does not care which worker any given sandbox lands on; substrate's controller picks.
-- **Defense-in-depth.** gVisor is a full syscall-filtering boundary in userspace; OpenShell's supervisor is policy-aware (OPA) and observable (OCSF). You get both, with the supervisor running degraded for the parts gVisor already covers.
-- **Sandbox migration.** Suspend on worker A, resume on worker B. Filesystem state (under the policy's read/write paths), in-RAM state, open connections (with caveats) — all preserved by gVisor's checkpoint.
+The cost is intentional: gVisor's syscall filter overlaps with the supervisor's in-process landlock + seccomp, so under Substrate those run "degraded" (the supervisor doesn't try to install them — gVisor would refuse anyway). The supervisor's *value-add* (loopback HTTP proxy, OPA policy decisions, OCSF audit, identity tracking) is preserved; the kernel-level hardening becomes gVisor's responsibility.
 
-The model is intentionally a *thinner* OpenShell — the kernel-level hardening the supervisor does today is duplicated by gVisor in this deployment, so we trade some defense-in-depth for the operational properties above.
+For workloads where "fast per-sandbox cold start" + "cluster-managed lifecycle" + "two-layer isolation" are valuable, this trade is straightforwardly worth it.
 
 ---
 
@@ -184,7 +190,34 @@ Wall-clock cost from step 5 to step 11 on the bigbox kind cluster: **about a sec
 | Compute driver | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (`src/lib.rs`) | Implements OpenShell's `ComputeDriver` trait. Translates each method into the `ateapi.Control` RPCs in the table above. Synthesizes `ActorTemplate` CRDs via kube-rs when one isn't pre-provisioned. |
 | Supervisor wrapper binary | same repo (`src/bin/openshell-sandbox-substrate.rs`) | Drop-in replacement for the standard `openshell-sandbox` binary. Registers `DegradedHandler` against `openshell-sandbox`'s `SandboxFailureHandler` hook, then delegates to the upstream CLI. Tolerates the three gVisor-refused bootstrap syscalls. |
 | Trait scaffolding | [`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9) | One commit. Adds the trait + default handler + setter. Routes the three previously-fatal call sites through the handler. Makes `drop_privileges` idempotent. Skips Landlock ruleset construction when the kernel doesn't implement it. Extracts `main.rs`'s body into `pub mod cli`. **Zero behavioural change for default callers**; all 777 sandbox unit tests still pass and the `openshell-sandbox` binary's `--help` is identical. |
-| ateom-gvisor eth0 race fix | [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) | One commit. Makes ateom-gvisor's `eth0`-into-interior-netns move idempotent + adds deferred rollback on Run/Restore failure. Without it, a partial Run leaves `eth0` stranded and the worker pod is bricked for subsequent actors. Not OpenShell-specific; substrate-side bug-fix that the POC happened to surface. |
+| ateom-gvisor eth0 race fix | [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) | One commit, 1 file, +57/-2 in `cmd/servers/ateom-gvisor/ateom-gvisor.go`. See §3a below for the full story; this fix is **not OpenShell-specific** and benefits any consumer of ateom-gvisor that creates and destroys actors at any non-trivial rate. |
+
+### 3a. The substrate-side commit (`9109515`) in detail
+
+The POC's stress-testing of substrate's create+resume cycle exposed a real bug in `ateom-gvisor` that this commit fixes. It's worth documenting properly because the bug is independent of OpenShell — any heavy ateom-gvisor user would hit it.
+
+**The original code.** When `ateom-gvisor.RunWorkload` (or `RestoreWorkload`) is invoked by atelet, the first thing it does is move the pod's `eth0` interface into the actor's interior network namespace, so runsc can reach the network from inside the sandbox:
+
+```go
+// from cmd/servers/ateom-gvisor/ateom-gvisor.go (original)
+eth0Link, _ := netlink.LinkByName("eth0")
+netlink.LinkSetNsFd(eth0Link, int(s.interiorNetNS))     // move into interior
+// ... then runsc create/restore, setup, etc. ...
+// (eth0 is moved back out at the end by a later step)
+```
+
+**The bug.** If anything between the move-in and the move-out errors out — a `runsc restore` failure, a checkpoint-fetch timeout, an OCI bundle assembly issue, anything — `eth0` is left stranded in the interior netns. The original code had no rollback. The next time atelet asks ateom-gvisor to run an actor on the same worker pod, the supervisor finds `eth0: Link not found` because it's looking in the pod netns where eth0 is supposed to be. The pod is bricked for further actors until it's restarted.
+
+**Reproduction rate.** Trivial to hit when create+resume cycles run rapidly. Our integration harness hit it on every second iteration before the fix: one actor would fail mid-flight (often the synthesized-template test, because golden actor creation pushes more code paths), and the next test on the same worker would fail with `Link not found`. The user-visible symptom was the entire `live` test suite alternating between green and red runs depending on whether the test happened to land on a pod that had been bricked.
+
+**The fix (commit `9109515`).** Two complementary additions:
+
+1. **`ensureEth0InPodNetns`** — runs at the top of every `RunWorkload`/`RestoreWorkload` call. If eth0 is missing from the pod netns and present in the interior netns, move it back. Idempotent (does nothing if eth0 is already in the pod netns or absent from both). This recovers from prior partial failures.
+2. **Deferred rollback.** Right after moving eth0 into the interior, register a `defer` that moves it back out if the calling function returns an error. Combined with `ensureEth0InPodNetns` at entry, this gives the system "always-leave-eth0-in-pod-netns" as an invariant across both success and failure paths.
+
+The success path is unchanged — eth0 is still moved into the interior, the actor runs, eth0 is moved back at the normal end-of-call point. The defer fires only on `retErr != nil`, in which case the normal end-of-call cleanup didn't run.
+
+**Why this matters for an upstream PR.** Any user of `ateom-gvisor` benefits from this — OpenShell happens to be the one that surfaced it, but a Substrate-only deployment that creates and destroys many actors on the same WorkerPool would hit the same race. The fix is purely structural (no behaviour change for the success path), small (~60 lines), and well-tested (verified by running the OpenShell harness's create+resume cycle many times without alternating failures).
 
 ---
 
