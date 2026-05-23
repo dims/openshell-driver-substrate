@@ -1,8 +1,8 @@
 # OpenShell on Agent Substrate — proof-of-concept overview
 
 **Status:** working end-to-end on a kind cluster as of 2026-05-23.
-**Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate).
-**Companion change in OpenShell:** [`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9) (single commit, structurally clean, upstreamable).
+**Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (tip `2b68a6d`).
+**Companion change in OpenShell:** [`dims/OpenShell@b6d3a35`](https://github.com/dims/OpenShell/commit/b6d3a35facab8e597a516ebf4ddd2989ad558ce6) (single commit, 3 files / +51/-7, env-var-gated, upstreamable).
 **Companion change in Agent Substrate:** [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) (single commit, eth0 race fix in `ateom-gvisor`).
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
 
@@ -12,7 +12,7 @@
 
 A proof-of-concept that lets the **OpenShell sandbox supervisor** run as a managed actor on top of **Agent Substrate** (NVIDIA's gVisor + checkpoint/restore runtime), with the OpenShell gateway driving the sandbox lifecycle through Substrate's control plane.
 
-The plumbing is a Rust crate (`openshell-driver-substrate`) that implements OpenShell's `ComputeDriver` gRPC trait against Substrate's `ateapi.Control` service, plus a small drop-in supervisor wrapper binary that boots cleanly inside a gVisor sandbox by tolerating the three privileged syscalls gVisor refuses (`unshare(CLONE_NEWNET)`, `seccomp(SECCOMP_SET_MODE_FILTER)`, and one specific `setresuid` no-op path).
+The plumbing is a Rust crate (`openshell-driver-substrate`) that implements OpenShell's `ComputeDriver` gRPC trait against Substrate's `ateapi.Control` service. The stock OpenShell supervisor — with one small upstream-shaped patch behind an environment variable — boots cleanly inside a gVisor sandbox by tolerating the three privileged syscalls gVisor refuses (`unshare(CLONE_NEWNET)`, `seccomp(SECCOMP_SET_MODE_FILTER)`, and one specific `setresuid` no-op path).
 
 In one sentence: **"OpenShell's per-request sandbox becomes a checkpoint/restore-backed Substrate actor."**
 
@@ -82,8 +82,8 @@ Three repos co-operate to produce the boxed picture above:
 
 | component | repo | what it is |
 |---|---|---|
-| Compute driver + supervisor wrapper + integration harness | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) | The new repo. A Rust crate (the driver), a drop-in binary (the wrapper), and a feature-observation test harness. **This is the bulk of the POC.** |
-| Trait scaffolding (one commit) | [`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9) | Adds `SandboxFailureHandler` + `cli::run()` + idempotent `drop_privileges` + Landlock skip. **Zero behavioural change for default callers.** Upstreamable as-is. |
+| Compute driver + integration harness | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) | The new repo. A Rust crate (the driver) plus a feature-observation test harness that builds the patched supervisor image from the OpenShell source tree. **This is the bulk of the POC.** |
+| Env-var-gated bootstrap (one commit) | [`dims/OpenShell@b6d3a35`](https://github.com/dims/OpenShell/commit/b6d3a35facab8e597a516ebf4ddd2989ad558ce6) | Adds the `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate + idempotent `drop_privileges` fast-path. 3 files, +51/-7. **Default stays strict — zero behavioural change for upstream callers.** Upstreamable as-is. |
 | ateom-gvisor eth0 race fix (one commit) | [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) | A substrate-side bug fix the POC exposed. **Not OpenShell-specific.** Upstreamable as-is. |
 
 The driver doesn't talk to gVisor, atelet, or ateom-gvisor directly — only `ateapi.Control`. Everything below that is Substrate's internal layering.
@@ -148,7 +148,7 @@ spec:
     - name: supervisor
       image: localhost:5001/oshl-app@sha256:...
       command:
-        - /usr/local/bin/openshell-sandbox     # the substrate-aware wrapper
+        - /usr/local/bin/openshell-sandbox     # stock binary built from the patched OpenShell source
         - --policy-rules
         - /etc/openshell/policy.rego           # baked into the image
         - --policy-data
@@ -160,6 +160,8 @@ spec:
         - -c
         - while true; do sleep 60; done
       env:
+        - name: OPENSHELL_BEST_EFFORT_FAILURES # opts the supervisor into best-effort bootstrap
+          value: "1"
         - name: OPENSHELL_SANDBOX_ID
           value: <actor-id>
         - name: OPENSHELL_ENDPOINT             # only when driver is configured for a gateway
@@ -192,7 +194,7 @@ End-to-end timeline from the gateway's `create_sandbox` to a running actor:
 7. **Driver** calls `ateapi.Control.ResumeActor`.
 8. **ate-controller** runs a per-actor workflow: pick a worker with capacity → atelet on that worker calls `ateom-gvisor.RestoreWorkload(actor_id, runsc_path, spec)`.
 9. **ateom-gvisor** sets up an OCI bundle, downloads the golden snapshot from `snapshotsConfig.location`, runs `runsc restore` against it.
-10. **The restored process is the supervisor wrapper**; it picks up *exactly* where the golden left off, which is right after the supervisor finished bootstrapping. The supervisor's child workload command begins executing.
+10. **The restored process is the supervisor itself**; it picks up *exactly* where the golden left off, which is right after the supervisor finished bootstrapping. The supervisor's child workload command begins executing.
 11. **Actor status** → `STATUS_RUNNING`. Driver returns from `create_sandbox`.
 
 Wall-clock cost from step 5 to step 11 on the bigbox kind cluster: **about a second per cold actor**, dominated by golden-snapshot fetch + `runsc restore`. The expensive bootstrap (steps 3–4 = golden actor creation) happens once per template, not once per sandbox.
@@ -236,9 +238,9 @@ Supervisor-side coverage: a feature-observation harness (`tests/integration/`) b
 - HTTP CONNECT proxy binds on 127.0.0.1:3128.
 - Ephemeral TLS-MITM CA generated per actor.
 - OPA policy file loaded; allow decisions return `200`, deny decisions return `403`, both with `OCSF HTTP:GET […] {ALLOWED,DENIED}` audit events.
-- Workload identity dropped to the policy's `run_as_user`.
-- `DegradedHandler` fires as designed for the three gVisor-refused bootstrap subsystems.
-- Landlock probe correctly reports "Unavailable" under gVisor and skips ruleset construction.
+- Workload identity dropped to the policy's `run_as_user` (via the idempotent `drop_privileges` fast-path when the actor already runs at the target uid).
+- The supervisor's bootstrap subsystems (network-namespace, supervisor-seccomp, workload-seccomp) emit `WARN openshell_sandbox: Sandbox bootstrap subsystem unavailable; continuing in best-effort mode (operator opted in via OPENSHELL_BEST_EFFORT_FAILURES)` and proceed past the gVisor-induced syscall failures.
+- Landlock probe reports "Unavailable" under gVisor. (Note: the supervisor's own emit-only-when-unavailable Landlock log fix is deferred out of `b6d3a35` and is queued as a small follow-up commit.)
 
 ### 5.2. Wired but not exercised yet
 
@@ -263,17 +265,21 @@ Supervisor-side coverage: a feature-observation harness (`tests/integration/`) b
 
 The driver crate itself stands alone in the new repo. The other two pieces are surgical single-commit changes to the canonical projects.
 
-### 6.1. OpenShell: `dims/OpenShell@69d2054`
+### 6.1. OpenShell: `dims/OpenShell@b6d3a35`
 
-**Scope.** 6 files in `crates/openshell-sandbox/src/`, net +480/−375 (most of that delta is a mechanical `main.rs → cli.rs` move). Five threads, each motivated by needing the supervisor to boot inside an outer sandbox without giving up the supervisor's value-add:
+**Scope.** 3 files in `crates/openshell-sandbox/src/`, net +51/−7. Two orthogonal threads, each motivated by needing the supervisor to boot inside an outer sandbox without giving up the supervisor's value-add:
 
-1. **`SandboxFailureHandler` trait + `StrictHandler` default.** A hook for outer-sandbox integrations. Default re-raises every failure (existing behaviour). Three call sites that previously hard-failed (`run_sandbox`'s netns create, `run_sandbox`'s supervisor seccomp install, `enforce`'s workload seccomp install) now route through the handler. Integrations call `set_failure_handler()` once at start to swap in their own.
-2. **Idempotent `drop_privileges` fast-path.** When `geteuid()/getegid()` already equal the policy's target uid/gid, the `initgroups`/`setresgid`/`setresuid` syscalls are no-ops that the kernel still rejects with EPERM under reduced capability sets. Short-circuiting matches the implicit contract of "drop privileges to X" when the process is already at X. Standalone correctness fix.
-3. **`landlock::prepare()` skips when unavailable.** Probes Landlock at the top; under gVisor (which doesn't implement the Landlock syscalls) + `BestEffort` policy, emits a single `OCSF CONFIG:SKIPPED` event and returns `Ok(None)`. Removes the previously-misleading "Applying"/"Built" pair.
-4. **`enforce()` routes workload seccomp through the handler.** Same dispatch pattern as point 1.
-5. **`main.rs` → `pub mod cli`.** Extracts the 165-line CLI body into a reusable function so alternative binaries (the wrapper in this POC) can register a handler before invoking the standard CLI. `main.rs` becomes a 4-line shim.
+1. **`OPENSHELL_BEST_EFFORT_FAILURES` env-var gate.** Adds a private `best_effort_failures()` helper (a `OnceLock`-cached read of `std::env::var_os`) and a `pub(crate) fn handle_bootstrap_failure(subsystem, err)` that either re-raises the error (strict default) or logs a single `tracing::warn` and returns `Ok(())` (when the env var is set). Three call sites that previously hard-failed are routed through the helper:
+   - `lib.rs`: network namespace creation when `unshare(CLONE_NEWNET)` returns EPERM under gVisor.
+   - `lib.rs`: the supervisor seccomp prelude when `seccomp(SECCOMP_SET_MODE_FILTER)` returns EINVAL under gVisor.
+   - `sandbox/linux/mod.rs`: the workload seccomp filter, same EINVAL.
+2. **Idempotent `drop_privileges` fast-path.** When `geteuid()/getegid()` already equal the policy's target uid/gid, the `initgroups`/`setresgid`/`setresuid` syscalls are no-ops that the kernel still rejects with EPERM under reduced capability sets. Short-circuiting matches the implicit contract of "drop privileges to X" when the process is already at X. Standalone correctness fix in `process.rs`.
 
-**Why it's upstreamable.** Zero behavioural change for default callers. All 777 sandbox unit tests pass unchanged. The `openshell-sandbox` binary's `--help` output is byte-identical. The hooks only activate when an integration explicitly registers a handler — and there are zero such integrations in the OpenShell tree.
+The driver injects `OPENSHELL_BEST_EFFORT_FAILURES=1` into every `ActorTemplate.spec.containers[0].env` it synthesizes; the harness's Dockerfile bakes the same value into `ENV`. Either source is sufficient.
+
+**Why it's upstreamable.** Zero behavioural change for default callers — the helper short-circuits to the original `Err(...)` path when the env var is unset, and `OnceLock` ensures the check costs one branch on the steady-state hot path. All 777 sandbox unit tests pass unchanged. The `openshell-sandbox` binary's `--help` output is byte-identical. Only an operator who explicitly opts in via the env var sees the new behaviour.
+
+A previous iteration of this change (`dims/OpenShell@69d2054`, preserved at the `chore/gvisor-degraded-netns-v2-trait` branch as a rollback point) used a `SandboxFailureHandler` trait + a `set_failure_handler()` registration call + a substrate-side `DegradedHandler` impl + a wrapper binary that registered the handler. That iteration was 6 files / +480/-375 and required a `main.rs → cli.rs` extraction so the wrapper binary could reuse the CLI. The env-var design collapses all of that to a single env-var read, no API change, no public surface added to OpenShell. Also bundled into the previous iteration but **deferred** out of `b6d3a35` to keep the diff minimal: a `landlock::prepare()` probe-and-skip that would replace the misleading "Applying Landlock"/"Built ruleset" log pair with a single `OCSF CONFIG:SKIPPED` event when the kernel doesn't implement Landlock. Strictly cosmetic; functionally fs sandboxing is gone under gVisor either way. Can land as a small follow-up commit (~21 lines).
 
 ### 6.2. Substrate: `dims/substrate@9109515`
 
@@ -314,7 +320,7 @@ The Linux kernel features the supervisor would normally use to harden itself in-
 - **Network namespace isolation is off.** The supervisor's HTTP CONNECT proxy still works as a *cooperating-client* enforcement point, but direct egress bypasses it — a non-cooperating workload can `curl https://example.com` without going through 127.0.0.1:3128 and the supervisor neither blocks nor sees the request. Operators rely on the outer sandbox (gVisor's own filter + K8s `NetworkPolicy`) for bypass-proof egress.
 - **In-process seccomp filter is off.** gVisor is itself a syscall-filtering boundary and rejects further filter installs.
 - **Landlock filesystem sandbox is off.** gVisor doesn't implement Landlock; the supervisor's policy `read_only`/`read_write` paths are *not* enforced at the filesystem level.
-- **Non-root `drop_privileges` is unsupported.** The wrapper relies on the supervisor's idempotent fast-path (skip `setresuid` when already at target uid). `run_as_user` must equal the actor's starting uid (root, in the default template) until Substrate's `SecurityContext.capabilities.add` plumbing is restored.
+- **Non-root `drop_privileges` is unsupported.** The supervisor relies on its own idempotent fast-path (skip `setresuid` when already at target uid). `run_as_user` must equal the actor's starting uid (root, in the default template) until Substrate's `SecurityContext.capabilities.add` plumbing is restored.
 
 None of these are bugs. They're the price of running inside a smaller, opinionated sandbox runtime. The threat model has to be re-stated: the **enforcing boundary** in this deployment is gVisor + outer cluster policy, not the OpenShell supervisor's in-process hardening.
 
@@ -383,10 +389,10 @@ cd ~/go/src/github.com/dims/openshell-driver-substrate   # the new repo
 ```
 
 This will:
-1. `cargo build --release --bin openshell-sandbox-substrate` (the wrapper binary).
-2. Assemble a Docker build context (Dockerfile + wrapper + `policy.rego` + `data.yaml` + `test-workload.sh`).
-3. `docker build` + `docker push` to `localhost:5001/oshl-feature-test:latest`.
-4. `kubectl apply` the `oshl-feature-test` ActorTemplate referencing the new digest.
+1. Resolve the OpenShell source tree (`$OPENSHELL_REPO` → sibling `../OpenShell` → clone the pinned SHA into a temp dir) and `cargo build --release --bin openshell-sandbox` from there. The resulting binary is the stock supervisor with the env-var-gated patch baked in.
+2. Assemble a Docker build context (Dockerfile + `openshell-sandbox` + `policy.rego` + `data.yaml` + `test-workload.sh`).
+3. `docker build` + `docker push` to `localhost:5001/oshl-feature-test:latest`. The Dockerfile bakes `OPENSHELL_BEST_EFFORT_FAILURES=1` into `ENV`.
+4. `kubectl apply` the `oshl-feature-test` ActorTemplate referencing the new digest. The template's `containers[].env` re-states `OPENSHELL_BEST_EFFORT_FAILURES=1` for operator visibility.
 5. Wait for the template's `status.phase = Ready`.
 6. Mint a fresh `ate-system/ate-controller` token, extract the cluster's trust bundle, refresh the api-server port-forward.
 7. `grpcurl ateapi.Control/CreateActor` + `ResumeActor` on a fresh actor ID.
@@ -465,7 +471,7 @@ grpcurl -insecure \
 
 In rough priority order:
 
-1. **Upstream the OpenShell trait scaffolding.** Single PR against `NVIDIA/OpenShell` with the contents of commit `69d2054`. Structurally clean; zero behaviour change for default callers; opens up the same pattern for other outer-sandbox integrations.
+1. **Upstream the OpenShell env-var gate.** Single PR against `NVIDIA/OpenShell` with the contents of commit `b6d3a35`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately.
 2. **Upstream the substrate eth0 fix.** Single PR against `agent-substrate/substrate` with `9109515`. The bug is not OpenShell-specific.
 3. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Removes the `ko publish` operator step.
 4. **Stand up an OpenShell gateway in the cluster.** Lets us exercise cluster-mode features end-to-end (the §7b gap).
