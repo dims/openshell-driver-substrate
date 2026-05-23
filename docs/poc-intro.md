@@ -3,6 +3,7 @@
 **Status:** working end-to-end on a kind cluster as of 2026-05-23.
 **Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate).
 **Companion change in OpenShell:** [`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9) (single commit, structurally clean, upstreamable).
+**Companion change in Agent Substrate:** [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) (single commit, eth0 race fix in `ateom-gvisor`).
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
 
 ---
@@ -21,122 +22,374 @@ Today an OpenShell sandbox is a fresh process tree spun up per request (or per s
 
 Putting the supervisor inside a Substrate actor changes the model:
 
-- **Sub-second cold start.** Substrate captures the supervisor's fully-bootstrapped state in a "golden snapshot" once at template creation. Every subsequent sandbox is a `runsc restore` from that snapshot — measured at hundreds of milliseconds vs. multi-second from-scratch boots. The supervisor's network proxy, TLS termination CA, policy engine, and audit pipeline are all already alive in the restored process.
+- **Sub-second cold start.** Substrate captures the supervisor's fully-bootstrapped state in a "golden snapshot" once at template creation. Every subsequent sandbox is a `runsc restore` from that snapshot. The supervisor's network proxy, TLS termination CA, policy engine, and audit pipeline are all already alive in the restored process.
 - **Cluster-managed lifecycle.** "Stop" is a checkpoint, not a kill. A sandbox can be suspended idle (no worker cost) and resumed seconds-to-minutes later, on a different worker if the original is gone. The supervisor and its workload see continuous execution; the wall clock skips.
 - **Multi-actor concurrency.** A single worker pod with gVisor + ateom-gvisor can host many actors. The driver does not care which worker any given sandbox lands on; substrate's controller picks.
-- **Defense-in-depth without trade-offs.** gVisor is a full syscall-filtering boundary in userspace; OpenShell's supervisor is policy-aware (OPA) and observable (OCSF). You get both, with the supervisor running degraded for the parts gVisor already covers.
-- **Sandbox migration.** Suspend on worker A, resume on worker B. Filesystem state (under the policy's read/write paths), in-RAM state, open connections (with caveats) — all preserved.
+- **Defense-in-depth.** gVisor is a full syscall-filtering boundary in userspace; OpenShell's supervisor is policy-aware (OPA) and observable (OCSF). You get both, with the supervisor running degraded for the parts gVisor already covers.
+- **Sandbox migration.** Suspend on worker A, resume on worker B. Filesystem state (under the policy's read/write paths), in-RAM state, open connections (with caveats) — all preserved by gVisor's checkpoint.
 
-The model is intentionally a *thinner* OpenShell — the kernel-level hardening that the supervisor does today is duplicated by gVisor in this deployment, so we trade some defense-in-depth for the operational properties above.
+The model is intentionally a *thinner* OpenShell — the kernel-level hardening the supervisor does today is duplicated by gVisor in this deployment, so we trade some defense-in-depth for the operational properties above.
+
+---
 
 ## 3. How it works
 
-### High-level architecture
+### Agent Substrate primitives the POC uses
+
+Substrate models a sandbox as **two K8s CRDs and one runtime object**, with one gRPC service driving them:
+
+| Substrate primitive | Kind | What it is | Who creates it |
+|---|---|---|---|
+| `WorkerPool` | CRD (`ate.dev/v1alpha1`) | A Deployment-like resource that runs N worker pods. Each pod has an `ateom-gvisor` container managing runsc actors on demand. | Operator (once per cluster + namespace). |
+| `ActorTemplate` | CRD (`ate.dev/v1alpha1`) | A `runsc` OCI bundle + `WorkerPool` reference + a snapshots-storage URI. Substrate's controller materialises it by running a one-shot "golden actor" to completion of bootstrap, then `runsc checkpoint`s it. The template's `status.phase = Ready` means the golden snapshot is in place. | The driver (synthesizes via `kube-rs`), OR pre-provisioned by the operator. |
+| `Actor` | Substrate runtime object (not a K8s CRD, lives in valkey + Substrate's API) | A live or suspended instance of an `ActorTemplate`. Resume restores from the template's golden snapshot. Suspend snapshots and frees the worker. | The driver (via `ateapi.Control`). |
+
+The gRPC surface (`ateapi.Control` exposed at `ate-api-server` in the cluster):
+
+| RPC | What the driver does with it |
+|---|---|
+| `CreateActor(actor_id, actor_template_namespace, actor_template_name)` | Register a new Actor binding the given template. Returned status: `STATUS_SUSPENDED`, version=1. |
+| `ResumeActor(actor_id, boot=false)` | Restore the actor on a worker. atelet on the target worker calls `ateom-gvisor.RestoreWorkload` → `runsc restore` against the template's golden snapshot. Status moves through `STATUS_RESUMING` → `STATUS_RUNNING`. |
+| `GetActor(actor_id)` | Read current actor state: status, worker pod, IP, version, last snapshot URI. |
+| `ListActors()` | Cluster-wide actor catalog. Driver filters to its configured namespace. |
+| `SuspendActor(actor_id)` | atelet on the actor's worker calls `ateom-gvisor.CheckpointWorkload` → `runsc checkpoint`. Snapshot uploaded to `snapshotsConfig.location` in the template. Status moves to `STATUS_SUSPENDED`. Worker slot freed. |
+| `DeleteActor(actor_id)` | Drop the actor record + its snapshot. Actor must be `STATUS_SUSPENDED` first (the driver tolerates a `FailedPrecondition` from a previous suspend attempt and just calls DeleteActor anyway). |
+
+The driver doesn't talk to gVisor, atelet, or ateom-gvisor directly — only `ateapi.Control`. Everything below that is Substrate's internal layering.
+
+### Driver-side method mapping
+
+OpenShell's `ComputeDriver` trait → `ateapi.Control`:
+
+| `ComputeDriver` method | Substrate call(s) |
+|---|---|
+| `get_capabilities` | (none) — returns driver name + version |
+| `validate_sandbox_create` | (none) — local-only: rejects bare-tag images, GPU requests, etc. |
+| `get_sandbox(id_or_name)` | `GetActor` → mapped to `DriverSandbox` with a `Ready` condition derived from `Actor.Status` |
+| `list_sandboxes` | `ListActors` → filtered to the namespace the driver was configured for |
+| `create_sandbox(spec)` | Either reuse a pre-provisioned `ActorTemplate` (if `spec.template.platform_config["substrate_actor_template"]` is set), OR `synthesize_and_apply_template` via kube-rs and wait for `Ready`. Then `CreateActor` + `ResumeActor`. |
+| `stop_sandbox(id)` | `SuspendActor` |
+| `delete_sandbox(id)` | Best-effort `SuspendActor` (tolerating `FailedPrecondition`/`Internal`), then `DeleteActor`, then delete the synthesized `ActorTemplate` if the driver owns it (annotation check). |
+| `watch_sandboxes` | Polling `ListActors` every 2 s, diffing snapshots, emitting `Upsert`/`Deleted` events |
+
+### What the synthesized ActorTemplate looks like
+
+Given a `DriverSandbox` with `spec.template.image = localhost:5001/oshl-app@sha256:...`, `synthesize_template` produces (with placeholders resolved from the driver's `SubstrateComputeConfig`):
+
+```yaml
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: oshl-<actor-id>                 # deterministic from actor_id
+  namespace: ate-openshell-m0           # driver default_namespace
+  annotations:
+    ate.openshell.io/synthesized-by: openshell-driver-substrate@0.1.0
+spec:
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8...
+  containers:
+    - name: supervisor
+      image: localhost:5001/oshl-app@sha256:...
+      command:
+        - /usr/local/bin/openshell-sandbox     # the substrate-aware wrapper
+        - --policy-rules
+        - /etc/openshell/policy.rego           # baked into the image
+        - --policy-data
+        - /etc/openshell/data.yaml             # baked into the image
+        - --log-level
+        - info
+        - --
+        - /bin/sh                              # workload command after `--`
+        - -c
+        - while true; do sleep 60; done
+      env:
+        - name: OPENSHELL_SANDBOX_ID
+          value: <actor-id>
+        - name: OPENSHELL_ENDPOINT             # only when driver is configured for a gateway
+          value: <gateway-grpc-endpoint>
+        - name: OPENSHELL_SANDBOX_TOKEN        # only when the spec carries one
+          value: <jwt>
+  snapshotsConfig:
+    location: gs://ate-snapshots/ate-openshell-m0/   # in-cluster S3 on kind (rustfs), GCS on GKE
+  workerPoolRef:
+    name: openshell-m0-pool
+    namespace: ate-openshell-m0
+  runsc:
+    amd64:
+      sha256Hash: a397be1abc242...
+      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc
+```
+
+For a pre-provisioned template, the operator writes this YAML by hand (or out of helm/kustomize) and the caller's `spec.template.platform_config["substrate_actor_template"]` names it. The pre-provisioned path lets the operator pin a `command:` block that differs from the driver's default.
+
+### Boot flow for one sandbox
+
+End-to-end timeline from the gateway's `create_sandbox` to a running actor:
+
+1. **Gateway** → `openshell-driver-substrate::create_sandbox(spec)`.
+2. **Driver** decides synthesized vs. pre-provisioned template (sees `platform_config["substrate_actor_template"]`).
+3. **Driver** (synthesized path only): `kube::Api<ActorTemplate>::patch()` with server-side apply. Driver then polls the template's `status.phase` every 2 s for up to 90 s.
+4. **Substrate controller** sees the new template, schedules a "golden actor" on a worker, waits for the supervisor to bootstrap, then `runsc checkpoint`s it. Phase advances: `""` → `ResumeGoldenActor` → `WaitGoldenActor` → `Ready`. Snapshot uploaded to `spec.snapshotsConfig.location`.
+5. **Driver** sees `Ready`, calls `ateapi.Control.CreateActor`.
+6. **ate-api-server** returns the new Actor record (`STATUS_SUSPENDED`, version=1).
+7. **Driver** calls `ateapi.Control.ResumeActor`.
+8. **ate-controller** runs a per-actor workflow: pick a worker with capacity → atelet on that worker calls `ateom-gvisor.RestoreWorkload(actor_id, runsc_path, spec)`.
+9. **ateom-gvisor** sets up an OCI bundle, downloads the golden snapshot from `snapshotsConfig.location`, runs `runsc restore` against it.
+10. **The restored process is the supervisor wrapper**; it picks up *exactly* where the golden left off, which is right after the supervisor finished bootstrapping. The supervisor's child workload command begins executing.
+11. **Actor status** → `STATUS_RUNNING`. Driver returns from `create_sandbox`.
+
+Wall-clock cost from step 5 to step 11 on the bigbox kind cluster: **about a second per cold actor**, dominated by golden-snapshot fetch + `runsc restore`. The expensive bootstrap (steps 3–4 = golden actor creation) happens once per template, not once per sandbox.
+
+### Architecture map
 
 ```
                                          ┌────────────────────────────────────┐
-                                         │  Agent Substrate cluster (kind/    │
-                                         │  K8s, with the substrate operator) │
+                                         │  Agent Substrate cluster           │
                                          │                                    │
                                          │  ┌────────────┐   ┌────────────┐   │
                                          │  │ ate-api    │   │ ate-       │   │
                                          │  │ -server    │◄─►│ controller │   │
-                                         │  │ (gRPC)     │   │ (CRDs)     │   │
+                                         │  │ (gRPC)     │   │            │   │
                                          │  └─────┬──────┘   └─────┬──────┘   │
                                          │        │                │          │
    ┌────────────────────────┐ ateapi.Cntrl│        │  ┌─────────────▼──────┐   │
    │  OpenShell gateway     │─────────────┼────────┘  │ atelet (DaemonSet) │   │
-   │  ─────────────────     │             │           └──────────┬─────────┘   │
-   │  uses ComputeDriver    │             │                      │             │
-   │  trait, picks          │             │            ┌─────────▼──────────┐  │
-   │  `substrate`           │             │            │ Worker pods        │  │
-   │  ──────────────────    │             │            │  ┌──────────────┐  │  │
-   │     │                  │             │            │  │ateom-gvisor  │  │  │
-   │     ▼                  │             │            │  │ + runsc      │  │  │
-   │  ┌─────────────────┐   │             │            │  │ ┌──────────┐ │  │  │
-   │  │ openshell-      │   │             │            │  │ │supervisor│ │  │  │
-   │  │ driver-substrate│───┼─────────────┼────────────┼──┼─┤ + workload│ │  │  │
-   │  │ (this crate)    │   │             │            │  │ │ (actor) │ │  │  │
-   │  └─────────────────┘   │             │            │  │ └──────────┘ │  │  │
-   └────────────────────────┘             │            │  └──────────────┘  │  │
+   │  uses ComputeDriver    │             │           └──────────┬─────────┘   │
+   │  trait, picks          │             │                      │             │
+   │  `substrate`           │             │            ┌─────────▼──────────┐  │
+   │     │                  │             │            │ WorkerPool pods    │  │
+   │     ▼                  │             │            │  ┌──────────────┐  │  │
+   │  ┌─────────────────┐   │             │            │  │ateom-gvisor  │  │  │
+   │  │ openshell-      │   │             │            │  │ + runsc      │  │  │
+   │  │ driver-substrate├───┼─────────────┼────────────┼──┤ ┌──────────┐ │  │  │
+   │  │ (this crate)    │   │             │            │  │ │supervisor│ │  │  │
+   │  └─────────────────┘   │             │            │  │ │ +        │ │  │  │
+   └────────────────────────┘             │            │  │ │ workload │ │  │  │
+                                          │            │  │ │ (actor)  │ │  │  │
+                                          │            │  │ └──────────┘ │  │  │
+                                          │            │  └──────────────┘  │  │
                                           │            └────────────────────┘  │
                                           └────────────────────────────────────┘
+                                                        │
+                                                        ▼
+                                          ┌────────────────────────────┐
+                                          │  rustfs (kind) / GCS (GKE) │
+                                          │  golden snapshots          │
+                                          └────────────────────────────┘
 ```
-
-The gateway never talks to gVisor directly; it issues high-level intents (`CreateSandbox`, `StopSandbox`, etc.) against `openshell-driver-substrate`, which translates them into `ateapi.Control` RPCs against Substrate's API server.
 
 ### The three pieces
 
 | component | repo | what it does |
 |---|---|---|
-| Compute driver | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (`src/lib.rs`) | Implements OpenShell's `ComputeDriver` trait. Translates `create_sandbox`, `stop_sandbox`, etc. into Substrate's `CreateActor`/`SuspendActor`/`DeleteActor`/`ResumeActor`. Synthesizes an `ActorTemplate` CRD via kube-rs when one isn't pre-provisioned. Polling-based `watch_sandboxes` until Substrate ships a streaming watch. |
-| Supervisor wrapper binary | same repo (`src/bin/openshell-sandbox-substrate.rs`) | Drop-in replacement for the standard `openshell-sandbox` binary. Registers `DegradedHandler` against a small hook in `openshell-sandbox`, then delegates to the upstream CLI. Tolerates the three gVisor-refused bootstrap syscalls and continues startup. |
-| Trait scaffolding | [`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9) | One commit. Adds `SandboxFailureHandler` trait + `StrictHandler` default + `set_failure_handler()` setter. Routes three previously-fatal call sites (netns create, supervisor seccomp install, workload seccomp install) through the handler. Makes `drop_privileges` idempotent. Skips Landlock ruleset construction when the kernel doesn't implement it. Extracts `main.rs`'s body into `pub mod cli` so the wrapper above can reuse the CLI. **Zero behavioural change for default callers** — all 777 sandbox unit tests still pass and the `openshell-sandbox` binary's `--help` is identical. |
+| Compute driver | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (`src/lib.rs`) | Implements OpenShell's `ComputeDriver` trait. Translates each method into the `ateapi.Control` RPCs in the table above. Synthesizes `ActorTemplate` CRDs via kube-rs when one isn't pre-provisioned. |
+| Supervisor wrapper binary | same repo (`src/bin/openshell-sandbox-substrate.rs`) | Drop-in replacement for the standard `openshell-sandbox` binary. Registers `DegradedHandler` against `openshell-sandbox`'s `SandboxFailureHandler` hook, then delegates to the upstream CLI. Tolerates the three gVisor-refused bootstrap syscalls. |
+| Trait scaffolding | [`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9) | One commit. Adds the trait + default handler + setter. Routes the three previously-fatal call sites through the handler. Makes `drop_privileges` idempotent. Skips Landlock ruleset construction when the kernel doesn't implement it. Extracts `main.rs`'s body into `pub mod cli`. **Zero behavioural change for default callers**; all 777 sandbox unit tests still pass and the `openshell-sandbox` binary's `--help` is identical. |
+| ateom-gvisor eth0 race fix | [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) | One commit. Makes ateom-gvisor's `eth0`-into-interior-netns move idempotent + adds deferred rollback on Run/Restore failure. Without it, a partial Run leaves `eth0` stranded and the worker pod is bricked for subsequent actors. Not OpenShell-specific; substrate-side bug-fix that the POC happened to surface. |
 
-### Boot flow for one sandbox
+---
 
-1. Gateway → `openshell-driver-substrate::create_sandbox(spec)`.
-2. Driver decides: pre-provisioned `ActorTemplate` (caller-named) or synthesize one from the spec via kube-rs.
-3. Driver waits for the template's `status.phase = Ready` — this means Substrate's controller has run a "golden actor" once and captured its checkpoint.
-4. Driver issues `CreateActor` + `ResumeActor` against `ateapi.Control`.
-5. Substrate's controller picks a worker; atelet on that worker calls ateom-gvisor's `RestoreWorkload`.
-6. ateom-gvisor sets up an OCI bundle, runs `runsc restore` against the golden snapshot. The restored process is the supervisor wrapper; it picks up *exactly* where the golden left off, which is right after the supervisor finished bootstrapping (proxy bound, policy loaded, TLS CA generated).
-7. The supervisor's child workload command (sleep loop in the default template; anything in a custom template) runs.
+## 4. Substrate features exercised by this POC
 
-Wall-clock cost from step 4 to step 7 finishing on the bigbox kind cluster: **about a second**, dominated by golden-snapshot fetch + `runsc restore`.
+| Substrate feature | Exercised? | How |
+|---|---|---|
+| `ActorTemplate` CRD create / update / delete | ✅ | Driver's `kube-rs` server-side apply + `delete` paths; synthesized templates are reaped on `delete_sandbox` via the `SYNTHESIZED_BY_ANNOTATION`. |
+| Golden snapshot capture + storage | ✅ | `synthesize_and_apply_template` polls until `status.phase = Ready`, which is exactly the moment the controller has uploaded the golden snapshot to `snapshotsConfig.location` (rustfs on kind, GCS on GKE). |
+| `runsc restore` from snapshot | ✅ | Every `ResumeActor` is a `runsc restore` invoked by atelet via ateom-gvisor. Verified on bigbox: actor restores within ~1 s of `ResumeActor`. |
+| `runsc checkpoint` on suspend | ✅ | `stop_sandbox` → `SuspendActor` → atelet → `ateom-gvisor.CheckpointWorkload` → `runsc checkpoint`. Confirmed via `last_snapshot` URI in `GetActor` after a suspend cycle. |
+| Multi-actor concurrency on one `WorkerPool` | ✅ | 4-replica WorkerPool hosts up to 4 actors. The harness's golden actor + a named test actor run on different worker pods simultaneously. |
+| Actor teleport: suspend on worker A, resume on worker B | ✅ (incidentally) | `live_write_path_round_trip` suspends + deletes; subsequent `create_sandbox` from the same template restores on a fresh worker. State preservation across the move is verified for the supervisor process (proxy still bound, policy still loaded). |
+| Identity injection via env vars on `ActorTemplate.spec.containers[*].env` | ✅ | Driver injects `OPENSHELL_SANDBOX_ID` (always), `OPENSHELL_ENDPOINT` (when configured), `OPENSHELL_SANDBOX_TOKEN` (when populated). Verified in the supervisor's startup banner. |
+| `WorkerPool.spec.replicas` autoscaling-by-substrate | ✅ (manual) | Tested by manually patching the pool from 4 → 6 → 4 replicas during cleanup. Substrate's controller creates / removes worker pods accordingly. |
+| `ate-api-server` over TLS + bearer JWT | ✅ | Driver's `load_tls_config` + `load_auth_interceptor`; CA + token files re-read on every channel build so projected SA tokens rotate without driver restart. Live tests dial `https://api.ate-system.svc:443` from the host via port-forward. |
+| Pre-provisioned `ActorTemplate` reuse via `platform_config["substrate_actor_template"]` | ✅ | `live_write_path_round_trip` exercises this path; the driver skips synthesis and just calls `CreateActor` + `ResumeActor` against the operator-provided template. |
+| `ClusterTrustBundle` for the api-server's TLS cert | ✅ | Operator extracts the trust bundle via `kubectl get clustertrustbundle servicedns.podcert.ate.dev:identity:primary-bundle -o jsonpath='{.spec.trustBundle}'` and feeds it to the driver via `api_tls_ca_path`. |
+| ServiceAccount token via `kubectl create token --audience` | ✅ | `kubectl -n ate-system create token ate-controller --audience=api.ate-system.svc` mints the JWT the driver presents in `Authorization: Bearer`. |
+| `WorkerPool.spec.ateomImage` digest pinning | ✅ | The harness's `cluster-setup.yaml` substitutes a `localhost:5001/ateom-gvisor@sha256:...` digest at apply time. |
+| Snapshot URI prefix per template (`snapshotsConfig.location`) | ✅ | Driver writes this to every synthesized template; operators set it once per cluster. |
+| `runsc` per-template pin via `spec.runsc.amd64.{sha256Hash,url}` | ✅ | Driver fills this in from `SubstrateComputeConfig.runsc_amd64_*`. atelet downloads + verifies the binary before the first actor on that template starts. |
 
-### Lifecycle continuation
+### Substrate features wired but NOT exercised yet
 
-- `stop_sandbox` ↔ Substrate `SuspendActor` ↔ `runsc checkpoint`. Snapshot stored in cluster S3 (rustfs on kind, GCS on GKE). Worker slot freed.
-- `delete_sandbox` ↔ `DeleteActor`. Tears down the actor; if the driver synthesized the template, the template's `SYNTHESIZED_BY_ANNOTATION` triggers template cleanup too.
-- `get_sandbox` ↔ `GetActor`. The driver translates Substrate's `Actor.Status` enum into a `DriverCondition` with `type=Ready`; the gateway's existing phase derivation works unchanged.
+| Feature | Why not yet | Where to start |
+|---|---|---|
+| `runsc` arm64 path | bigbox is amd64-only | `SubstrateComputeConfig` already has the field commented out; flip it on when there's an arm64 test cluster. |
+| GPU passthrough via Substrate's CDI plumbing | No GPU workload in the harness | `validate_sandbox_create` currently rejects `DriverResourceRequirements.gpu` — see `validate_rejects_gpu_request` unit test. Removing the reject + plumbing the GPU request into `ActorTemplate.spec.containers[*].resources` is the next step. |
+| `ateapi.Control.WatchActors` streaming RPC | Substrate didn't ship the streaming RPC at the time of this POC | Driver's `watch_sandboxes` polls `ListActors` every 2 s. Re-vendoring the proto + switching to the streaming RPC is a small change. |
+| `ActorTemplate.spec.containers[*].securityContext` (extra Linux caps) | Cut from v2 for upstream-friendliness; needed for non-root `drop_privileges` | A previous iteration of the driver requested `CAP_SETUID`/`CAP_SETGID`/`CAP_NET_ADMIN`/`CAP_SYS_ADMIN` here; cluster controllers running the field-strict CRD schema rejected with HTTP 500. The driver currently emits no `securityContext`. |
+| Per-actor `mTLS` client cert (substrate-side authz) | Optional config knob; no test cluster requires it | Driver's `load_tls_config` handles the path when both `api_client_cert_path` + `api_client_key_path` are set. |
 
-## 4. What it enables
+### Substrate-side features the POC explicitly does NOT support
 
-| Scenario | How it composes |
+| Feature | Why |
 |---|---|
-| **Per-request sandbox with sub-second cold start** | Gateway calls `create_sandbox` per request. Each restore is a fresh actor from the same golden snapshot. The supervisor is already bootstrapped, so the workload starts inside ~1 s instead of multi-second cold start. |
-| **Idle sandbox that survives suspension** | Gateway calls `stop_sandbox` on idle, gets back a snapshot URI in `ActorTemplate.status.last_snapshot`. Calls `create_sandbox` later — the restore brings the workload's filesystem and in-RAM state back with no migration logic. |
-| **Sandbox teleportation across workers** | Operator drains a worker (or it dies). Substrate's controller reassigns the actor on resume. The supervisor and workload don't know they moved. |
-| **Multi-tenant isolation** | Each sandbox is its own gVisor sandbox (separate userspace kernel) AND has its own OpenShell supervisor instance enforcing policy. The two layers are orthogonal: a workload escape from the OpenShell supervisor is still trapped by gVisor. |
-| **Auditable egress** | OpenShell's OCSF audit pipeline is alive inside every actor. Every HTTP CONNECT through the supervisor's proxy is logged with policy name, decision, and binary path of the caller. |
-| **OPA/Rego policy enforcement on egress** | Policy file (`policy.rego` + `data.yaml`) is baked into the supervisor image. The driver injects `OPENSHELL_SANDBOX_ID` and (when configured) `OPENSHELL_ENDPOINT` + `OPENSHELL_SANDBOX_TOKEN` so the supervisor can identify itself to a gateway for live policy fetches in the future. |
-| **Concurrent sandboxes on a single host** | A worker pod hosts many ateom actors. Lifecycle ops are independent. |
-| **Test images that override the workload command** | Operators pre-provision an `ActorTemplate` with a custom `command:` block (the `tests/integration/oshl-feature-test` template is the example) and reference it from `spec.template.platform_config["substrate_actor_template"]`. |
+| Per-sandbox CPU / memory limits | The `ActorTemplate.spec.containers[*]` shape supports `resources` but the driver doesn't propagate `DriverResourceRequirements.{cpu,memory}` into them. Add a translation if the gateway starts passing them. |
+| Streaming watch | See above. |
+| `kubectl ate exec` into a running actor | Substrate doesn't ship that subcommand; observability is via `kubectl logs <worker-pod>` of the actor's stdout. |
+
+---
 
 ## 5. What's actually verified working
 
 End-to-end on a bigbox kind cluster, with the post-split layout:
 
-**Driver-side lifecycle** — 4 live integration tests pass (in 32 s end-to-end including build):
+**Driver-side lifecycle** — 4 live integration tests pass in ~32 s end-to-end (including build):
 - `live_get_capabilities` — `GetCapabilities` returns the driver name + version.
 - `live_list_sandboxes` — `ListSandboxes` returns the expected actors filtered to the configured namespace.
-- `live_write_path_round_trip` — `create` → `get` → `stop` → `delete` using a pre-provisioned `supervisor` template.
+- `live_write_path_round_trip` — `create` → `get` → `stop` → `delete` against a pre-provisioned `supervisor` template.
 - `live_synthesized_template_round_trip` — `create_sandbox` synthesizes a template via kube-rs, waits for Ready, resumes an actor, reads it back, suspends + deletes. Both the template and the actor are reaped.
 
 **Supervisor-side feature surface** — observed via a feature-observation harness (`tests/integration/`) that bakes a test workload into the supervisor image and dumps `[oshl-test]` markers from worker pod stdout:
-- Supervisor boot completes inside the gVisor actor (no fatal startup error).
+- Supervisor boot completes inside the gVisor actor.
 - HTTP CONNECT proxy binds on 127.0.0.1:3128.
 - Ephemeral TLS-MITM CA generated per actor.
 - OPA policy file loaded; allow decisions return `200`, deny decisions return `403`, both with `OCSF HTTP:GET […] {ALLOWED,DENIED}` audit events.
 - Workload identity dropped to the policy's `run_as_user` (root in the default case, via the idempotent fast-path).
-- `DegradedHandler` fires exactly as designed for the three gVisor-refused bootstrap subsystems.
+- `DegradedHandler` fires as designed for the three gVisor-refused bootstrap subsystems.
 - OCSF shorthand log file `/var/log/openshell.YYYY-MM-DD.log` accumulates structured events.
-- Landlock probe correctly reports "Unavailable" under gVisor and skips ruleset construction (cleanly, after the fix in the OpenShell commit).
+- Landlock probe correctly reports "Unavailable" under gVisor and skips ruleset construction.
 - Filesystem allow path (writes to `/tmp`) works.
 
-## 6. Known limitations
+---
 
-Three classes of caveats. Listing them up front so nobody is surprised.
+## 6. Operator walkthrough: standing up the POC on a kind cluster
+
+This is the exact sequence used on bigbox; every command is real.
+
+### 6.0. Prerequisites
+
+- A Substrate-installed kind cluster (the standard `hack/create-kind-cluster.sh` + `hack/install-ate-kind.sh --deploy-ate-system` from `agent-substrate/substrate`).
+- Linux host with cargo + docker + access to the kind-registry at `localhost:5001`.
+- `grpcurl` on PATH (`go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest`).
+- On NVIDIA-managed Linux hosts, Shorewall disabled (see `~/notes/2026-05-21-agent-substrate-kind-local-dev.md` §10).
+
+### 6.1. Build + push `ateom-gvisor` (one time per cluster)
+
+`install-ate-kind.sh` builds `atelet` but not `ateom-gvisor`. Produce + push the image:
+
+```sh
+cd ~/go/src/github.com/agent-substrate/substrate         # the substrate fork with the eth0 fix
+git checkout feat/openshell-driver-companion-v2          # or merge 9109515 onto your branch
+KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS=linux/$(go env GOARCH) \
+  ko publish --base-import-paths ./cmd/servers/ateom-gvisor
+# Capture the digest from ko's output:
+export ATEOM_IMAGE='localhost:5001/ateom-gvisor@sha256:...'
+```
+
+### 6.2. Bootstrap the OpenShell namespace + WorkerPool + supervisor template (one time)
+
+`tests/integration/run.sh` does this automatically on the first run when the `ate-openshell-m0` namespace is missing. Equivalent direct kubectl:
+
+```sh
+# Substitute __ATEOM_IMAGE__ and __SUPERVISOR_IMAGE__ from your image build
+sed -e "s|__ATEOM_IMAGE__|$ATEOM_IMAGE|g" \
+    -e "s|__SUPERVISOR_IMAGE__|$SUP_IMAGE|g" \
+    tests/integration/cluster-setup.yaml \
+  | kubectl apply -f -
+```
+
+After this, three new objects exist:
+- `Namespace/ate-openshell-m0`
+- `WorkerPool/openshell-m0-pool` (4 replicas)
+- `ActorTemplate/supervisor` (the basic sleep-loop template the live `write_path` test uses)
+
+### 6.3. Build + push the supervisor image, apply the feature-test template, exercise the harness
+
+```sh
+cd ~/go/src/github.com/dims/openshell-driver-substrate   # the new repo
+./tests/integration/run.sh
+```
+
+This will:
+1. `cargo build --release --bin openshell-sandbox-substrate` (the wrapper binary).
+2. Assemble a Docker build context (Dockerfile + wrapper + `policy.rego` + `data.yaml` + `test-workload.sh`).
+3. `docker build` + `docker push` to `localhost:5001/oshl-feature-test:latest`.
+4. `kubectl apply` the `oshl-feature-test` ActorTemplate referencing the new digest.
+5. Wait for the template's `status.phase = Ready`.
+6. Mint a fresh `ate-system/ate-controller` token, extract the cluster's trust bundle, refresh the api-server port-forward.
+7. `grpcurl ateapi.Control/CreateActor` + `ResumeActor` on a fresh actor ID.
+8. Sleep 25 s for the workload to run probes.
+9. Dump `[oshl-test]` markers from every worker pod's stdout.
+10. `SuspendActor` + `DeleteActor` to clean up.
+
+### 6.4. Run the 4 driver-side live tests
+
+```sh
+SUBSTRATE_LIVE_API_ENDPOINT=127.0.0.1:18443 \
+SUBSTRATE_LIVE_NAMESPACE=ate-openshell-m0 \
+SUBSTRATE_LIVE_CA_PATH=/tmp/ate-servicedns-ca.pem \
+SUBSTRATE_LIVE_BEARER_TOKEN_PATH=/tmp/ate-bearer.token \
+SUBSTRATE_LIVE_TLS_SERVER_NAME=api.ate-system.svc \
+SUBSTRATE_LIVE_WORKER_POOL=openshell-m0-pool \
+SUBSTRATE_LIVE_SNAPSHOTS_LOCATION=gs://ate-snapshots/ate-openshell-m0/ \
+SUBSTRATE_LIVE_RUNSC_AMD64_SHA=a397be1abc242... \
+SUBSTRATE_LIVE_RUNSC_AMD64_URL=gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc \
+SUBSTRATE_LIVE_PAUSE_IMAGE=registry.k8s.io/pause:3.10.2@sha256:f548e0e8... \
+SUBSTRATE_LIVE_TEMPLATE_NAME=supervisor \
+SUBSTRATE_LIVE_TEST_IMAGE=localhost:5001/oshl-feature-test@sha256:... \
+  cargo test --test live -- --ignored --test-threads=1
+```
+
+Each env var:
+
+| env var | meaning |
+|---|---|
+| `SUBSTRATE_LIVE_API_ENDPOINT` | host:port of `ate-api-server`. Usually `127.0.0.1:18443` (a `kubectl port-forward` of the service). |
+| `SUBSTRATE_LIVE_NAMESPACE` | The namespace your ActorTemplates + WorkerPool live in. |
+| `SUBSTRATE_LIVE_CA_PATH` | Path to the cluster's `ClusterTrustBundle` PEM. The live test reads this and constructs a tonic `ClientTlsConfig` with it. |
+| `SUBSTRATE_LIVE_BEARER_TOKEN_PATH` | Path to a JWT minted by `kubectl create token ate-controller --audience=api.ate-system.svc`. Re-read on every channel build. |
+| `SUBSTRATE_LIVE_TLS_SERVER_NAME` | Domain to match against the api-server's TLS cert SANs. Usually `api.ate-system.svc`. |
+| `SUBSTRATE_LIVE_WORKER_POOL` | Name of the `WorkerPool` the synthesized template should reference. |
+| `SUBSTRATE_LIVE_SNAPSHOTS_LOCATION` | `gs://...` (or `s3://...`) prefix where Substrate stores golden snapshots. On kind, this resolves to in-cluster rustfs. |
+| `SUBSTRATE_LIVE_RUNSC_AMD64_*` | runsc binary pin (sha256 + URL). atelet downloads + verifies before first restore. |
+| `SUBSTRATE_LIVE_PAUSE_IMAGE` | Pause container the OCI bundle uses as the actor's root. Substrate requires a digest reference. |
+| `SUBSTRATE_LIVE_TEMPLATE_NAME` | Name of the pre-provisioned template the write-path test should reuse. |
+| `SUBSTRATE_LIVE_TEST_IMAGE` | Digest-pinned image the synthesized-template test should put in `spec.template.image`. |
+
+### 6.5. Inspecting the running cluster
+
+```sh
+# All actors substrate is tracking (cluster-wide):
+kubectl ate get actors
+
+# All ActorTemplates in our namespace + their phase:
+kubectl -n ate-openshell-m0 get actortemplate
+
+# Worker pool capacity + which pods exist:
+kubectl -n ate-openshell-m0 get workerpool openshell-m0-pool -o yaml
+kubectl -n ate-openshell-m0 get pods -l ate.dev/worker-pool=openshell-m0-pool
+
+# Last snapshot URI for a specific actor (from inside the rustfs/GCS bucket):
+kubectl ate get actors -o yaml <actor-id> | grep last_snapshot
+
+# Supervisor stderr (the OCSF shorthand log) for an actor:
+kubectl -n ate-openshell-m0 logs <worker-pod>     # pod hosting the actor; from `kubectl ate get actors`
+```
+
+For ad-hoc `ateapi.Control` calls without the live test framework, use `grpcurl`:
+
+```sh
+TOKEN=$(kubectl -n ate-system create token ate-controller --audience=api.ate-system.svc)
+grpcurl -insecure \
+  -authority api.ate-system.svc \
+  -cacert /tmp/ate-servicedns-ca.pem \
+  -rpc-header "authorization: Bearer $TOKEN" \
+  -d '{}' 127.0.0.1:18443 ateapi.Control/ListActors
+```
+
+---
+
+## 7. Known limitations
+
+Three classes of caveats.
 
 ### a) Degraded mode is genuinely degraded
 
-The Linux kernel features the supervisor would normally use to harden itself in-process are turned off because gVisor refuses to implement them. Concretely:
+The Linux kernel features the supervisor would normally use to harden itself in-process are turned off because gVisor refuses to implement them:
 
-- **Network namespace isolation is off.** The supervisor's HTTP CONNECT proxy still works as a *cooperating-client* enforcement point, but **direct egress bypasses it** — a non-cooperating workload can `curl https://example.com` without going through 127.0.0.1:3128 and the supervisor will neither block nor see the request. Operators rely on the outer sandbox (gVisor's own syscall filter + Kubernetes `NetworkPolicy`) for bypass-proof egress.
-- **In-process seccomp filter is off.** gVisor is itself a syscall-filtering boundary and rejects further filter installs; the supervisor's per-policy seccomp filter does nothing in this deployment.
+- **Network namespace isolation is off.** The supervisor's HTTP CONNECT proxy still works as a *cooperating-client* enforcement point, but direct egress bypasses it — a non-cooperating workload can `curl https://example.com` without going through 127.0.0.1:3128 and the supervisor neither blocks nor sees the request. Operators rely on the outer sandbox (gVisor's own filter + K8s `NetworkPolicy`) for bypass-proof egress.
+- **In-process seccomp filter is off.** gVisor is itself a syscall-filtering boundary and rejects further filter installs.
 - **Landlock filesystem sandbox is off.** gVisor doesn't implement Landlock; the supervisor's policy `read_only`/`read_write` paths are *not* enforced at the filesystem level.
-- **Non-root `drop_privileges` is unsupported.** The wrapper relies on the supervisor's idempotent fast-path (skip `setresuid` when already at the target uid). This means `run_as_user` must equal the actor's starting uid (root, in the default template). Future work: have Substrate grant the actor `CAP_SETUID`/`CAP_SETGID` via `ActorTemplate.SecurityContext.capabilities.add` and re-enable the non-root path.
+- **Non-root `drop_privileges` is unsupported.** The wrapper relies on the supervisor's idempotent fast-path (skip `setresuid` when already at target uid). `run_as_user` must equal the actor's starting uid (root, in the default template) until Substrate's `SecurityContext.capabilities.add` plumbing is restored.
 
 None of these are bugs. They're the price of running inside a smaller, opinionated sandbox runtime. The threat model has to be re-stated: the **enforcing boundary** in this deployment is gVisor + outer cluster policy, not the OpenShell supervisor's in-process hardening.
 
@@ -147,65 +400,36 @@ The supervisor has cluster-mode features that need a real OpenShell gateway to l
 - Settings poll (toggles like `ocsf_json_enabled`).
 - Inference routing (cluster-mode route bundles).
 - Log push to a gateway.
-- SSH attach via the supervisor's Unix socket + the gateway's RelayStream.
+- SSH attach via the supervisor's Unix socket + the gateway's `RelayStream`.
+- Cross-sandbox identity (the supervisor's IDOR guard).
 
 These all compile and link; they're just not turned on because the test cluster has no gateway. Standing up a gateway pod next to the worker pool is the natural next step.
 
 ### c) Operator handshake is two steps
 
-`install-ate-kind.sh` (Substrate's installer) builds `atelet` but **not** `ateom-gvisor`. To use the new WorkerPool, the operator runs `ko publish ./cmd/servers/ateom-gvisor` once from the Substrate repo and exports the digest before the first harness run. Subsequent runs read it from the live WorkerPool spec.
+`install-ate-kind.sh` builds `atelet` but **not** `ateom-gvisor`. The first-run handshake (`ko publish` + `export ATEOM_IMAGE`) is documented in §6.1 above; once the WorkerPool exists, subsequent runs don't need it. Substrate-side upstream change worth landing: have `install-ate-kind.sh` build + push `ateom-gvisor` alongside `atelet`.
 
-Also: `kubectl ate exec` doesn't exist; observing the actor requires reading worker pod stdout (`kubectl logs`) for the supervisor's stderr-routed OCSF events. Good enough for now; not as nice as `kubectl exec`.
+---
 
-## 7. Components and where they live
-
-Three repos, all on personal forks under `github.com/dims`. Canonical `upstream` remotes (`agent-substrate/substrate`, `NVIDIA/OpenShell`) are untouched; nothing has been pushed to them yet.
-
-| repo | branch | what's there |
-|---|---|---|
-| [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) | `main` | The driver crate, the wrapper binary, the vendored proto, the live tests, the feature-observation harness. Single Cargo crate at root. CI: fmt + clippy + lib tests + release build. |
-| [`dims/OpenShell`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns-v2) | `chore/gvisor-degraded-netns-v2` | Single commit (`69d2054`) adding the trait scaffolding + `cli` module + Landlock-skip + idempotent `drop_privileges`. Behaviour-preserving. The upstreamable piece. |
-| [`dims/substrate`](https://github.com/dims/substrate/tree/feat/openshell-driver-companion-v2) | `feat/openshell-driver-companion-v2` | Single commit (`9109515`) fixing a race in `ateom-gvisor`'s eth0 handling: idempotent move + deferred rollback. Without it, a partial RunWorkload leaves eth0 stranded in the interior netns and the worker pod is bricked for subsequent actors. |
-
-The split is deliberate. The OpenShell change is the *minimum* upstreamable patch; everything substrate-specific lives in its own repo so it can evolve independently and not bloat the OpenShell tree.
-
-## 8. Building and running
-
-```sh
-# One-time, from the Substrate repo:
-KO_DOCKER_REPO=localhost:5001 ko publish --base-import-paths ./cmd/servers/ateom-gvisor
-export ATEOM_IMAGE='localhost:5001/ateom-gvisor@sha256:...'
-
-# From this repo, build + push the supervisor image, apply templates, exercise the harness:
-git clone https://github.com/dims/openshell-driver-substrate
-cd openshell-driver-substrate
-./tests/integration/run.sh
-
-# Run the 4 driver-side lifecycle tests:
-SUBSTRATE_LIVE_API_ENDPOINT=127.0.0.1:18443 \
-SUBSTRATE_LIVE_NAMESPACE=ate-openshell-m0 \
-... # full env-var list in README.md
-cargo test --test live -- --ignored --test-threads=1
-```
-
-Cargo resolves `openshell-sandbox` and `openshell-core` from the
-pinned-rev git dep on first build (~3 minutes including the build);
-subsequent builds reuse the workspace target dir.
-
-## 9. Where to next
+## 8. Where to next
 
 In rough priority order:
 
-1. **Upstream the OpenShell trait scaffolding.** Single PR against `NVIDIA/OpenShell` with the contents of commit `69d2054`. Structurally clean; zero behaviour change for default callers; opens up the same pattern for other outer-sandbox integrations (hardened K8s pods, restricted CI runners, …).
-2. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Drops the `ko publish` operator step from the first-run flow.
-3. **Stand up an OpenShell gateway in the cluster.** Lets us exercise cluster-mode features: log push, inference routing, settings poll, SSH attach. Each of those has unit tests; they just don't run E2E today.
-4. **`--enable-ocsf-jsonl` flag (SE-1).** Trivial fix; makes the JSONL audit layer usable in standalone deployments without a gateway.
-5. **`SecurityContext.capabilities.add` plumbing.** Re-enables non-root `drop_privileges` under gVisor by having Substrate grant `CAP_SETUID`/`CAP_SETGID` to the actor. The code path existed in an earlier iteration and was intentionally cut for upstream-friendliness; can be reinstated as opt-in.
-6. **GPU passthrough.** Substrate supports CDI device passthrough for runsc actors. The driver's `validate_sandbox_create` currently rejects `DriverResourceRequirements.gpu`; flipping that on is a small change once we have a test workload that needs a GPU.
-7. **Performance numbers.** We have anecdotal "about a second" for cold start. Worth measuring properly: cold restore time, warm resume time after suspend, snapshot size, memory delta, against a baseline of `runsc run` from scratch.
+1. **Upstream the OpenShell trait scaffolding.** Single PR against `NVIDIA/OpenShell` with the contents of commit `69d2054`. Structurally clean; zero behaviour change for default callers; opens up the same pattern for other outer-sandbox integrations.
+2. **Upstream the substrate eth0 fix.** Single PR against `agent-substrate/substrate` with `9109515`. The bug is not OpenShell-specific.
+3. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Removes the `ko publish` operator step.
+4. **Stand up an OpenShell gateway in the cluster.** Lets us exercise cluster-mode features end-to-end.
+5. **Streaming `WatchActors`.** Re-vendor the proto, switch `watch_sandboxes` from the 2 s poll to the streaming RPC.
+6. **GPU passthrough.** Remove the `validate_sandbox_create` reject and plumb `DriverResourceRequirements.gpu` into `ActorTemplate.spec.containers[*].resources`.
+7. **`--enable-ocsf-jsonl` flag (SE-1).** Trivial fix; makes the JSONL audit layer usable in standalone deployments without a gateway.
+8. **`SecurityContext.capabilities.add` plumbing.** Re-enables non-root `drop_privileges` under gVisor by having Substrate grant `CAP_SETUID`/`CAP_SETGID` to the actor.
+9. **Performance numbers.** We have anecdotal "about a second" for cold start. Worth measuring properly: cold restore time, warm resume time after suspend, snapshot size, memory delta, against a baseline of `runsc run` from scratch.
 
-## 10. Further reading
+---
 
-- Per-feature evidence + sharp-edges register: `~/notes/2026-05-23-openshell-features-findings.md` (in this repo's author's local notes; happy to share). Lists each Tier-1/2 test with status, the SE-1..SE-7 enumeration of caveats, and the disposition of each.
+## 9. Further reading
+
+- Per-feature evidence + sharp-edges register: `~/notes/2026-05-23-openshell-features-findings.md`. Lists each Tier-1/2 test with status, the SE-1..SE-7 enumeration of caveats, and the disposition of each.
 - Current snapshot of branch tips, commit SHAs, and cluster fixture: `~/notes/2026-05-23-openshell-on-substrate-state.md`.
 - Cluster bring-up runbook (kind on macOS, plus the Shorewall recovery recipe for NVIDIA-managed Linux hosts): `~/notes/2026-05-21-agent-substrate-kind-local-dev.md`.
+- Original feature-test plan: `~/notes/2026-05-23-openshell-features-test-plan.md`.
