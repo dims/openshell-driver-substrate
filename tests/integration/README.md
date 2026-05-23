@@ -16,7 +16,8 @@ exercises the supervisor side.
 | `test-workload.sh` | Workload command line; runs probes (fs read/write, proxy CONNECT, direct egress, supervisor log inspection) and prints `[oshl-test] <key>: <value>` lines to stderr so `kubectl logs` of the worker pod surfaces them. |
 | `cluster-setup.yaml` | One-shot bootstrap (namespace, WorkerPool, basic `supervisor` template). Applied only on the first run; `run.sh` guards on namespace presence. WorkerPool's `ateomImage` is substituted at apply time from the `ATEOM_IMAGE` env var. |
 | `actor-template.yaml` | Pre-provisioned `oshl-feature-test` ActorTemplate that wraps `test-workload.sh`. |
-| `build-image.sh` | Build + push helper. Runs on a Linux host with cargo + docker + access to the kind-registry. Pulls `crates/openshell-sandbox/data/sandbox-policy.rego` into the build context. |
+| `policy.rego` | Canonical sandbox policy vendored from `dims/OpenShell@69d2054:crates/openshell-sandbox/data/sandbox-policy.rego`. Baked into the supervisor image at `/etc/openshell/policy.rego`. |
+| `build-image.sh` | Build + push helper. Runs on a Linux host with cargo + docker + access to the kind-registry. Builds the `openshell-sandbox-substrate` wrapper and copies the vendored `policy.rego` + `data.yaml` + `test-workload.sh` into the build context. |
 | `run.sh` | End-to-end driver: builds the supervisor image, applies the templates, spawns an actor via `grpcurl`, waits, dumps worker pod logs filtered for `[oshl-test]`, suspends + deletes. |
 
 ## Operator flow
