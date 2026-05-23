@@ -6,10 +6,10 @@ for OpenShell.
 This repository depends on a small change in OpenShell that adds an
 operator-opt-in escape hatch (`OPENSHELL_BEST_EFFORT_FAILURES`) so the
 supervisor tolerates the bootstrap subsystems gVisor degrades. The
-change is one commit on
-[`dims/OpenShell#chore/gvisor-degraded-netns-v2`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns-v2)
-(3 files, +51/-7). Cargo's `openshell-core` dep is pinned to that
-commit.
+change is filed upstream as
+[`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548)
+(3 files, +51/-7). Cargo's `openshell-core` dep is pinned to the
+corresponding `dims/OpenShell` fork tip.
 
 ## What's in the box
 
@@ -79,10 +79,10 @@ Operator first-run:
 Subsequent runs: `./tests/integration/run.sh` (the `ATEOM_IMAGE` env
 var is captured in the live `WorkerPool` spec on first apply).
 
-## Companion change in OpenShell
+## Companion changes upstream
 
-The driver relies on `OPENSHELL_BEST_EFFORT_FAILURES` being recognised
-by the supervisor. The single-commit branch
-[`dims/OpenShell@b6d3a35`](https://github.com/dims/OpenShell/commit/b6d3a35facab8e597a516ebf4ddd2989ad558ce6)
-adds the env-var gate (3 files, +51/-7) with strict defaults
-preserved for upstream callers.
+| PR | Effect |
+|---|---|
+| [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` | The `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate this crate depends on. 3 files, +51/-7. Default strict; opt-in via the env var. |
+| [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | `ateom-gvisor` `eth0` move/restore idempotency + deferred rollback. Without it, the test harness alternates between green and red runs. |
+| [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` automatically, so a `WorkerPool` is usable out of `--deploy-ate-system`. Closes the manual `ko publish` operator step. |

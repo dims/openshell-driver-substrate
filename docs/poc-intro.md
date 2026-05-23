@@ -2,8 +2,9 @@
 
 **Status:** working end-to-end on a kind cluster as of 2026-05-23.
 **Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (tip `2b68a6d`).
-**Companion change in OpenShell:** [`dims/OpenShell@b6d3a35`](https://github.com/dims/OpenShell/commit/b6d3a35facab8e597a516ebf4ddd2989ad558ce6) (single commit, 3 files / +51/-7, env-var-gated, upstreamable).
-**Companion change in Agent Substrate:** [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) (single commit, eth0 race fix in `ateom-gvisor`).
+**Companion change in OpenShell:** [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` — single commit, 3 files / +51/-7, env-var-gated, upstreamable.
+**Companion change in Agent Substrate:** [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) — single commit, eth0 race fix in `ateom-gvisor`.
+**Operator-handshake follow-up:** [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) — `install-ate-kind.sh` builds + pushes the `ateom-gvisor` image so a `WorkerPool` is usable straight out of `--deploy-ate-system`.
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
 
 ---
@@ -83,8 +84,9 @@ Three repos co-operate to produce the boxed picture above:
 | component | repo | what it is |
 |---|---|---|
 | Compute driver + integration harness | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) | The new repo. A Rust crate (the driver) plus a feature-observation test harness that builds the patched supervisor image from the OpenShell source tree. **This is the bulk of the POC.** |
-| Env-var-gated bootstrap (one commit) | [`dims/OpenShell@b6d3a35`](https://github.com/dims/OpenShell/commit/b6d3a35facab8e597a516ebf4ddd2989ad558ce6) | Adds the `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate + idempotent `drop_privileges` fast-path. 3 files, +51/-7. **Default stays strict — zero behavioural change for upstream callers.** Upstreamable as-is. |
-| ateom-gvisor eth0 race fix (one commit) | [`dims/substrate@9109515`](https://github.com/dims/substrate/commit/9109515b082ac80d72de452ccf912cf0990fc829) | A substrate-side bug fix the POC exposed. **Not OpenShell-specific.** Upstreamable as-is. |
+| Env-var-gated bootstrap (one commit) | [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` | Adds the `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate + idempotent `drop_privileges` fast-path. 3 files, +51/-7. **Default stays strict — zero behavioural change for upstream callers.** Upstreamable as-is. |
+| ateom-gvisor eth0 race fix (one commit) | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | A substrate-side bug fix the POC exposed. **Not OpenShell-specific.** Upstreamable as-is. |
+| Operator-handshake follow-up | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` so a `WorkerPool` is usable straight out of `--deploy-ate-system`. Closes the manual `ko publish` step documented in §7c. |
 
 The driver doesn't talk to gVisor, atelet, or ateom-gvisor directly — only `ateapi.Control`. Everything below that is Substrate's internal layering.
 
@@ -240,7 +242,7 @@ Supervisor-side coverage: a feature-observation harness (`tests/integration/`) b
 - OPA policy file loaded; allow decisions return `200`, deny decisions return `403`, both with `OCSF HTTP:GET […] {ALLOWED,DENIED}` audit events.
 - Workload identity dropped to the policy's `run_as_user` (via the idempotent `drop_privileges` fast-path when the actor already runs at the target uid).
 - The supervisor's bootstrap subsystems (network-namespace, supervisor-seccomp, workload-seccomp) emit `WARN openshell_sandbox: Sandbox bootstrap subsystem unavailable; continuing in best-effort mode (operator opted in via OPENSHELL_BEST_EFFORT_FAILURES)` and proceed past the gVisor-induced syscall failures.
-- Landlock probe reports "Unavailable" under gVisor. (Note: the supervisor's own emit-only-when-unavailable Landlock log fix is deferred out of `b6d3a35` and is queued as a small follow-up commit.)
+- Landlock probe reports "Unavailable" under gVisor. (Note: the supervisor's own emit-only-when-unavailable Landlock log fix is deferred out of #1548 and is queued as a small follow-up commit.)
 
 ### 5.2. Wired but not exercised yet
 
@@ -265,7 +267,7 @@ Supervisor-side coverage: a feature-observation harness (`tests/integration/`) b
 
 The driver crate itself stands alone in the new repo. The other two pieces are surgical single-commit changes to the canonical projects.
 
-### 6.1. OpenShell: `dims/OpenShell@b6d3a35`
+### 6.1. OpenShell: [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`
 
 **Scope.** 3 files in `crates/openshell-sandbox/src/`, net +51/−7. Two orthogonal threads, each motivated by needing the supervisor to boot inside an outer sandbox without giving up the supervisor's value-add:
 
@@ -281,7 +283,7 @@ The driver injects `OPENSHELL_BEST_EFFORT_FAILURES=1` into every `ActorTemplate.
 
 A previous iteration of this change (`dims/OpenShell@69d2054`, preserved at the `chore/gvisor-degraded-netns-v2-trait` branch as a rollback point) used a `SandboxFailureHandler` trait + a `set_failure_handler()` registration call + a substrate-side `DegradedHandler` impl + a wrapper binary that registered the handler. That iteration was 6 files / +480/-375 and required a `main.rs → cli.rs` extraction so the wrapper binary could reuse the CLI. The env-var design collapses all of that to a single env-var read, no API change, no public surface added to OpenShell. Also bundled into the previous iteration but **deferred** out of `b6d3a35` to keep the diff minimal: a `landlock::prepare()` probe-and-skip that would replace the misleading "Applying Landlock"/"Built ruleset" log pair with a single `OCSF CONFIG:SKIPPED` event when the kernel doesn't implement Landlock. Strictly cosmetic; functionally fs sandboxing is gone under gVisor either way. Can land as a small follow-up commit (~21 lines).
 
-### 6.2. Substrate: `dims/substrate@9109515`
+### 6.2. Substrate: [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66)
 
 **Scope.** 1 file, +57/−2, in `cmd/servers/ateom-gvisor/ateom-gvisor.go`. Fixes an `eth0`-handling race in `RunWorkload` / `RestoreWorkload`.
 
@@ -357,10 +359,9 @@ This is the exact sequence used on bigbox; every command is real.
 `install-ate-kind.sh` builds `atelet` but not `ateom-gvisor`. Produce + push the image:
 
 ```sh
-cd ~/go/src/github.com/agent-substrate/substrate         # the substrate fork with the eth0 fix
-git checkout feat/openshell-driver-companion-v2          # or merge 9109515 onto your branch
+cd ~/go/src/github.com/agent-substrate/substrate         # apply PR #66 first if not yet merged upstream
 KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS=linux/$(go env GOARCH) \
-  ko publish --base-import-paths ./cmd/servers/ateom-gvisor
+  ko publish --base-import-paths ./cmd/ateom-gvisor
 # Capture the digest from ko's output:
 export ATEOM_IMAGE='localhost:5001/ateom-gvisor@sha256:...'
 ```
@@ -471,9 +472,9 @@ grpcurl -insecure \
 
 In rough priority order:
 
-1. **Upstream the OpenShell env-var gate.** Single PR against `NVIDIA/OpenShell` with the contents of commit `b6d3a35`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately.
-2. **Upstream the substrate eth0 fix.** Single PR against `agent-substrate/substrate` with `9109515`. The bug is not OpenShell-specific.
-3. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Removes the `ko publish` operator step.
+1. **Upstream the OpenShell env-var gate.** Filed as [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately.
+2. **Upstream the substrate eth0 fix.** Filed as [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66). The bug is not OpenShell-specific.
+3. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Filed as [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67). Removes the manual `ko publish` operator step.
 4. **Stand up an OpenShell gateway in the cluster.** Lets us exercise cluster-mode features end-to-end (the §7b gap).
 5. **Streaming `WatchActors`.** Re-vendor the proto, switch `watch_sandboxes` from the 2 s poll to the streaming RPC.
 6. **GPU passthrough.** Remove the `validate_sandbox_create` reject and plumb `DriverResourceRequirements.gpu` into `ActorTemplate.spec.containers[*].resources`.
