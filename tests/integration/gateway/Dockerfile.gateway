@@ -1,0 +1,40 @@
+# OpenShell gateway image, multi-stage:
+#   builder — full Rust toolchain + protoc + libsqlite3-dev to build openshell-gateway.
+#   runtime — debian-slim with libsqlite3-0 + ca-certificates only; binary copied in.
+#
+# Built from the `dims/OpenShell#chore/gvisor-degraded-netns-v3` source tree,
+# expected at `./OpenShell-v3/` in the build context.
+
+ARG RUST_VERSION=1.95.0
+ARG DEBIAN_VERSION=bookworm
+
+# ─── builder ──────────────────────────────────────────────────────────────
+FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        protobuf-compiler \
+        libsqlite3-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY OpenShell-v3 /src
+
+# Build the gateway binary only. Workspace-wide builds pull in the policy
+# prover (Z3-dependent) and the supervisor (long Linux-only build); we
+# need neither in the gateway image.
+RUN cargo build --release -p openshell-server --bin openshell-gateway
+
+# ─── runtime ──────────────────────────────────────────────────────────────
+FROM debian:${DEBIAN_VERSION}-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libsqlite3-0 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/openshell-gateway /usr/local/bin/openshell-gateway
+RUN useradd --system --uid 1000 --user-group --no-create-home openshell \
+ && mkdir -p /var/openshell /etc/openshell /etc/openshell-jwt \
+ && chown -R openshell:openshell /var/openshell
+
+USER openshell
+ENTRYPOINT ["/usr/local/bin/openshell-gateway"]

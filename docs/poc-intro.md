@@ -326,17 +326,19 @@ The Linux kernel features the supervisor would normally use to harden itself in-
 
 None of these are bugs. They're the price of running inside a smaller, opinionated sandbox runtime. The threat model has to be re-stated: the **enforcing boundary** in this deployment is gVisor + outer cluster policy, not the OpenShell supervisor's in-process hardening.
 
-### b) Gateway-driven features are not exercised yet
+### b) Gateway-driven features — three verified, two deferred (v3 update)
 
-The supervisor has cluster-mode features that need a real OpenShell gateway to land in the actor's network reach:
+The supervisor's cluster-mode features have now been exercised end-to-end against a real `openshell-gateway` Deployment running alongside the worker pool in `ate-openshell-m0` (the v3 POC, local-only). Status per feature:
 
-- Settings poll (toggles like `ocsf_json_enabled`).
-- Inference routing (cluster-mode route bundles).
-- Log push to a gateway.
-- SSH attach via the supervisor's Unix socket + the gateway's `RelayStream`.
-- Cross-sandbox identity (the supervisor's IDOR guard).
+| Feature | Status | Notes |
+|---|---|---|
+| Settings poll (`GetSandboxConfig`) | **PASS** | Supervisor polls every ~10 s; 200 responses throughout the actor lifetime. |
+| Inference routing (`GetInferenceBundle`) | **PASS** | Supervisor fetches the route bundle at startup; the cluster bundle is empty in our config (no upstreams), so routing stays disabled but the wire path works. |
+| Log push (`PushSandboxLogs`) | **PASS** | Supervisor streams every OCSF event as a separate RPC; ~17 k successful calls in 30 s of normal supervisor traffic. |
+| SSH attach via `RelayStream` | DEFERRED | Wiring is present; exercising it needs an end-user-side SSH client that drives the gateway's `RelayStream` RPC. |
+| Cross-sandbox identity guard | DEFERRED | Requires two simultaneous actors with mismatched JWT `sub` claims. POC templates use a fixed `sub`. |
 
-These all compile and link; they're just not turned on because the test cluster has no gateway. Standing up a gateway pod next to the worker pool is the natural next step.
+The full v3 harness (`tests/integration/gateway/` in the v3 worktree) deploys the gateway with a `docker:28-dind` sidecar, generates Ed25519 JWT signing material, renders templates with three new env vars (`OPENSHELL_ENDPOINT`, `OPENSHELL_SANDBOX_TOKEN`, `OPENSHELL_SANDBOX_ID`), spawns a test actor, and produces a PASS/FAIL summary. See `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md` §7b verification for sharp edges (SE-8 through SE-13) discovered while standing the gateway up.
 
 ### c) Operator handshake is two steps
 

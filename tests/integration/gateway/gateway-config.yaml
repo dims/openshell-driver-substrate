@@ -1,0 +1,66 @@
+# ConfigMap holding gateway.toml.
+# The gateway reads /etc/openshell/gateway.toml at startup; CLI flags on the
+# Deployment args override individual values where applicable.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshell-gateway-config
+  namespace: ate-openshell-m0
+data:
+  gateway.toml: |
+    [openshell]
+    version = 1
+
+    [openshell.gateway]
+    bind_address          = "0.0.0.0:50051"
+    health_bind_address   = "0.0.0.0:8080"
+    metrics_bind_address  = "0.0.0.0:9090"
+    log_level             = "info"
+    sandbox_namespace     = "ate-openshell-m0"
+    default_image         = "alpine:3"
+    supervisor_image      = "localhost:5001/oshl-feature-test:latest"
+    # Both drivers configured so the in-cluster JWT path (which needs
+    # `[openshell.drivers.kubernetes]` to verify SA tokens for
+    # IssueSandboxToken) is satisfied. Neither driver is exercised in
+    # this POC — sandboxes are created via ateapi.Control.CreateActor
+    # bypassing the gateway's create_sandbox flow.
+    compute_drivers       = ["docker", "kubernetes"]
+    disable_tls           = true
+    enable_loopback_service_http = true
+    # `service_account_name` is required by the shared driver-defaults
+    # schema when kubernetes is enabled. The actual SA never matters.
+    service_account_name  = "default"
+
+    [openshell.gateway.auth]
+    allow_unauthenticated_users = true
+
+    # JWT verification is enabled so the gateway can extract a sandbox
+    # principal from the OPENSHELL_SANDBOX_TOKEN the supervisor presents.
+    # Without this, gateway RPCs that need a sandbox principal
+    # (GetInferenceBundle, GetSandboxConfig, PushSandboxLogs, …) return
+    # PermissionDenied.
+    [openshell.gateway.gateway_jwt]
+    signing_key_path = "/etc/openshell-jwt/signing.pem"
+    public_key_path  = "/etc/openshell-jwt/public.pem"
+    kid_path         = "/etc/openshell-jwt/kid"
+    gateway_id       = "openshell-poc"
+    ttl_secs         = 3600
+
+    # The Docker driver is configured but never invoked by this POC;
+    # sandboxes are created via the substrate driver path (grpcurl against
+    # ateapi.Control), bypassing the gateway's create_sandbox flow. The
+    # driver still has to be configured so the gateway can boot.
+    [openshell.drivers.docker]
+    default_image     = "alpine:3"
+    image_pull_policy = "IfNotPresent"
+    sandbox_namespace = "ate-openshell-m0"
+    grpc_endpoint     = "http://openshell-gateway.ate-openshell-m0.svc.cluster.local:50051"
+    supervisor_bin    = "/var/openshell/supervisor/openshell-sandbox"
+
+    # The Kubernetes driver is configured so the gateway's in-cluster
+    # JWT bootstrap path is satisfied. Same stub posture as docker — the
+    # driver itself is never invoked.
+    [openshell.drivers.kubernetes]
+    grpc_endpoint              = "http://openshell-gateway.ate-openshell-m0.svc.cluster.local:50051"
+    service_account_name       = "default"
+    supervisor_sideload_method = "init-container"

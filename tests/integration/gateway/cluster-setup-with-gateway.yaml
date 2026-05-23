@@ -1,0 +1,70 @@
+# v3: cluster-setup.yaml variant that wires the supervisor template to the
+# OpenShell gateway. Used by run-gateway-integration.sh; the original
+# cluster-setup.yaml (no gateway) is unchanged.
+#
+# Placeholders filled in at apply time:
+#   __ATEOM_IMAGE__       — ateom-gvisor image digest
+#   __SUPERVISOR_IMAGE__  — supervisor image digest
+#   __GATEWAY_ENDPOINT__  — http://openshell-gateway.ate-openshell-m0.svc.cluster.local:50051
+#   __SANDBOX_TOKEN__     — Ed25519-signed JWT minted by mint-sandbox-token.py
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-openshell-m0
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: openshell-m0-pool
+  namespace: ate-openshell-m0
+spec:
+  replicas: 4
+  ateomImage: __ATEOM_IMAGE__
+---
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: supervisor
+  namespace: ate-openshell-m0
+spec:
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  containers:
+    - name: supervisor
+      image: __SUPERVISOR_IMAGE__
+      command:
+        - /usr/local/bin/openshell-sandbox
+        - --policy-rules
+        - /etc/openshell/policy.rego
+        - --policy-data
+        - /etc/openshell/data.yaml
+        - --log-level
+        - info
+        - --openshell-endpoint
+        - __GATEWAY_ENDPOINT__
+        - --
+        - /bin/sh
+        - -c
+        - while true; do sleep 60; done
+      env:
+        - name: OPENSHELL_BEST_EFFORT_FAILURES
+          value: "1"
+        - name: OPENSHELL_ENDPOINT
+          value: __GATEWAY_ENDPOINT__
+        - name: OPENSHELL_SANDBOX_TOKEN
+          value: __SANDBOX_TOKEN__
+        # Required for the supervisor to enter cluster-mode and dial the
+        # gateway. Pre-provisioned templates can't carry per-actor IDs;
+        # use a fixed POC value and mint the JWT with a matching `sub`
+        # claim. F5 IDOR verification needs per-actor IDs (separate path).
+        - name: OPENSHELL_SANDBOX_ID
+          value: poc-sandbox
+  snapshotsConfig:
+    location: gs://ate-snapshots/ate-openshell-m0/
+  workerPoolRef:
+    name: openshell-m0-pool
+    namespace: ate-openshell-m0
+  runsc:
+    amd64:
+      sha256Hash: a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
+      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc

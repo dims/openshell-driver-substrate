@@ -1,0 +1,171 @@
+# OpenShell gateway Deployment + Service for the §7b POC.
+#
+# Two replicas of the gateway are unnecessary at POC scale; one is enough.
+# The gateway is stateless apart from its SQLite DB, which lives on an
+# emptyDir for the POC (state does not survive pod restart — acceptable).
+#
+# The image digest is filled in by `run-gateway.sh` at apply time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openshell-gateway
+  namespace: ate-openshell-m0
+  labels:
+    app: openshell-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openshell-gateway
+  template:
+    metadata:
+      labels:
+        app: openshell-gateway
+    spec:
+      # The gateway treats the presence of /var/run/secrets/kubernetes.io/
+      # as a signal to enable Kubernetes-driver SA-token bootstrap. We
+      # neither configure nor invoke the kubernetes driver in the §7b POC,
+      # so disable the automount and let the gateway run in standalone
+      # mode.
+      automountServiceAccountToken: false
+      initContainers:
+        # The Docker driver reads `supervisor_bin` end-to-end at startup
+        # to embed it into sandbox containers. We never invoke the driver,
+        # but the gateway aborts on an empty/missing stub. Copying a small
+        # valid ELF binary (busybox's /bin/true) at the expected path
+        # satisfies the check.
+        - name: supervisor-stub
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /var/openshell/supervisor
+              cp /bin/true /var/openshell/supervisor/openshell-sandbox
+              chmod 0755 /var/openshell/supervisor/openshell-sandbox
+              ls -la /var/openshell/supervisor/openshell-sandbox
+          volumeMounts:
+            - name: gateway-data
+              mountPath: /var/openshell
+      containers:
+        # docker-in-docker sidecar — provides /var/run/docker.sock so the
+        # gateway's Docker compute-driver initialisation succeeds. The
+        # gateway never actually creates sandboxes through this driver in
+        # the §7b POC (sandboxes are created directly via ateapi.Control);
+        # the sidecar exists only to satisfy the gateway's boot-time
+        # driver-init check.
+        - name: dockerd
+          image: docker:28-dind
+          securityContext:
+            privileged: true
+          # Run dockerd in the background and chmod the socket so the
+          # gateway container (uid 1000, group 1000) can connect. The
+          # tini-style trap keeps the container alive while dockerd serves.
+          command:
+            - sh
+            - -c
+            - |
+              dockerd-entrypoint.sh dockerd \
+                  --storage-driver=vfs \
+                  --iptables=false &
+              DOCKERD_PID=$!
+              # Wait for socket to appear, then loosen permissions.
+              for _ in $(seq 1 30); do
+                if [ -S /var/run/docker.sock ]; then
+                  chmod 0666 /var/run/docker.sock
+                  break
+                fi
+                sleep 1
+              done
+              wait "$DOCKERD_PID"
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -S /var/run/docker.sock && [ -r /var/run/docker.sock ]"]
+            initialDelaySeconds: 5
+            periodSeconds: 2
+        - name: gateway
+          image: __GATEWAY_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /etc/openshell/gateway.toml
+            - --drivers
+            - docker
+            - --disable-tls
+            - --db-url
+            - "sqlite:///var/openshell/gateway.db?mode=rwc"
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: health
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/openshell
+              readOnly: true
+            - name: gateway-jwt
+              mountPath: /etc/openshell-jwt
+              readOnly: true
+            - name: gateway-data
+              mountPath: /var/openshell
+            - name: docker-sock
+              mountPath: /var/run
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: openshell-gateway-config
+        - name: gateway-jwt
+          secret:
+            secretName: openshell-gateway-jwt
+            # 0444 (world-readable) — the gateway runs as uid 1000 and
+            # isn't in the default root group. POC posture only.
+            defaultMode: 0444
+        - name: gateway-data
+          emptyDir: {}
+        - name: docker-sock
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-gateway
+  namespace: ate-openshell-m0
+spec:
+  type: ClusterIP
+  selector:
+    app: openshell-gateway
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      appProtocol: grpc
+    - name: health
+      port: 8080
+      targetPort: health
+    - name: metrics
+      port: 9090
+      targetPort: metrics
