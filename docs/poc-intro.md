@@ -165,7 +165,7 @@ Three repos, all on personal forks under `github.com/dims`. Canonical `upstream`
 |---|---|---|
 | [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) | `main` | The driver crate, the wrapper binary, the vendored proto, the live tests, the feature-observation harness. Single Cargo crate at root. CI: fmt + clippy + lib tests + release build. |
 | [`dims/OpenShell`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns-v2) | `chore/gvisor-degraded-netns-v2` | Single commit (`69d2054`) adding the trait scaffolding + `cli` module + Landlock-skip + idempotent `drop_privileges`. Behaviour-preserving. The upstreamable piece. |
-| [`dims/substrate`](https://github.com/dims/substrate/tree/feat/openshell-driver-companion-v2) | `feat/openshell-driver-companion-v2` | Single commit (`6234697`) fixing a race in `ateom-gvisor`'s eth0 handling: idempotent move + deferred rollback. Without it, a partial RunWorkload leaves eth0 stranded in the interior netns and the worker pod is bricked for subsequent actors. |
+| [`dims/substrate`](https://github.com/dims/substrate/tree/feat/openshell-driver-companion-v2) | `feat/openshell-driver-companion-v2` | Single commit (`9109515`) fixing a race in `ateom-gvisor`'s eth0 handling: idempotent move + deferred rollback. Without it, a partial RunWorkload leaves eth0 stranded in the interior netns and the worker pod is bricked for subsequent actors. |
 
 The split is deliberate. The OpenShell change is the *minimum* upstreamable patch; everything substrate-specific lives in its own repo so it can evolve independently and not bloat the OpenShell tree.
 
