@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "openshell-driver-substrate"
+description = "Agent Substrate compute driver for OpenShell"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/dims/openshell-driver-substrate"
+build = "build.rs"
+
+[dependencies]
+# OpenShell deps via git, pinned to the post-split single-commit branch
+# tip on the OpenShell fork (`chore/gvisor-degraded-netns-v2`). The pinned
+# commit is the one that lands the `SandboxFailureHandler` trait, the
+# `cli` module extraction, and the Landlock-skip fix that the wrapper
+# binary in this crate depends on.
+openshell-core    = { git = "https://github.com/dims/OpenShell", rev = "69d205479edf8443ab06e28458b350c0d4613fd9" }
+openshell-sandbox = { git = "https://github.com/dims/OpenShell", rev = "69d205479edf8443ab06e28458b350c0d4613fd9" }
+
+tokio = { version = "1.43", features = ["full"] }
+# `tls-native-roots` pulls in tonic's rustls-based TLS stack with the
+# host's system trust roots, which is the minimum needed to dial
+# https://ate-api-server endpoints under a custom CA.
+tonic = { version = "0.12", features = ["transport", "tls", "tls-native-roots"] }
+prost = "0.13"
+prost-types = "0.13"
+futures = "0.3"
+tokio-stream = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+kube = { version = "0.90", features = ["runtime", "derive"] }
+# `schemars` feature is required so the CRD-mirror types in
+# `template.rs` can derive `JsonSchema` over k8s-openapi types like
+# ContainerPort, EnvVar, ObjectReference.
+k8s-openapi = { version = "0.21.1", features = ["v1_26", "schemars"] }
+schemars = "0.8"
+
+[build-dependencies]
+tonic-build = "0.12"
+protobuf-src = "1.1.0"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "openshell-sandbox-substrate"
+path = "src/bin/openshell-sandbox-substrate.rs"

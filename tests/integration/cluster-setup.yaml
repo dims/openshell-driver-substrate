@@ -1,0 +1,58 @@
+# One-shot bootstrap for the ate-openshell-m0 demo namespace. Applied
+# by run.sh before tests; idempotent under `kubectl apply`. The two
+# placeholders are filled in by run.sh:
+#
+#   __ATEOM_IMAGE__   the ateom-gvisor image digest produced by
+#                     hack/install-ate-kind.sh (read from atelet's
+#                     deployed pod spec)
+#   __SUPERVISOR_IMAGE__   the supervisor image built by build-image.sh
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ate-openshell-m0
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: openshell-m0-pool
+  namespace: ate-openshell-m0
+spec:
+  replicas: 4
+  ateomImage: __ATEOM_IMAGE__
+---
+# Pre-provisioned ActorTemplate for the basic write-path live test
+# (live_write_path_round_trip). The default workload is a sleep loop;
+# the live test only exercises the lifecycle (create/get/stop/delete),
+# not the supervisor's value-add.
+apiVersion: ate.dev/v1alpha1
+kind: ActorTemplate
+metadata:
+  name: supervisor
+  namespace: ate-openshell-m0
+spec:
+  pauseImage: registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4
+  containers:
+    - name: supervisor
+      image: __SUPERVISOR_IMAGE__
+      command:
+        - /usr/local/bin/openshell-sandbox
+        - --policy-rules
+        - /etc/openshell/policy.rego
+        - --policy-data
+        - /etc/openshell/data.yaml
+        - --log-level
+        - info
+        - --
+        - /bin/sh
+        - -c
+        - while true; do sleep 60; done
+  snapshotsConfig:
+    location: gs://ate-snapshots/ate-openshell-m0/
+  workerPoolRef:
+    name: openshell-m0-pool
+    namespace: ate-openshell-m0
+  runsc:
+    amd64:
+      sha256Hash: a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63
+      url: gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc
