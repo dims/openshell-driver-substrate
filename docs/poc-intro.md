@@ -474,9 +474,9 @@ grpcurl -insecure \
 
 In rough priority order:
 
-1. **Upstream the OpenShell env-var gate.** Filed as [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately.
-2. **Upstream the substrate eth0 fix.** Filed as [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66). The bug is not OpenShell-specific.
-3. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Filed as [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67). Removes the manual `ko publish` operator step.
+1. **~~Upstream the OpenShell env-var gate.~~** Filed as [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately. *(awaiting review)*
+2. **~~Upstream the substrate eth0 fix.~~** Filed as [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66). The bug is not OpenShell-specific. *(green CI, awaiting review)*
+3. **~~Land an `ateom-gvisor` build path in `install-ate-kind.sh`~~** (substrate-side). Filed as [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67). Removes the manual `ko publish` operator step. *(green CI, awaiting review)*
 4. **~~Stand up an OpenShell gateway in the cluster.~~** Done. Harness landed on `main` as commit `b7b059b` under `tests/integration/gateway/`. F1/F2/F3 PASS-verified; F4 (SSH attach) and F5 (cross-sandbox IDOR) deferred until the harness grows an external SSH driver / per-actor token plumbing.
 5. **Streaming `WatchActors`.** Re-vendor the proto, switch `watch_sandboxes` from the 2 s poll to the streaming RPC.
 6. **GPU passthrough.** Remove the `validate_sandbox_create` reject and plumb `DriverResourceRequirements.gpu` into `ActorTemplate.spec.containers[*].resources`.
