@@ -1,36 +1,34 @@
 # openshell-driver-substrate
 
 Agent Substrate (gVisor + checkpoint/restore via runsc) compute driver
-for OpenShell, plus the substrate-aware supervisor wrapper binary that
-lets the OpenShell sandbox actually boot inside a Substrate gVisor
-actor in degraded mode.
+for OpenShell.
 
-This repository depends on a small trait-scaffolding change in
-OpenShell that lives on
+This repository depends on a small change in OpenShell that adds an
+operator-opt-in escape hatch (`OPENSHELL_BEST_EFFORT_FAILURES`) so the
+supervisor tolerates the bootstrap subsystems gVisor degrades. The
+change is one commit on
 [`dims/OpenShell#chore/gvisor-degraded-netns-v2`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns-v2)
-(single commit, upstream-shaped). Cargo dependencies are pinned to
-that exact commit.
+(3 files, +51/-7). Cargo's `openshell-core` dep is pinned to that
+commit.
 
 ## What's in the box
 
 | path | what |
 |---|---|
-| `src/lib.rs` | `SubstrateComputeDriver` — implements OpenShell's `ComputeDriver` gRPC trait against Substrate's `ateapi.Control`. |
-| `src/template.rs` | `kube-rs` mirror of Substrate's `ate.dev/v1alpha1 ActorTemplate` CRD; just enough fields for the driver to synthesize + wait for `Ready`. |
-| `src/degraded.rs` | `DegradedHandler` — implementation of `openshell_sandbox::SandboxFailureHandler` that warns + continues when gVisor refuses the supervisor's `unshare(CLONE_NEWNET)` / `seccomp(SECCOMP_SET_MODE_FILTER)`. |
-| `src/bin/openshell-sandbox-substrate.rs` | Drop-in supervisor binary: registers `DegradedHandler`, then delegates to `openshell_sandbox::cli::run()`. CLI surface is identical to upstream `openshell-sandbox`. |
+| `src/lib.rs` | `SubstrateComputeDriver` — implements OpenShell's `ComputeDriver` gRPC trait against Substrate's `ateapi.Control`. The driver synthesizes `ate.dev/v1alpha1 ActorTemplate` resources and injects `OPENSHELL_BEST_EFFORT_FAILURES=1` into the supervisor container's env. |
+| `src/template.rs` | `kube-rs` mirror of Substrate's `ActorTemplate` CRD; just the fields the driver writes and waits on. |
 | `proto/ateapi.proto` | Vendored from `agent-substrate/substrate`; `build.rs` runs `tonic_build` over it. |
 | `tests/live.rs` | Four live integration tests against a real `ate-api-server` (`#[ignore]`d; gated on `SUBSTRATE_LIVE_*` env vars). |
-| `tests/integration/` | Feature-observation harness: builds a feature-test supervisor image, applies templates, spawns an actor, dumps `[oshl-test]` markers from worker pod logs. |
+| `tests/integration/` | Feature-observation harness: builds the patched supervisor image, applies templates, spawns an actor, dumps `[oshl-test]` markers from worker pod logs. |
 
 ## Build
 
 ```sh
-cargo build --release --bin openshell-sandbox-substrate
+cargo build --release
 ```
 
-Cargo resolves `openshell-core` + `openshell-sandbox` from the
-pinned-rev git dep on first build; subsequent builds are cached.
+Cargo resolves `openshell-core` from the pinned-rev git dep on first
+build; subsequent builds are cached.
 
 Unit tests (no cluster required):
 ```sh
@@ -65,6 +63,13 @@ SUBSTRATE_LIVE_TEST_IMAGE=localhost:5001/oshl-feature-test@sha256:... \
 the templates it depends on, spawns an actor via `grpcurl`, and dumps
 the `[oshl-test]` markers from the worker pod's stdout for inspection.
 
+The supervisor binary is built from the patched OpenShell source
+(`build-image.sh` resolves the source tree in this order: `$OPENSHELL_REPO`,
+sibling `../OpenShell`, then a clone at the pinned commit). The
+resulting image bakes `OPENSHELL_BEST_EFFORT_FAILURES=1` in via the
+Dockerfile and the YAML templates re-state it in `containers[].env`
+for visibility.
+
 Operator first-run:
 1. From the substrate repo (`agent-substrate/substrate` or a fork):
    `KO_DOCKER_REPO=localhost:5001 ko publish ./cmd/servers/ateom-gvisor`
@@ -76,9 +81,8 @@ var is captured in the live `WorkerPool` spec on first apply).
 
 ## Companion change in OpenShell
 
-The wrapper binary calls `openshell_sandbox::cli::run()` and
-`openshell_sandbox::set_failure_handler()`. Neither exists upstream
-yet. The single-commit branch
-[`dims/OpenShell@69d2054`](https://github.com/dims/OpenShell/commit/69d205479edf8443ab06e28458b350c0d4613fd9)
-adds them as a structurally-clean refactor with zero behavioural
-change for existing callers.
+The driver relies on `OPENSHELL_BEST_EFFORT_FAILURES` being recognised
+by the supervisor. The single-commit branch
+[`dims/OpenShell@b6d3a35`](https://github.com/dims/OpenShell/commit/b6d3a35facab8e597a516ebf4ddd2989ad558ce6)
+adds the env-var gate (3 files, +51/-7) with strict defaults
+preserved for upstream callers.

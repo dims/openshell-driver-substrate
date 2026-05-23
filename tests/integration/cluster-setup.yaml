@@ -47,6 +47,11 @@ spec:
         - /bin/sh
         - -c
         - while true; do sleep 60; done
+      env:
+        # Tolerate the bootstrap subsystems gVisor degrades
+        # (network-namespace, supervisor-seccomp, workload-seccomp).
+        - name: OPENSHELL_BEST_EFFORT_FAILURES
+          value: "1"
   snapshotsConfig:
     location: gs://ate-snapshots/ate-openshell-m0/
   workerPoolRef:

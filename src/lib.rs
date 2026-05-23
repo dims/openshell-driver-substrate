@@ -13,9 +13,6 @@
 
 #![allow(clippy::result_large_err)]
 
-pub mod degraded;
-pub use degraded::DegradedHandler;
-
 use openshell_core::proto::compute::v1::{
     CreateSandboxRequest, CreateSandboxResponse, DeleteSandboxRequest, DeleteSandboxResponse,
     DriverCondition, DriverSandbox, DriverSandboxStatus, GetCapabilitiesRequest,
@@ -657,6 +654,14 @@ fn synthesize_template(
             env_map.insert(k.clone(), v.clone());
         }
     }
+    // Opt the supervisor into best-effort bootstrap. gVisor degrades
+    // unshare(CLONE_NEWNET) and seccomp(2) by design; without this flag
+    // the supervisor aborts before it gets to a checkpointable state and
+    // the actor never finishes restore. Strict-mode operators can still
+    // override on a per-template basis by re-setting this to an empty
+    // string in their ActorTemplate spec.
+    env_map.insert("OPENSHELL_BEST_EFFORT_FAILURES".to_string(), "1".to_string());
+
     // Sandbox id (deterministic, always known).
     env_map.insert(
         openshell_core::sandbox_env::SANDBOX_ID.to_string(),
@@ -1414,6 +1419,12 @@ mod tests {
         assert_eq!(
             env.get("OPENSHELL_SANDBOX_ID").map(String::as_str),
             Some("sbid")
+        );
+        // Driver-injected: opts the supervisor into best-effort
+        // bootstrap so gVisor's degraded subsystems don't abort startup.
+        assert_eq!(
+            env.get("OPENSHELL_BEST_EFFORT_FAILURES").map(String::as_str),
+            Some("1")
         );
     }
 
