@@ -20,6 +20,7 @@ corresponding `dims/OpenShell` fork tip.
 | `proto/ateapi.proto` | Vendored from `agent-substrate/substrate`; `build.rs` runs `tonic_build` over it. |
 | `tests/live.rs` | Four live integration tests against a real `ate-api-server` (`#[ignore]`d; gated on `SUBSTRATE_LIVE_*` env vars). |
 | `tests/integration/` | Feature-observation harness: builds the patched supervisor image, applies templates, spawns an actor, dumps `[oshl-test]` markers from worker pod logs. |
+| `tests/integration/gateway/` | §7b end-to-end harness: deploys a real `openshell-gateway` (with a `docker:28-dind` sidecar + stub `supervisor_bin`), mints Ed25519 JWT signing material via `generate-jwt-keys.sh` (private key never lands in the repo), spawns a test actor wired with `OPENSHELL_ENDPOINT` + `OPENSHELL_SANDBOX_TOKEN` + `OPENSHELL_SANDBOX_ID`, and runs `verify-features.sh` to record PASS/FAIL for each of the five gateway-driven features. |
 
 ## Build
 
@@ -78,6 +79,32 @@ Operator first-run:
 
 Subsequent runs: `./tests/integration/run.sh` (the `ATEOM_IMAGE` env
 var is captured in the live `WorkerPool` spec on first apply).
+
+## §7b gateway-integration harness
+
+`tests/integration/gateway/` stands up a real `openshell-gateway`
+Deployment alongside the worker pool and exercises the supervisor's
+cluster-mode features (settings poll, inference routing, log push, SSH
+attach via `RelayStream`, cross-sandbox identity guard).
+
+```sh
+# One-time, before the first run on a fresh cluster:
+export ATEOM_IMAGE='localhost:5001/ateom-gvisor@sha256:...'
+
+cd tests/integration/gateway
+./run-gateway-integration.sh        # builds + deploys + spawns + captures
+./verify-features.sh /tmp/oshl-v3-<TS>   # PASS/FAIL summary for F1..F5
+```
+
+`generate-jwt-keys.sh` mints (or reuses) the Ed25519 JWT signing
+material at `$OPENSHELL_JWT_DIR` (default: `/tmp`) and renders the
+gateway Secret manifest to stdout — the private key never enters the
+repo. Three features (F1 settings poll, F2 inference routing, F3 log
+push) are PASS verified end-to-end; F4 SSH attach and F5 cross-sandbox
+IDOR are deferred (template wiring exists; verification needs an
+external SSH driver / per-actor JWTs). See
+`~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md`
+§7b verification for the full results + sharp-edges register (SE-8..SE-13).
 
 ## Companion changes upstream
 

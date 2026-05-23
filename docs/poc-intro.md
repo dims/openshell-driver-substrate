@@ -338,7 +338,7 @@ The supervisor's cluster-mode features have now been exercised end-to-end agains
 | SSH attach via `RelayStream` | DEFERRED | Wiring is present; exercising it needs an end-user-side SSH client that drives the gateway's `RelayStream` RPC. |
 | Cross-sandbox identity guard | DEFERRED | Requires two simultaneous actors with mismatched JWT `sub` claims. POC templates use a fixed `sub`. |
 
-The full v3 harness (`tests/integration/gateway/` in the v3 worktree) deploys the gateway with a `docker:28-dind` sidecar, generates Ed25519 JWT signing material, renders templates with three new env vars (`OPENSHELL_ENDPOINT`, `OPENSHELL_SANDBOX_TOKEN`, `OPENSHELL_SANDBOX_ID`), spawns a test actor, and produces a PASS/FAIL summary. See `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md` §7b verification for sharp edges (SE-8 through SE-13) discovered while standing the gateway up.
+The full harness lives under `tests/integration/gateway/` on `main` (commit `b7b059b`). It deploys the gateway with a `docker:28-dind` sidecar, generates Ed25519 JWT signing material via `generate-jwt-keys.sh` (private key never enters the repo), renders templates with three new env vars (`OPENSHELL_ENDPOINT`, `OPENSHELL_SANDBOX_TOKEN`, `OPENSHELL_SANDBOX_ID`), spawns a test actor, and produces a PASS/FAIL summary. See `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md` §7b verification for sharp edges (SE-8 through SE-13) discovered while standing the gateway up.
 
 ### c) Operator handshake is two steps
 
@@ -477,7 +477,7 @@ In rough priority order:
 1. **Upstream the OpenShell env-var gate.** Filed as [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]`. 3 files / +51/-7. Default stays strict; only opt-in operators see the new behaviour. The Landlock cosmetic-log follow-up can land separately.
 2. **Upstream the substrate eth0 fix.** Filed as [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66). The bug is not OpenShell-specific.
 3. **Land an `ateom-gvisor` build path in `install-ate-kind.sh`** (substrate-side). Filed as [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67). Removes the manual `ko publish` operator step.
-4. **Stand up an OpenShell gateway in the cluster.** Lets us exercise cluster-mode features end-to-end (the §7b gap).
+4. **~~Stand up an OpenShell gateway in the cluster.~~** Done. Harness landed on `main` as commit `b7b059b` under `tests/integration/gateway/`. F1/F2/F3 PASS-verified; F4 (SSH attach) and F5 (cross-sandbox IDOR) deferred until the harness grows an external SSH driver / per-actor token plumbing.
 5. **Streaming `WatchActors`.** Re-vendor the proto, switch `watch_sandboxes` from the 2 s poll to the streaming RPC.
 6. **GPU passthrough.** Remove the `validate_sandbox_create` reject and plumb `DriverResourceRequirements.gpu` into `ActorTemplate.spec.containers[*].resources`.
 7. **`--enable-ocsf-jsonl` flag.** Trivial fix; makes the JSONL audit layer usable in standalone deployments without a gateway.
