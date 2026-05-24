@@ -5,6 +5,7 @@
 **Companion change in OpenShell:** two alternative shapes filed, one will land — [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` (env-var gate, 3 files / +51/-7) and [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) (`SandboxFailureHandler` trait + setter, 3 files / +71/-7).
 **Companion change in Agent Substrate:** [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) — single commit, eth0 race fix in `ateom-gvisor`.
 **Operator-handshake follow-up:** [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) — `install-ate-kind.sh` builds + pushes the `ateom-gvisor` image so a `WorkerPool` is usable straight out of `--deploy-ate-system`.
+**Substrate-side `securityContext` surface (2026-05-24):** [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) — per-container `capabilities.add` + `runAsUser` / `runAsGroup` on `ActorTemplate.spec.containers[]`. Empty templates produce the same OCI bundle as before; opt-in per container. Driver-side `synthesize_template` can start emitting these fields once #73 merges.
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
 
 ---
@@ -87,6 +88,7 @@ Three repos co-operate to produce the boxed picture above:
 | Bootstrap-failure handling (alternative shapes; one lands) | [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` *or* [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) | Both add idempotent `drop_privileges` + a way to tolerate the three host-refused bootstrap subsystems. #1548: `OPENSHELL_BEST_EFFORT_FAILURES` env-var gate (3 files, +51/-7). #1549: `SandboxFailureHandler` trait + `set_failure_handler` setter (3 files, +71/-7, programmatic-only). **Default stays strict — zero behavioural change for upstream callers — under either shape.** |
 | ateom-gvisor eth0 race fix (one commit) | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | A substrate-side bug fix the POC exposed. **Not OpenShell-specific.** Upstreamable as-is. |
 | Operator-handshake follow-up | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` so a `WorkerPool` is usable straight out of `--deploy-ate-system`. Closes the manual `ko publish` step documented in §7c. |
+| Per-container `securityContext` on `ActorTemplate` | [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) | `capabilities.add` + `runAsUser` / `runAsGroup` on `ActorTemplate.spec.containers[]`. Empty templates produce the same OCI bundle as before; opt-in per container. Unblocks the driver's `synthesize_template` from emitting capability adds + a non-root supervisor start UID once merged. Two motivating sub-stories: cap-honouring confirmed by raw-`runsc` spike (see `2026-05-24-12a-gvisor-caps-spike.md`), and non-root supervisor start UID closes the gap that capability bits alone cannot. |
 
 The driver doesn't talk to gVisor, atelet, or ateom-gvisor directly — only `ateapi.Control`. Everything below that is Substrate's internal layering.
 
@@ -353,7 +355,7 @@ This is the exact sequence used on bigbox; every command is real.
 - A Substrate-installed kind cluster (the standard `hack/create-kind-cluster.sh` + `hack/install-ate-kind.sh --deploy-ate-system` from `agent-substrate/substrate`).
 - Linux host with cargo + docker + access to the kind-registry at `localhost:5001`.
 - `grpcurl` on PATH (`go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest`).
-- On NVIDIA-managed Linux hosts, Shorewall disabled (see `~/notes/2026-05-21-agent-substrate-kind-local-dev.md` §10).
+- On NVIDIA-managed Linux hosts, Shorewall disabled (see `~/notes/agent-substrate/2026-05-21-agent-substrate-kind-local-dev.md` §10).
 
 ### 8.1. Build + push `ateom-gvisor` (one time per cluster)
 
@@ -480,7 +482,7 @@ In rough priority order:
 5. **Streaming `WatchActors`.** Re-vendor the proto, switch `watch_sandboxes` from the 2 s poll to the streaming RPC.
 6. **GPU passthrough.** Remove the `validate_sandbox_create` reject and plumb `DriverResourceRequirements.gpu` into `ActorTemplate.spec.containers[*].resources`.
 7. **`--enable-ocsf-jsonl` flag.** Trivial fix; makes the JSONL audit layer usable in standalone deployments without a gateway.
-8. **`SecurityContext.capabilities.add` plumbing.** Re-enables non-root `drop_privileges` under gVisor by having Substrate grant `CAP_SETUID`/`CAP_SETGID` to the actor.
+8. **~~`SecurityContext.capabilities.add` plumbing.~~** Filed as [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) on 2026-05-24 — per-container `securityContext` with both `capabilities.add` and `runAsUser` / `runAsGroup`. Empty templates produce the same OCI bundle as before; opt-in per container. Re-enables non-root `drop_privileges` under gVisor and gives the supervisor a real non-root start UID. Driver-side `synthesize_template` can start emitting these fields once #73 merges. *(awaiting review)*
 9. **Performance numbers.** We have anecdotal "about a second" for cold start. Worth measuring properly: cold restore time, warm resume time after suspend, snapshot size, memory delta, against a baseline of `runsc run` from scratch.
 
 ---
@@ -489,5 +491,5 @@ In rough priority order:
 
 - Per-feature evidence + sharp-edges register: `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md`. Lists each Tier-1/2 test with status, the SE-1..SE-7 enumeration of caveats, and the disposition of each.
 - Current snapshot of branch tips, commit SHAs, and cluster fixture: `~/notes/openshell-on-substrate/2026-05-23-openshell-on-substrate-state.md`.
-- Cluster bring-up runbook (kind on macOS, plus the Shorewall recovery recipe for NVIDIA-managed Linux hosts): `~/notes/2026-05-21-agent-substrate-kind-local-dev.md`.
+- Cluster bring-up runbook (kind on macOS, plus the Shorewall recovery recipe for NVIDIA-managed Linux hosts): `~/notes/agent-substrate/2026-05-21-agent-substrate-kind-local-dev.md`.
 - Original feature-test plan: `~/notes/openshell-on-substrate/2026-05-23-openshell-features-test-plan.md`.
