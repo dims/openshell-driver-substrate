@@ -16,15 +16,17 @@ for OpenShell.
   flows through `openshell-gateway → openshell-driver-substrate →
   ate-api-server`. Prereqs, quick-start, expected output, troubleshooting.
 
-**Status (2026-05-24):** Driver crate is now load-bearing in a real
+**Status (2026-05-25):** Driver crate is now load-bearing in a real
 OpenShell gateway. The M3 wiring landed on
 [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
-(commits M3.14 = [`917e969`](https://github.com/dims/OpenShell/commit/917e969)
-and M3.16 = [`8343b8d`](https://github.com/dims/OpenShell/commit/8343b8d));
-the helpdesk demo above exercises every
+as M3.14 (dispatch arm), M3.16 (public-API annotation path), and
+M3.17 (consume this crate as a Cargo git dep rather than holding an
+in-tree copy). This repo's `main` is the authoritative source for
+the driver code; OpenShell branches consume a pinned rev. The
+helpdesk demo above exercises every
 `CreateSandbox`/`ListSandboxes`/`DeleteSandbox` through the driver
-against a real substrate kind cluster. Verified end-to-end on bigbox
-2026-05-24 evening.
+against a real substrate kind cluster — verified end-to-end on bigbox
+2026-05-24 evening and re-verified on a fresh cluster 2026-05-25.
 
 This repository depends on a small change in OpenShell that lets the
 supervisor tolerate the bootstrap subsystems gVisor degrades. Two
@@ -46,8 +48,8 @@ The crate is a library — consumers link it from Cargo and wire it into
 their compute-runtime dispatcher. The canonical consumer is OpenShell's
 `openshell-server`; the wiring landed on
 [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
-as [M3.14](https://github.com/dims/OpenShell/commit/917e969) +
-[M3.16](https://github.com/dims/OpenShell/commit/8343b8d). For a fresh
+as [M3.14](https://github.com/dims/OpenShell/commit/0e677590) +
+[M3.16](https://github.com/dims/OpenShell/commit/89333e00). For a fresh
 consumer the three pieces are:
 
 **1. Cargo dep.** Add to `openshell-server/Cargo.toml`. Pin a specific commit so the build is reproducible; bump the rev to pick up new driver work:
