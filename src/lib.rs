@@ -695,24 +695,20 @@ fn template_name_from_spec(sandbox: &DriverSandbox) -> Option<String> {
         .platform_config
         .as_ref()?;
     // 1. Top-level key (driver-internal callers).
-    if let Some(val) = cfg.fields.get("substrate_actor_template") {
-        if let Some(Kind::StringValue(s)) = &val.kind {
-            if !s.is_empty() {
-                return Some(s.clone());
-            }
-        }
+    if let Some(val) = cfg.fields.get("substrate_actor_template")
+        && let Some(Kind::StringValue(s)) = &val.kind
+        && !s.is_empty()
+    {
+        return Some(s.clone());
     }
     // 2. Nested under `annotations` (public-API gateway-translated path).
-    if let Some(annotations_val) = cfg.fields.get("annotations") {
-        if let Some(Kind::StructValue(annotations)) = &annotations_val.kind {
-            if let Some(val) = annotations.fields.get("substrate_actor_template") {
-                if let Some(Kind::StringValue(s)) = &val.kind {
-                    if !s.is_empty() {
-                        return Some(s.clone());
-                    }
-                }
-            }
-        }
+    if let Some(annotations_val) = cfg.fields.get("annotations")
+        && let Some(Kind::StructValue(annotations)) = &annotations_val.kind
+        && let Some(val) = annotations.fields.get("substrate_actor_template")
+        && let Some(Kind::StringValue(s)) = &val.kind
+        && !s.is_empty()
+    {
+        return Some(s.clone());
     }
     None
 }
@@ -801,13 +797,13 @@ fn synthesize_template(
         );
     }
     // Gateway-minted JWT, when the gateway populated it on the spec.
-    if let Some(spec) = sandbox.spec.as_ref() {
-        if !spec.sandbox_token.is_empty() {
-            env_map.insert(
-                openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
-                spec.sandbox_token.clone(),
-            );
-        }
+    if let Some(spec) = sandbox.spec.as_ref()
+        && !spec.sandbox_token.is_empty()
+    {
+        env_map.insert(
+            openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
+            spec.sandbox_token.clone(),
+        );
     }
     let env: Vec<EnvVar> = env_map
         .into_iter()
@@ -1010,7 +1006,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 if status.code() == tonic::Code::NotFound {
                     Status::not_found(format!("sandbox {actor_id} not found"))
                 } else {
-                    Status::from(status)
+                    status
                 }
             })?;
         let actor = resp
@@ -1028,10 +1024,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let mut client = self.control_client().await?;
-        let resp = client
-            .list_actors(ateapi::ListActorsRequest {})
-            .await
-            .map_err(Status::from)?;
+        let resp = client.list_actors(ateapi::ListActorsRequest {}).await?;
         let ns = self.config.default_namespace.as_str();
         // Tenancy boundary: surface only actors whose ActorTemplate lives
         // in the namespace the driver was configured for. A future
@@ -1092,15 +1085,13 @@ impl ComputeDriver for SubstrateComputeDriver {
                 actor_template_namespace: template_ns,
                 actor_template_name: template_name,
             })
-            .await
-            .map_err(Status::from)?;
+            .await?;
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor_id,
                 boot: false,
             })
-            .await
-            .map_err(Status::from)?;
+            .await?;
 
         Ok(Response::new(CreateSandboxResponse {}))
     }
@@ -1116,8 +1107,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         // the worker slot, snapshot retained).
         client
             .suspend_actor(ateapi::SuspendActorRequest { actor_id })
-            .await
-            .map_err(Status::from)?;
+            .await?;
         Ok(Response::new(StopSandboxResponse {}))
     }
 
@@ -1143,7 +1133,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             Err(status)
                 if status.code() == tonic::Code::FailedPrecondition
                     || status.code() == tonic::Code::Internal => {}
-            Err(other) => return Err(Status::from(other)),
+            Err(other) => return Err(other),
         }
 
         // DeleteActor can still return NotFound for a sandbox the gateway
@@ -1157,7 +1147,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         let deleted = match result {
             Ok(_) => true,
             Err(status) if status.code() == tonic::Code::NotFound => false,
-            Err(other) => return Err(Status::from(other)),
+            Err(other) => return Err(other),
         };
 
         // If the driver synthesized the ActorTemplate (annotation
@@ -1249,7 +1239,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 // projection changed (currently keyed on the whole
                 // DriverSandbox: status transitions, instance moves).
                 for (id, sandbox) in &current {
-                    let changed = prior.get(id).map_or(true, |old| old != sandbox);
+                    let changed = prior.get(id) != Some(sandbox);
                     if changed {
                         let evt = WatchSandboxesEvent {
                             payload: Some(watch_sandboxes_event::Payload::Sandbox(
