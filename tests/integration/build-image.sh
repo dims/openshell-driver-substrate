@@ -24,6 +24,16 @@ if ! command -v cargo >/dev/null 2>&1; then
   fi
 fi
 
+# protoc must be system-installed for openshell-core's prost-build
+# step. Setting PROTOC env doesn't always propagate into cargo's
+# build-script subprocess under rustup, so we hard-require it on PATH.
+if ! command -v protoc >/dev/null 2>&1; then
+  echo "[build-image] protoc not found on PATH. Install with:" >&2
+  echo "  sudo apt-get install protobuf-compiler   # Debian/Ubuntu" >&2
+  echo "  brew install protobuf                    # macOS" >&2
+  exit 1
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE_ROOT="$(cd "$HERE/../.." && pwd)"
 
@@ -36,6 +46,7 @@ OPENSHELL_REV="${OPENSHELL_REV:-$OPENSHELL_REV_DEFAULT}"
 
 # Locate (or clone) the OpenShell source tree.
 CLONE_TMP=""
+BUILD_CTX=""   # initialised here so the EXIT trap is safe under `set -u`
 cleanup() { [ -n "$CLONE_TMP" ] && rm -rf "$CLONE_TMP"; rm -rf "$BUILD_CTX"; }
 trap cleanup EXIT
 

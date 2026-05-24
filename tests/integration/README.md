@@ -34,6 +34,30 @@ exercises the supervisor side.
 
 The harness expects `grpcurl` on the host PATH (or at `~/go/bin/grpcurl`).
 
+### Host build deps
+
+`build-image.sh` runs `cargo build --release --bin openshell-sandbox`
+on the host (not inside docker), so the host needs:
+
+| Tool | Reason | Install |
+|---|---|---|
+| `cargo` (rust ≥ 1.88, rustup-managed) | builds the supervisor binary | `rustup` |
+| `protoc` (system-wide) | `openshell-core`'s build script invokes `prost-build`, which calls `protoc` to compile the workspace's `*.proto` files. Must be system-installed; setting the `PROTOC` env var doesn't always propagate into cargo's build-script subprocess under rustup. | `sudo apt-get install protobuf-compiler` (Debian/Ubuntu) / `brew install protobuf` (macOS) |
+| `docker` | image build + push | distro package |
+
+Symptom of missing protoc:
+```
+Error: Could not find `protoc`. If `protoc` is installed, try setting
+the `PROTOC` environment variable to the path of the `protoc` binary.
+```
+followed by `build-image.sh: line 39: BUILD_CTX: unbound variable` (the
+cleanup trap fires before BUILD_CTX is set). Install the package
+system-wide; the env-var workaround is unreliable.
+
+The companion gateway image build (`examples/helpdesk/gateway/build-image.sh`)
+does NOT have this requirement — it builds the gateway inside docker
+where `protoc` is `apt-get install`-ed in the builder stage.
+
 ## Findings register
 
 Per-test status lands in `~/notes/2026-05-23-openshell-features-findings.md`. Sharp edges are enumerated at the bottom of that doc as SE-1..SE-7.
