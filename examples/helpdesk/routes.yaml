@@ -1,0 +1,13 @@
+# OpenShell standalone-mode routing for the helpdesk demo.
+# Routes inference.local → Ollama Cloud free tier (gpt-oss:20b-cloud).
+#
+# This is a template. Copy to routes.local.yaml (gitignored) and paste your
+# Ollama Cloud key in place of the placeholder before applying. Get a free
+# key at https://ollama.com/settings.
+routes:
+  - name: inference.local
+    endpoint: https://ollama.com/v1
+    model: gpt-oss:20b-cloud
+    protocols:
+      - openai_chat_completions
+    api_key: <your-ollama-cloud-key>

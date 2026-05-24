@@ -27,6 +27,7 @@ Cargo's `openshell-core` dep is pinned to the corresponding
 | `tests/live.rs` | Four live integration tests against a real `ate-api-server` (`#[ignore]`d; gated on `SUBSTRATE_LIVE_*` env vars). |
 | `tests/integration/` | Feature-observation harness: builds the patched supervisor image, applies templates, spawns an actor, dumps `[oshl-test]` markers from worker pod logs. |
 | `tests/integration/gateway/` | §7b end-to-end harness: deploys a real `openshell-gateway` (with a `docker:28-dind` sidecar + stub `supervisor_bin`), mints Ed25519 JWT signing material via `generate-jwt-keys.sh` (private key never lands in the repo), spawns a test actor wired with `OPENSHELL_ENDPOINT` + `OPENSHELL_SANDBOX_TOKEN` + `OPENSHELL_SANDBOX_ID`, and runs `verify-features.sh` to record PASS/FAIL for each of the five gateway-driven features. |
+| `examples/helpdesk/` | Six-beat OpenShell-on-Substrate demo: cold ask → suspend → idle → follow-up (memory preserved) → exfil deny → pod-kill migration. Builds on `tests/integration/`. See [`examples/helpdesk/README.md`](examples/helpdesk/README.md). |
 
 ## Build
 

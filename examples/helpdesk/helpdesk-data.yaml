@@ -1,0 +1,30 @@
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /etc
+    - /opt/helpdesk
+  read_write:
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: best_effort
+
+# run_as_user: root because gVisor's degraded cap surface doesn't grant
+# CAP_SETUID, so setresuid(sandbox_uid) returns EINVAL. With root here,
+# the supervisor's idempotent drop_privileges fast-path skips the call
+# entirely (geteuid()==policy uid). Matches the harness's working
+# data.yaml (~/go/src/github.com/dims/openshell-driver-substrate/
+# tests/integration/data.yaml).
+process:
+  run_as_user: root
+  run_as_group: root
+
+# Intentionally empty: no extra hosts allowed beyond the proxy's hard-coded
+# inference.local short-circuit. Beat 5's evil.example.com fetch falls into
+# the default-deny and the OCSF "CONNECT denied …" line lands in stderr.
+network_policies: {}

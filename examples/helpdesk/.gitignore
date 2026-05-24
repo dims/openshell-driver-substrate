@@ -1,0 +1,3 @@
+# Local overrides that carry secrets — never commit these.
+routes.local.yaml
+*.local.yaml
