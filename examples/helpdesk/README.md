@@ -32,22 +32,41 @@ Beat 6 is the substrate-side reason PR #75 exists: before that change, pod delet
 | `curl` | any | distro package |
 | Ollama Cloud API key (free tier) | — | https://ollama.com/settings |
 
-You also need three source checkouts. The first two are personal forks of the upstream repos; the helpdesk image is built on top of `tests/integration/` in this repo.
+### Companion changes upstream
+
+The demo depends on patches that are filed but not yet merged. You need them combined on top of `agent-substrate/substrate` `main` (and `NVIDIA/OpenShell` `main`) before bring-up. Merge order doesn't matter; conflicts are minimal.
+
+| Upstream PR | Status | What it does | Why this demo needs it |
+|---|---|---|---|
+| [substrate #75](https://github.com/agent-substrate/substrate/pull/75) | open | `WorkerPoolSyncer`'s pod-delete hook resets the bound actor to `STATUS_SUSPENDED` instead of leaving it pointing at a dead pod. | **Required for Beat 6.** Without it the post-pod-delete follow-up curl times out forwarding to a dead IP. |
+| [substrate #67](https://github.com/agent-substrate/substrate/pull/67) | open | `install-ate-kind.sh --deploy-ate-system` builds and publishes the `ateom-gvisor` image to the local kind registry. | **Required on a fresh host.** Without it the `__ATEOM_IMAGE__` placeholder in `helpdesk-template.yaml` has nothing to render to — pool pods stay `ImagePullBackOff`. If you already have `localhost:5001/ateom-gvisor` cached from a prior install, you can skip this. |
+| [substrate #66](https://github.com/agent-substrate/substrate/pull/66) | open | `ensureEth0InPodNetns` is idempotent + has deferred rollback. | **Strongly recommended.** Beat 6 forces a restore on a fresh pod; without #66, repeated migration cycles can leave `eth0` half-attached and the next restore fails. |
+| [NVIDIA/OpenShell #1548](https://github.com/NVIDIA/OpenShell/pull/1548) (alt: [#1549](https://github.com/NVIDIA/OpenShell/pull/1549)) | open | `OPENSHELL_BEST_EFFORT_FAILURES=1` lets the supervisor proceed when gVisor's degraded namespace surface blocks some bootstrap calls. | **Required.** The `dims/OpenShell@b6d3a35` checkout below already carries this; once #1548 (or the alternative #1549) merges, you can switch to upstream `main`. |
+
+### Source checkouts
+
+You need three working trees on disk. The first two are personal forks of the upstream repos (carrying the PRs above); the helpdesk image is built on top of `tests/integration/` in this repo.
 
 ```bash
-# 1. substrate, on the slim fix branch
+# 1. substrate, with the four PRs above merged together.
+#    The fix/actor-resume-recovery branch on dims/substrate is PR #75 over main;
+#    merge #66 and #67 into it locally if you want a fresh-host bring-up.
 git clone https://github.com/agent-substrate/substrate ~/go/src/github.com/agent-substrate/substrate
 cd ~/go/src/github.com/agent-substrate/substrate
 git remote add dims https://github.com/dims/substrate
-git fetch dims fix/actor-resume-recovery
-git checkout fix/actor-resume-recovery   # PR #75
+git fetch dims fix/actor-resume-recovery        # PR #75
+git fetch dims feat/install-publish-ateom-image # PR #67
+git fetch dims fix/ateom-gvisor-eth0-rollback   # PR #66
+git checkout -b try/helpdesk-prereqs dims/fix/actor-resume-recovery
+git merge --no-edit dims/feat/install-publish-ateom-image
+git merge --no-edit dims/fix/ateom-gvisor-eth0-rollback
 
-# 2. patched OpenShell with OPENSHELL_BEST_EFFORT_FAILURES gate
+# 2. patched OpenShell with OPENSHELL_BEST_EFFORT_FAILURES gate (PR #1548).
 git clone https://github.com/dims/OpenShell ~/go/src/github.com/nvidia/OpenShell
 cd ~/go/src/github.com/nvidia/OpenShell
 git checkout chore/gvisor-degraded-netns-v2   # b6d3a35
 
-# 3. this repo (you're reading this README inside it)
+# 3. this repo (you're reading this README inside it).
 git clone https://github.com/dims/openshell-driver-substrate ~/go/src/github.com/dims/openshell-driver-substrate
 ```
 
@@ -191,7 +210,7 @@ kubectl exec -n ate-system deploy/ate-api-server-deployment -- /ate-api-server -
 
 If the helper is absent, you're running pre-PR-#75 substrate. Rebuild from a branch that has it.
 
-**Pool pods stuck `Pending` / `ImagePullBackOff`** — the `__ATEOM_IMAGE__` placeholder wasn't rendered. Re-run the `sed | kubectl apply` step in Quick Start step 3, and confirm `docker inspect localhost:5001/ateom-gvisor:latest --format '{{index .RepoDigests 0}}'` prints a real digest (force a `docker pull` first if it returns empty).
+**Pool pods stuck `Pending` / `ImagePullBackOff`** — the `__ATEOM_IMAGE__` placeholder wasn't rendered, or the image isn't in the local registry. First confirm `docker inspect localhost:5001/ateom-gvisor:latest --format '{{index .RepoDigests 0}}'` prints a real digest (force a `docker pull localhost:5001/ateom-gvisor:latest` first if it's empty). If the image is missing entirely, you're on a fresh box without PR #67 — either merge it into your substrate checkout (see Companion changes above) or run `ko build ./cmd/ateom-gvisor` manually with `KO_DOCKER_REPO=localhost:5001` to publish it. Then re-run the `sed | kubectl apply` step in Quick Start step 3.
 
 ## Cleanup
 
