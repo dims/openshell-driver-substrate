@@ -114,11 +114,12 @@ beat 4 "Cold ask to alice (data plane via atenet) — actor=$ALICE"
 time chat "$ALICE" chat '{"message":"User foo reports their database is timing out — give me a triage checklist."}'
 
 # Quiesce: the supervisor's HTTPS_PROXY → Ollama Cloud connection from
-# Beat 4 may still be tearing down. A bare-second pause lets gVisor's
-# cgroup hierarchy settle before we ask runsc to checkpoint and tear
-# down the pause container — without this we sporadically hit
-# "removing cgroup path /sys/fs/cgroup/pause: device or resource busy".
-sleep 5
+# Beat 4 may still be tearing down. A 15-second pause lets gVisor's
+# cgroup hierarchy fully settle before we ask runsc to checkpoint and
+# tear down the pause container — without enough time we sporadically
+# hit "removing cgroup path /sys/fs/cgroup/pause: device or resource
+# busy" (5s was enough once, not enough on the next fresh-cluster run).
+sleep 15
 
 beat 5 "Suspend alice (substrate admin op; no public Suspend RPC on the gateway)"
 time kubectl ate suspend actor "$ALICE"
