@@ -1,0 +1,80 @@
+# ConfigMap holding gateway.toml for the substrate-driven helpdesk demo.
+#
+# Unlike the §7b POC's gateway-config (in tests/integration/gateway/),
+# this one sets compute_drivers = ["substrate"] and configures an
+# [openshell.drivers.substrate] block that points at the cluster's
+# ate-api-server. Sandbox lifecycle calls now flow through the
+# substrate driver — no more `kubectl apply` of ActorTemplates.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openshell-gateway-substrate-config
+  namespace: ate-openshell-m0
+data:
+  gateway.toml: |
+    [openshell]
+    version = 1
+
+    [openshell.gateway]
+    bind_address          = "0.0.0.0:50051"
+    health_bind_address   = "0.0.0.0:8080"
+    metrics_bind_address  = "0.0.0.0:9090"
+    log_level             = "info"
+    # Helpdesk actors live in ate-demo-helpdesk (matches the helpdesk demo
+    # WorkerPool + supervisor image already deployed there).
+    sandbox_namespace     = "ate-demo-helpdesk"
+    default_image         = ""
+    # The supervisor image is supplied per-sandbox in spec.template.image
+    # by the demo client, so default_image is empty.
+    compute_drivers       = ["substrate"]
+    disable_tls           = true
+    enable_loopback_service_http = true
+    service_account_name  = "openshell-gateway-substrate"
+
+    [openshell.gateway.auth]
+    allow_unauthenticated_users = true
+
+    # Reuses the §7b POC's JWT signing key (openshell-gateway-jwt Secret
+    # in ate-openshell-m0). Required for the gateway to boot even when
+    # no supervisor is in the loop; with gateway_endpoint = "" in the
+    # substrate driver block below, supervisors stay in standalone mode.
+    [openshell.gateway.gateway_jwt]
+    signing_key_path = "/etc/openshell-jwt/signing.pem"
+    public_key_path  = "/etc/openshell-jwt/public.pem"
+    kid_path         = "/etc/openshell-jwt/kid"
+    gateway_id       = "openshell-helpdesk"
+    ttl_secs         = 3600
+
+    # ─── Substrate driver — load-bearing for this demo ──────────────────
+    # The driver dials https://api.ate-system.svc:443 with a projected
+    # SA token (audience api.ate-system.svc, rotated by K8s) and the
+    # cluster's kube-root-ca.crt for TLS verification. Both files are
+    # mounted at /etc/openshell-substrate/ by the Deployment.
+    [openshell.drivers.substrate]
+    api_endpoint                = "api.ate-system.svc:443"
+    api_tls_ca_path             = "/etc/openshell-substrate/ca.crt"
+    api_bearer_token_path       = "/etc/openshell-substrate/token"
+    default_namespace           = "ate-demo-helpdesk"
+    default_worker_pool         = "helpdesk-pool"
+    pause_image                 = "registry.k8s.io/pause:3.10.2@sha256:f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4"
+    snapshots_location          = "gs://ate-snapshots/ate-demo-helpdesk/"
+    runsc_amd64_sha256          = "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63"
+    runsc_amd64_url             = "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"
+    template_ready_timeout_secs = 180
+    # Empty gateway_endpoint keeps supervisors in standalone mode (they
+    # read policy from local files baked into the helpdesk image). The
+    # demo showcases the driver, not gateway↔supervisor — that's the
+    # §7b POC's job.
+    gateway_endpoint            = ""
+    # request_capabilities = false (default). The helpdesk supervisor
+    # runs as root inside the gVisor netns; no Linux caps requested.
+
+    # Stub kubernetes driver block. We do NOT list it in
+    # compute_drivers — only substrate is active — but the gateway's
+    # in-cluster JWT bootstrap path (SE-8 in the §7b standup) fires on
+    # KUBERNETES_SERVICE_HOST and refuses to boot without this block.
+    # The values are irrelevant; the driver is never instantiated.
+    [openshell.drivers.kubernetes]
+    grpc_endpoint              = "http://openshell-gateway-substrate.ate-openshell-m0.svc.cluster.local:50051"
+    service_account_name       = "openshell-gateway-substrate"
+    supervisor_sideload_method = "init-container"

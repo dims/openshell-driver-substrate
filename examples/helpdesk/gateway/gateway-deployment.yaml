@@ -1,0 +1,136 @@
+# OpenShell gateway Deployment + Service for the helpdesk demo
+# (substrate-driver-driven). One replica is enough at POC scale.
+#
+# The gateway image is built from the dims/OpenShell M3 branch
+# (chore/gvisor-degraded-netns, M3.14+) so it statically links the
+# substrate compute driver. Lifecycle calls go through
+#   gateway → openshell-driver-substrate → ate-api-server.
+#
+# The image digest is filled in at apply time by run.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openshell-gateway-substrate
+  namespace: ate-openshell-m0
+  labels:
+    app: openshell-gateway-substrate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openshell-gateway-substrate
+  template:
+    metadata:
+      labels:
+        app: openshell-gateway-substrate
+    spec:
+      serviceAccountName: openshell-gateway-substrate
+      # The default SA-token mount at /var/run/secrets/kubernetes.io/
+      # would trigger the gateway's kubernetes-driver SA bootstrap path
+      # (per gateway.toml schema). We're not using that driver, so the
+      # default mount is suppressed and the substrate-driver-specific
+      # projected token below carries the audience we actually need.
+      automountServiceAccountToken: false
+      containers:
+        - name: gateway
+          image: __GATEWAY_IMAGE__
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /etc/openshell/gateway.toml
+            - --drivers
+            - substrate
+            - --disable-tls
+            - --db-url
+            - "sqlite:///var/openshell/gateway.db?mode=rwc"
+          ports:
+            - name: grpc
+              containerPort: 50051
+            - name: health
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/openshell
+              readOnly: true
+            - name: gateway-jwt
+              mountPath: /etc/openshell-jwt
+              readOnly: true
+            - name: substrate-auth
+              mountPath: /etc/openshell-substrate
+              readOnly: true
+            - name: gateway-data
+              mountPath: /var/openshell
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: openshell-gateway-substrate-config
+        - name: gateway-jwt
+          # Reused from the §7b POC. Created by generate-jwt-keys.sh in
+          # tests/integration/gateway/.
+          secret:
+            secretName: openshell-gateway-jwt
+            defaultMode: 0444
+        - name: substrate-auth
+          # Projected SA token (audience = api.ate-system.svc, rotated
+          # by kubelet) + the ate-api-server's CA bundle. The CA is a
+          # copy of `service-dns-ca-pool` (in podcertificate-controller-system)
+          # converted from substrate's CAs-as-JSON format into a plain
+          # PEM bundle and stored as Secret `ate-api-server-ca` in
+          # ate-openshell-m0. The kube-root-ca won't validate the
+          # api-server cert — substrate uses its own podcertificate CA
+          # signer (`servicedns.podcert.ate.dev/identity`).
+          projected:
+            defaultMode: 0444
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 3600
+                  path: token
+              - secret:
+                  name: ate-api-server-ca
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+        - name: gateway-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-gateway-substrate
+  namespace: ate-openshell-m0
+spec:
+  type: ClusterIP
+  selector:
+    app: openshell-gateway-substrate
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+      appProtocol: grpc
+    - name: health
+      port: 8080
+      targetPort: health
+    - name: metrics
+      port: 9090
+      targetPort: metrics

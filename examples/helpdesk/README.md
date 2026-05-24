@@ -1,21 +1,34 @@
 # OpenShell helpdesk on Agent Substrate
 
-A six-beat demo that runs an LLM-backed helpdesk agent inside an OpenShell sandbox, on top of an [agent-substrate](https://github.com/agent-substrate/substrate) actor (gVisor + checkpoint/restore). Five minutes start to finish on a single `kind` cluster.
+A 10-beat demo that runs an LLM-backed helpdesk agent inside an OpenShell sandbox, on top of an [agent-substrate](https://github.com/agent-substrate/substrate) actor (gVisor + checkpoint/restore). **Every sandbox lifecycle call flows through `openshell-driver-substrate` — the gateway is the operator-facing surface, the driver is the implementation.**
 
-**Status: verified end-to-end on bigbox 2026-05-24 against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75).**
+```
+operator  ──gRPC──>  openshell-gateway  ──in-process──>  openshell-driver-substrate  ──gRPC──>  ate-api-server
+                     (compute_drivers =                  (this crate)                            (substrate)
+                       ["substrate"])
+```
 
-## The six beats
+**Status: verified end-to-end on bigbox 2026-05-24** against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75) and `dims/OpenShell@chore/gvisor-degraded-netns` tip `8343b8d` (M3.14–M3.16). Every one of the gateway's lifecycle RPCs (`CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`) executed against the driver in the verified run; the driver's `validate_sandbox_create` + `create_sandbox` + `list_sandboxes` + `delete_sandbox` were all exercised. The supervisor stays in standalone mode (policy + OPA + Ollama Cloud routing all baked into the image) so the data plane (`/chat`, `/probe`) hits atenet directly — the demo proves the driver's control plane, not the gateway's data plane (the §7b POC covers that separately).
 
-| # | Beat | What you see |
-|---|---|---|
-| 1 | Cold ask | A triage checklist comes back from the model (gpt-oss:20b-cloud, free tier). ~6s. |
-| 2 | Suspend | `kubectl ate suspend actor helpdesk-1` → STATUS_SUSPENDED, both pool pods FREE. |
-| 3 | Idle | Twenty seconds with no compute consumed. Workers stay free. |
-| 4 | Follow-up | A second user message implicitly resumes the actor. The agent remembers the original problem. ~4s. |
-| 5 | Exfil deny | A second endpoint (`/probe`) tries to fetch `http://evil.example.com/`. OpenShell's OPA policy denies via the HTTP CONNECT proxy; the agent returns `{"blocked": true, "http_status": 403, ...}`. |
-| 6 | Migration | `kubectl delete pod` against the worker hosting the actor. The next user message lands on a free worker, with full chat history intact. ~4s. |
+## The 10 beats
 
-Beat 6 is the substrate-side reason PR #75 exists: before that change, pod deletion stranded the actor in `STATUS_RUNNING` pointing at a dead pod and atenet timed out.
+Organized as three acts.
+
+| # | Beat | What it proves | RPC path |
+|---|---|---|---|
+| **I — Sandbox provisioning** | | | |
+| 1 | Provision `alice` via `OpenShell.CreateSandbox` | The gateway accepts a public-API CreateSandbox, translates it, calls into the driver, which creates an `Actor` in substrate. The pre-applied `helpdesk-agent` ActorTemplate is referenced via `SandboxTemplate.annotations["substrate_actor_template"]` (M3.16). | Gateway → driver.validate_sandbox_create + create_sandbox → ateapi.CreateActor + ResumeActor |
+| 2 | Provision `bob` | Multi-tenant: a second actor in the same pool. | (same as Beat 1) |
+| 3 | `OpenShell.ListSandboxes` | List works through the driver and projects substrate's actor state into the gateway's sandbox model. | Gateway → driver.list_sandboxes → ateapi.ListActors |
+| **II — One actor's life** | | | |
+| 4 | Cold ask to alice (data plane) | Ollama Cloud round-trip works: gpt-oss:20b-cloud returns a triage checklist. ~4s. | curl → atenet → sandbox → OPA-proxied egress |
+| 5 | Suspend alice (substrate admin op) | Actor goes `STATUS_SUSPENDED`, worker freed. The OpenShell public API has no Suspend RPC, so this step uses `kubectl ate suspend` directly. | (substrate ateapi.SuspendActor) |
+| 6 | 20-second idle | Both workers `FREE`. Idle costs zero. | (no calls) |
+| 7 | Follow-up to alice | Implicit resume on traffic. Chat history survives the suspend (`history_turns: 2`). | curl → atenet → substrate resumes from snapshot |
+| 8 | Exfil from bob | `/probe` against `http://evil.example.com/` returns `{"blocked": true, "http_status": 403}` via OpenShell's OPA-proxied CONNECT deny. | curl → atenet → sandbox → OPA |
+| 9 | **Pod-kill migration** | `kubectl delete pod` against alice's worker. PR #75's `releaseActorOnDeadWorker` resets alice to `STATUS_SUSPENDED`; next curl triggers implicit resume on a free worker. Chat history survives. **Bob is unaffected** — the load-bearing multi-tenant proof. | (PR #75 syncer hook) |
+| **III — Hygiene** | | | |
+| 10 | `OpenShell.DeleteSandbox` alice | Driver deletes alice's actor; the pre-provisioned `helpdesk-agent` ActorTemplate survives (driver only reaps templates it synthesized itself). Bob keeps talking. | Gateway → driver.delete_sandbox → ateapi.DeleteActor |
 
 ## Prerequisites
 
@@ -26,209 +39,238 @@ Beat 6 is the substrate-side reason PR #75 exists: before that change, pod delet
 | `kind` | v0.31.0+ | `go install sigs.k8s.io/kind@v0.31.0` |
 | `kubectl` | matches kind | distro package |
 | `go` | 1.22+ | distro package |
-| `cargo` (rust) | 1.88+ | rustup |
+| `cargo` (rust, for image builds) | 1.88+ | rustup |
 | `ko` | latest | `go install github.com/google/ko@latest` |
+| `grpcurl` | latest | `go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest` |
 | `jq` | 1.6+ | distro package |
 | `curl` | any | distro package |
 | Ollama Cloud API key (free tier) | — | https://ollama.com/settings |
 
 ### Companion changes upstream
 
-The demo depends on patches that are filed but not yet merged. You need them combined on top of `agent-substrate/substrate` `main` (and `NVIDIA/OpenShell` `main`) before bring-up. Merge order doesn't matter; conflicts are minimal.
+This demo lives on the in-flight M3 work for both substrate and OpenShell. You need these PRs/branches on top of upstream `main`:
 
-| Upstream PR | Status | What it does | Why this demo needs it |
-|---|---|---|---|
-| [substrate #75](https://github.com/agent-substrate/substrate/pull/75) | open | `WorkerPoolSyncer`'s pod-delete hook resets the bound actor to `STATUS_SUSPENDED` instead of leaving it pointing at a dead pod. | **Required for Beat 6.** Without it the post-pod-delete follow-up curl times out forwarding to a dead IP. |
-| [substrate #67](https://github.com/agent-substrate/substrate/pull/67) | open | `install-ate-kind.sh --deploy-ate-system` builds and publishes the `ateom-gvisor` image to the local kind registry. | **Required on a fresh host.** Without it the `__ATEOM_IMAGE__` placeholder in `helpdesk-template.yaml` has nothing to render to — pool pods stay `ImagePullBackOff`. If you already have `localhost:5001/ateom-gvisor` cached from a prior install, you can skip this. |
-| [substrate #66](https://github.com/agent-substrate/substrate/pull/66) | open | `ensureEth0InPodNetns` is idempotent + has deferred rollback. | **Strongly recommended.** Beat 6 forces a restore on a fresh pod; without #66, repeated migration cycles can leave `eth0` half-attached and the next restore fails. |
-| [NVIDIA/OpenShell #1548](https://github.com/NVIDIA/OpenShell/pull/1548) (alt: [#1549](https://github.com/NVIDIA/OpenShell/pull/1549)) | open | `OPENSHELL_BEST_EFFORT_FAILURES=1` lets the supervisor proceed when gVisor's degraded namespace surface blocks some bootstrap calls. | **Required.** The `dims/OpenShell@b6d3a35` checkout below already carries this; once #1548 (or the alternative #1549) merges, you can switch to upstream `main`. |
+| Repo + branch / PR | Required for | Status |
+|---|---|---|
+| [`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns) (tip `8343b8d`, M3.14–M3.16) | The gateway-side wiring (`ComputeDriverKind::Substrate` dispatch arm + `substrate_actor_template` annotation path) | local branch on personal fork |
+| [`agent-substrate/substrate#75`](https://github.com/agent-substrate/substrate/pull/75) | Beat 9 (pod-kill migration) — without it, alice would strand in `STATUS_RUNNING` pointing at a dead pod | open PR |
+| [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh --deploy-ate-system` publishes the `ateom-gvisor` image | open PR; skip if you already have `localhost:5001/ateom-gvisor` cached |
+| [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | `ateom-gvisor` eth0 idempotency on restore — strongly recommended for repeated Beat 9 cycles | open PR |
+| [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) | `OPENSHELL_BEST_EFFORT_FAILURES` gate — required, but the chore/gvisor-degraded-netns branch above already carries the equivalent best-effort patches | open PR |
 
-### Source checkouts
+The driver-side work (M3.1–M3.13) is already on `chore/gvisor-degraded-netns`. M3.14 + M3.16 land in this same demo cycle:
 
-You need three working trees on disk. The first two are personal forks of the upstream repos (carrying the PRs above); the helpdesk image is built on top of `tests/integration/` in this repo.
+- **M3.14**: `wire ComputeDriverKind::Substrate dispatch into gateway compute runtime` — replaces the scaffold's placeholder `Err(...)` arm with a real `ComputeRuntime::new_substrate(...)` call, statically links the driver crate into the gateway binary.
+- **M3.16**: `read substrate_actor_template from public-API annotations path` — extends `template_name_from_spec` to also look under `platform_config["annotations"]["substrate_actor_template"]`, which is where the gateway's `build_platform_config` puts `SandboxTemplate.annotations`. Without this, the public OpenShell CreateSandbox API has no way to reference a pre-provisioned ActorTemplate.
+
+## Quick start
+
+Three working trees:
 
 ```bash
-# 1. substrate, with the four PRs above merged together.
-#    The fix/actor-resume-recovery branch on dims/substrate is PR #75 over main;
-#    merge #66 and #67 into it locally if you want a fresh-host bring-up.
+# 1. substrate, with PRs #66 + #67 + #75 merged.
 git clone https://github.com/agent-substrate/substrate ~/go/src/github.com/agent-substrate/substrate
 cd ~/go/src/github.com/agent-substrate/substrate
 git remote add dims https://github.com/dims/substrate
-git fetch dims fix/actor-resume-recovery        # PR #75
-git fetch dims feat/install-publish-ateom-image # PR #67
-git fetch dims fix/ateom-gvisor-eth0-rollback   # PR #66
+git fetch dims fix/actor-resume-recovery feat/install-publish-ateom-image fix/ateom-gvisor-eth0-rollback
 git checkout -b try/helpdesk-prereqs dims/fix/actor-resume-recovery
-git merge --no-edit dims/feat/install-publish-ateom-image
-git merge --no-edit dims/fix/ateom-gvisor-eth0-rollback
+git merge --no-edit dims/feat/install-publish-ateom-image dims/fix/ateom-gvisor-eth0-rollback
 
-# 2. patched OpenShell with OPENSHELL_BEST_EFFORT_FAILURES gate (PR #1548).
-git clone https://github.com/dims/OpenShell ~/go/src/github.com/nvidia/OpenShell
-cd ~/go/src/github.com/nvidia/OpenShell
-git checkout chore/gvisor-degraded-netns-v2   # b6d3a35
+# 2. OpenShell with the M3 driver wiring.
+git clone https://github.com/dims/OpenShell ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded
+cd ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded
+git checkout chore/gvisor-degraded-netns
 
 # 3. this repo (you're reading this README inside it).
 git clone https://github.com/dims/openshell-driver-substrate ~/go/src/github.com/dims/openshell-driver-substrate
 ```
 
-## Quick start
-
-From a clean host, the bring-up is four phases of roughly five minutes each.
-
-### 1. Stand up the kind cluster + substrate
+Bring-up:
 
 ```bash
+# 4. Stand up the substrate kind cluster.
 cd ~/go/src/github.com/agent-substrate/substrate
 ./hack/create-kind-cluster.sh
 ./hack/install-ate-kind.sh --deploy-ate-system
-go install ./cmd/kubectl-ate     # plugin lands in $GOBIN; export PATH if needed
-```
+go install ./cmd/kubectl-ate
 
-`install-ate-kind.sh` runs `ko publish` for `ate-api-server` / `atelet` / `atenet`, applies the kustomize manifests, and waits for the rollout. Rerunning it after a substrate code change rebuilds and rolls forward in place.
-
-### 2. Build the helpdesk supervisor image
-
-Stage the four helpdesk-specific files into the integration harness, then run its image-build script:
-
-```bash
+# 5. Build the helpdesk supervisor image.
 cd ~/go/src/github.com/dims/openshell-driver-substrate
 HARNESS=$PWD/tests/integration
-HELP=$PWD/examples/helpdesk
+cp examples/helpdesk/{helpdesk-agent.py,helpdesk.Dockerfile} "$HARNESS/"
+cp examples/helpdesk/helpdesk-data.yaml "$HARNESS/data.yaml"
+cp examples/helpdesk/routes.yaml         "$HARNESS/routes.local.yaml"
+sed -i 's|<your-ollama-cloud-key>|'"$(cat ~/.config/ollama/key)"'|' \
+    "$HARNESS/routes.local.yaml"
+# Then run the harness's build script (see tests/integration/README.md
+# for the cp-block extension required to include the helpdesk files).
 
-cp "$HELP/helpdesk-agent.py"   "$HARNESS/"
-cp "$HELP/helpdesk-data.yaml"  "$HARNESS/data.yaml"      # replaces harness default
-cp "$HELP/helpdesk.Dockerfile" "$HARNESS/Dockerfile.helpdesk"
-
-# Stage your local routes file with the real Ollama key (see Configuration below).
-cp "$HELP/routes.yaml" "$HARNESS/routes.local.yaml"
-sed -i 's|<your-ollama-cloud-key>|'"$(cat ~/.config/ollama/key)"'|' "$HARNESS/routes.local.yaml"
-
-cd "$HARNESS" && ./build-image.sh                        # prints SUPERVISOR_IMAGE digest
-```
-
-The harness `build-image.sh` is opinionated and copies a fixed list of files into the build context. Extend its `cp` block to pick up `helpdesk-agent.py`, `routes.local.yaml`, and `Dockerfile.helpdesk`, and switch the `--file` argument to `Dockerfile.helpdesk`. The existing `oshl-feature-test` build remains the base image; the helpdesk Dockerfile is a thin derivative on top of it.
-
-### 3. Apply the helpdesk ActorTemplate
-
-```bash
-ATEOM_IMAGE=$(docker inspect localhost:5001/ateom-gvisor:latest --format '{{index .RepoDigests 0}}')
+# 6. Apply WorkerPool + pre-provisioned ActorTemplate.
+ATEOM_IMAGE=$(docker inspect localhost:5001/ateom-gvisor:latest \
+                  --format '{{index .RepoDigests 0}}')
 SUPERVISOR_IMAGE=$(cat "$HARNESS/.supervisor-image-digest")
-
 sed -e "s|__ATEOM_IMAGE__|$ATEOM_IMAGE|" \
     -e "s|__SUPERVISOR_IMAGE__|$SUPERVISOR_IMAGE|" \
-    "$HELP/helpdesk-template.yaml" | kubectl apply -f -
+    examples/helpdesk/helpdesk-template.yaml | kubectl apply -f -
+kubectl wait -n ate-demo-helpdesk --for=condition=Ready pod \
+    -l ate.dev/worker-pool=helpdesk-pool --timeout=120s
 
-kubectl wait -n ate-demo-helpdesk --for=condition=Ready pod -l ate.dev/worker-pool=helpdesk-pool --timeout=120s
+# 7. Stand up the OpenShell gateway (with the substrate driver compiled in).
+kubectl create namespace ate-openshell-m0
+cd "$HARNESS/gateway"  # tests/integration/gateway/
+bash generate-jwt-keys.sh | kubectl apply -f -
+
+cd ~/go/src/github.com/dims/openshell-driver-substrate
+# Copy substrate's ate-api-server CA into ate-openshell-m0 so the
+# gateway pod can verify the api server's TLS cert (the kube-root-ca
+# won't validate it — substrate uses its own podcertificate CA signer).
+kubectl get secret -n podcertificate-controller-system service-dns-ca-pool \
+  -o jsonpath='{.data.pool}' | base64 -d | \
+  jq -r '.CAs[].RootCertificateDER' | while read der; do
+    echo "-----BEGIN CERTIFICATE-----"
+    echo "$der" | fold -w 64
+    echo "-----END CERTIFICATE-----"
+  done > /tmp/ate-api-ca.pem
+kubectl create secret generic -n ate-openshell-m0 ate-api-server-ca \
+    --from-file=ca.crt=/tmp/ate-api-ca.pem --dry-run=client -o yaml | \
+    kubectl apply -f -
+
+./examples/helpdesk/gateway/run.sh   # builds the gateway image,
+                                     # deploys RBAC + ConfigMap +
+                                     # Deployment + Service.
+
+# 8. Stage the .proto file so grpcurl can talk to the gateway.
+mkdir -p ~/proto
+cp ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded/proto/*.proto ~/proto/
+
+# 9. Run the demo.
+SUPERVISOR_IMAGE="$SUPERVISOR_IMAGE" PROTO_DIR=$HOME/proto \
+    ./examples/helpdesk/helpdesk-run.sh
 ```
 
-### 4. Run the demo
-
-```bash
-"$HELP/helpdesk-run.sh"
-```
-
-You should see six labelled beats land in sequence and exit zero. The migration beat (6) prints the old worker name and the new one — they must differ.
-
-## Configuration
+## What's in this folder
 
 | File | Purpose |
 |---|---|
-| `helpdesk-agent.py` | Python helpdesk agent (Flask-shaped `http.server`). Holds chat history in a Python list that survives gVisor checkpoint/restore. Forwards to `inference.local` over HTTPS via the OpenShell CONNECT proxy. |
-| `helpdesk-data.yaml` | OpenShell sandbox policy data: `filesystem_policy`, `landlock: best_effort`, `run_as_user: root`, `network_policies: {}` (default-deny). |
-| `routes.yaml` | OpenShell standalone-mode route config. Template only — copy to `routes.local.yaml` (gitignored) and paste your Ollama key before staging into the build context. |
-| `helpdesk-template.yaml` | substrate `WorkerPool` + `ActorTemplate`. Placeholders `__ATEOM_IMAGE__` and `__SUPERVISOR_IMAGE__` get rendered at apply time. |
-| `helpdesk.Dockerfile` | Two-layer derivative on top of the harness's `oshl-feature-test` image: copy `helpdesk-agent.py` to `/opt/helpdesk/agent.py`, copy `routes.local.yaml` to `/etc/openshell/routes.yaml`. |
-| `helpdesk-run.sh` | Six-beat demo driver. Port-forwards `svc/atenet-router` to `localhost:8000`, sends curl calls with the `Host:` header substrate's atenet router uses to demux actors, prints timings. |
-| `beat6-test.sh` | Focused beat-6 test for iterating on the migration path without re-running the full driver. |
+| `helpdesk-agent.py` | Python helpdesk agent (Flask-shaped `http.server`). RAM-only chat history. Calls Ollama Cloud via the OpenShell CONNECT proxy. |
+| `helpdesk-data.yaml` | OpenShell sandbox policy data (filesystem + landlock + process + network rules). `network_policies` is empty for default-deny. |
+| `routes.yaml` | OpenShell standalone-mode route config. **Template only** — copy to `routes.local.yaml` (gitignored) and paste your Ollama key before staging into the build context. |
+| `helpdesk-template.yaml` | substrate `WorkerPool` + `ActorTemplate`. Operator-applied; the gateway/driver references the template by name via `SandboxTemplate.annotations["substrate_actor_template"]`. |
+| `helpdesk.Dockerfile` | Two-layer derivative on top of the harness's `oshl-feature-test` image. |
+| `helpdesk-run.sh` | 10-beat demo driver. Hits `openshell.v1.OpenShell` (gateway) for lifecycle + atenet for data plane. |
+| `beat6-test.sh` | Focused beat-6 (migration) test for iterating without re-running the full driver. |
+| `gateway/` | Subdirectory for the substrate-driven OpenShell gateway image + manifests. See `gateway/README.md` for details. |
 
-### Environment overrides
+## What's in `gateway/`
 
-The agent reads three env vars at request time (not start time), so you can change them with `kubectl set env` and the next user message picks them up:
+| File | Purpose |
+|---|---|
+| `Dockerfile` | Builds `openshell-gateway` from `OpenShell-gvisor-degraded` (the M3 branch with the substrate driver). Same multi-stage shape as `tests/integration/gateway/Dockerfile.gateway`, different source tree. |
+| `build-image.sh` | Wraps the Docker build + push to the kind-registry. Prints the resulting `<repo>@sha256:<digest>`. |
+| `gateway-rbac.yaml` | `ServiceAccount openshell-gateway-substrate` in `ate-openshell-m0` + `ClusterRoleBinding` to the existing `ate-controller` ClusterRole (cluster-wide RBAC for substrate ateapi operations). |
+| `gateway-config.yaml` | ConfigMap with `gateway.toml`: `compute_drivers = ["substrate"]` + `[openshell.drivers.substrate]` block. Reuses the §7b POC's JWT signing key. Includes a stub `[openshell.drivers.kubernetes]` block to satisfy the gateway's in-cluster JWT bootstrap check (SE-8) — the kubernetes driver is never invoked. |
+| `gateway-deployment.yaml` | Deployment + Service. Projected volume mounts a kubelet-rotated SA token (audience `api.ate-system.svc`) + the substrate ate-api-server CA at `/etc/openshell-substrate/{token,ca.crt}` for the driver to use. |
+| `run.sh` | End-to-end orchestration: apply RBAC + ConfigMap, build the image, render + apply the Deployment, wait for rollout. |
 
-| Var | Default | Purpose |
-|---|---|---|
-| `HELPDESK_MODEL` | `gpt-oss:20b-cloud` | Free-tier Ollama Cloud model. Swap to `gpt-oss:120b-cloud` if 20b returns 429. |
-| `HELPDESK_PROBE_URL` | `http://evil.example.com/` | Target for the beat-5 exfil attempt. Change for different audiences. |
-| `OPENSHELL_INFERENCE_BASE` | `https://inference.local/v1` | Override the OpenShell short-circuit target if you point at a local Ollama instead of cloud. |
-
-## Expected output
-
-Edited transcript from the verified bigbox run on 2026-05-24:
+## Verified output (excerpt)
 
 ```
-=== Beat 1: Cold ask ===
-{"reply": "**Database Timeout Triage Checklist** ... 12 numbered steps ...", "history_turns": 1}
-real    0m6.113s
+=== Beat 1: Provision alice via OpenShell.CreateSandbox (driver path) ===
+{
+  "sandbox": {
+    "metadata": {"id": "ef02921b-c6be-47bc-92b6-869bd952ef2b", "name": "alice"},
+    "spec": {
+      "logLevel": "info",
+      "template": {
+        "image": "localhost:5001/oshl-helpdesk@sha256:400efe27...",
+        "annotations": {"substrate_actor_template": "helpdesk-agent"}
+      },
+      "policy": {"version": 1, "process": {"runAsUser": "sandbox", "runAsGroup": "sandbox"}}
+    },
+    "phase": "SANDBOX_PHASE_PROVISIONING"
+  }
+}
+real    0m2.820s
+  -> alice → actor_id ef02921b-c6be-47bc-92b6-869bd952ef2b
 
-=== Beat 2: Suspend ===
-helpdesk-1   STATUS_SUSPENDED   <none>                 5
-status=STATUS_SUSPENDED; worker=
+=== Beat 3: ListSandboxes ===
+[
+  {"id": "ef02921b-...", "phase": "SANDBOX_PHASE_READY"},
+  {"id": "f4101364-...", "phase": "SANDBOX_PHASE_READY"}
+]
 
-=== Beat 3: 20-second idle (capacity recovered) ===
-NAMESPACE           POOL            POD                                         STATUS   ASSIGNED ACTOR
-ate-demo-helpdesk   helpdesk-pool   helpdesk-pool-deployment-...-f8zx2          FREE     <none>
-ate-demo-helpdesk   helpdesk-pool   helpdesk-pool-deployment-...-tchqb          FREE     <none>
+=== Beat 4: Cold ask to alice ===
+{"reply": "**Database Timeout Triage Checklist** ...", "history_turns": 1}
 
-=== Beat 4: Follow-up (implicit resume) ===
-{"reply": "The user reported that their **database connection is timing out**.", "history_turns": 2}
-real    0m3.572s
+=== Beat 7: Follow-up to alice (implicit resume) ===
+{"reply": "You asked about a user (foo) who reported that **their database was timing out**.", "history_turns": 2}
 
-=== Beat 5: Exfil attempt (expect blocked + OCSF Denied event) ===
-{"blocked": true, "url": "http://evil.example.com/", "http_status": 403, "reason": "HTTP Error 403: Forbidden",
- "explanation": "OpenShell HTTP CONNECT proxy denied per OPA policy"}
+=== Beat 8: Exfil attempt from bob ===
+{"blocked": true, "url": "http://evil.example.com/", "http_status": 403, ...}
 
-=== Beat 6: Migrate (kill the worker, ask again, land on a new worker) ===
-pod "helpdesk-pool-deployment-...-f8zx2" deleted from ate-demo-helpdesk namespace
-{"reply": "Got it—User **foo** reported that their database is timing out. ...", "history_turns": 2}
-real    0m4.395s
-old worker: helpdesk-pool-deployment-...-f8zx2 → new worker: helpdesk-pool-deployment-...-m27l8
+=== Beat 9: Kill alice's pod — alice migrates, bob is unaffected ===
+{"reply": "Yes—User **foo** reported that their database is timing out.", "history_turns": 2}
+alice: helpdesk-pool-deployment-...-m27l8 → helpdesk-pool-deployment-...-44nlm
+bob still on: helpdesk-pool-deployment-...-tchqb
+
+=== Beat 10: Delete alice via OpenShell.DeleteSandbox ===
+{"deleted": true}
+post-delete list: [{"id": "f4101364-...", "phase": "SANDBOX_PHASE_READY"}]
+Pre-provisioned ActorTemplate survives: helpdesk-agent
 ```
 
-Key signals to look for:
+Key signals:
 
-- Beat 4 `history_turns: 2` proves chat memory survived the suspend.
-- Beat 5 returns `blocked: true` with HTTP 403, not a 200.
-- Beat 6 `history_turns: 2` proves chat memory also survived the pod-delete migration. The old and new worker names must differ.
+- Beat 1 returns within ~3s — gateway → driver → CreateActor + ResumeActor round-trip.
+- Beat 7 `history_turns: 2` proves the suspend/resume cycle preserved alice's chat memory.
+- Beat 9 `history_turns: 2` proves the pod-kill migration preserved it again. Alice's worker name changes; bob's doesn't.
+- Beat 10 `"deleted": true` confirms the driver acknowledged the delete; post-list shows only bob; the pre-provisioned ActorTemplate is untouched.
 
 ## Troubleshooting
 
-The corrections accumulated across live runs. Most live in `../2026-05-24-helpdesk-demo-plan.md` Appendix Z; the load-bearing ones:
+**Beat 1 returns `failed to connect to Substrate ate-api-server at api.ate-system.svc:443: transport error`** — the gateway pod can't reach or can't verify the ate-api-server's TLS cert. Most likely the `ate-api-server-ca` Secret in `ate-openshell-m0` is missing or has the wrong CA. Re-run the JSON→PEM conversion (see Quick Start step 7). Confirm the bundle validates with `openssl s_client -connect <api-svc-ip>:443 -servername api.ate-system.svc -CAfile /tmp/ate-api-ca.pem`.
 
-**`kubectl ate: unknown command 'ate'`** — non-interactive SSH didn't pick up `$GOBIN`. Either `export PATH="$HOME/go/bin:$PATH"` in `.bashrc` (or whatever the non-login shell reads), or ship the binary to `/usr/local/bin`. The driver script already does the export at the top.
+**Gateway pod CrashLoops with `multiple compute drivers are not supported yet`** — your OpenShell-gvisor-degraded tree is behind M3.14, where `ComputeDriverKind::Substrate` wasn't added to the single-driver allow-list. Pull the tip.
 
-**`error: services "atenet-router-envoy" not found`** — substrate vintage. Older builds expose `svc/atenet-router`; newer ones add `-envoy`. The driver uses `atenet-router`. Patch with `kubectl get svc -n ate-system | grep atenet` and update the port-forward line accordingly.
+**Gateway pod CrashLoops with `K8s ServiceAccount bootstrap requires [openshell.drivers.kubernetes]`** — SE-8. Re-apply `gateway/gateway-config.yaml` which contains the stub `[openshell.drivers.kubernetes]` block.
 
-**Beat 1 returns 502 with `Name or service not known`** — the supervisor's HTTPS_PROXY injection didn't reach Python. The agent has a defensive fallback (sets `HTTPS_PROXY=http://127.0.0.1:3128` if unset); if you see this anyway, double-check the supervisor came up cleanly (`kubectl logs -c supervisor <pod>` should show `[helpdesk] listening on :80, model=gpt-oss:20b-cloud`).
+**Beat 4 returns "not found" from atenet** — the demo client is using the wrong actor ID for the `Host:` header. The gateway assigns sandbox `metadata.id` as a UUID, and that UUID is the substrate actor_id. The demo captures the returned id from CreateSandbox into the `ACTOR_ID[alice]` shell associative array; check that it was populated.
 
-**Beat 4 returns "I have no memory of a prior conversation"** — the actor lost its snapshot. Check `kubectl ate get actor helpdesk-1 -o json | jq '.actors[0].lastSnapshot'` — it must be non-empty. The most common cause is a failed checkpoint (gVisor `inconsistent private memory files on restore` after a sandbox grandchild SIGPIPE), which substrate's `cmdRestore` reports as `internal server error`. Pull `kubectl logs -n ate-system ds/atelet` for the underlying runsc stderr.
+**`error: services "atenet-router-envoy" not found`** — substrate vintage. Use `atenet-router` (already in this script).
 
-**Beat 6 returns 502 or stalls** — without PR #75 the actor stays `STATUS_RUNNING` pointing at the deleted pod and atenet times out forwarding to a dead IP. Verify your ate-api-server image was built from a tree that contains `cmd/ateapi/internal/controlapi/syncer.go`'s `releaseActorOnDeadWorker` helper:
-
-```bash
-kubectl exec -n ate-system deploy/ate-api-server-deployment -- /ate-api-server --help 2>&1 | head -1
-# then grep the source on disk, or look at the image digest in the deployment spec.
-```
-
-If the helper is absent, you're running pre-PR-#75 substrate. Rebuild from a branch that has it.
-
-**Pool pods stuck `Pending` / `ImagePullBackOff`** — the `__ATEOM_IMAGE__` placeholder wasn't rendered, or the image isn't in the local registry. First confirm `docker inspect localhost:5001/ateom-gvisor:latest --format '{{index .RepoDigests 0}}'` prints a real digest (force a `docker pull localhost:5001/ateom-gvisor:latest` first if it's empty). If the image is missing entirely, you're on a fresh box without PR #67 — either merge it into your substrate checkout (see Companion changes above) or run `ko build ./cmd/ateom-gvisor` manually with `KO_DOCKER_REPO=localhost:5001` to publish it. Then re-run the `sed | kubectl apply` step in Quick Start step 3.
+**Beat 9 returns 502 or stalls** — substrate without PR #75. The actor stays `STATUS_RUNNING` pointing at the deleted pod and atenet times out. Verify your ate-api-server build is on a branch that contains `cmd/ateapi/internal/controlapi/syncer.go`'s `releaseActorOnDeadWorker` helper.
 
 ## Cleanup
 
 ```bash
+# Delete both demo actors via the gateway.
+for name in alice bob; do
+  printf '{"name":"%s"}' "$name" | grpcurl -plaintext \
+    -import-path ~/proto -proto openshell.proto \
+    -d @ localhost:50051 openshell.v1.OpenShell/DeleteSandbox || true
+done
+
+# Tear down the gateway.
+kubectl delete -n ate-openshell-m0 deploy/openshell-gateway-substrate svc/openshell-gateway-substrate
+kubectl delete configmap -n ate-openshell-m0 openshell-gateway-substrate-config
+kubectl delete clusterrolebinding openshell-gateway-substrate
+kubectl delete sa -n ate-openshell-m0 openshell-gateway-substrate
+
+# Tear down helpdesk.
 kubectl delete -n ate-demo-helpdesk actortemplate helpdesk-agent workerpool helpdesk-pool
 kubectl delete namespace ate-demo-helpdesk
 
-# Tear the cluster down only if you don't want to iterate on it.
+# Only if you don't want to iterate on the cluster:
 ~/go/src/github.com/agent-substrate/substrate/hack/delete-kind-cluster.sh
 ```
 
-Rotate the Ollama Cloud API key at https://ollama.com/settings if it sat in a local `routes.local.yaml` long enough to matter.
-
 ## Further reading
 
-- [`../../tests/integration/`](../../tests/integration/) — the supervisor-image harness this demo builds on (`build-image.sh`, base `Dockerfile`, policy `data.yaml`, OpenShell `policy.rego`).
+- [`../../src/lib.rs`](../../src/lib.rs) — the substrate driver's `ComputeDriver` implementation.
+- [`../../tests/live.rs`](../../tests/live.rs) — driver-side integration tests (the unit-test analog of this demo).
+- [`../../tests/integration/gateway/`](../../tests/integration/gateway/) — the §7b POC: real openshell-gateway against substrate, verifying the supervisor↔gateway channel (F1/F2/F3 — settings poll, inference routing, log push). Complementary to this demo, which verifies the gateway↔driver↔substrate channel (create/list/delete).
 - [`../../docs/poc-intro.md`](../../docs/poc-intro.md) — architecture overview for the OpenShell-on-Substrate driver.
-- [substrate PR #75](https://github.com/agent-substrate/substrate/pull/75) — `ateapi/syncer: release actor when host pod is deleted` (Beat 6's enabling change).
-- [substrate PR #73](https://github.com/agent-substrate/substrate/pull/73) — `ActorTemplate.spec.containers[].securityContext` (per-container caps + UID/GID).
+- [substrate PR #75](https://github.com/agent-substrate/substrate/pull/75) — `ateapi/syncer: release actor when host pod is deleted` (Beat 9's enabling change).
+- [substrate PR #73](https://github.com/agent-substrate/substrate/pull/73) — `ActorTemplate.spec.containers[].securityContext`.
 - [substrate PR #66](https://github.com/agent-substrate/substrate/pull/66) — `ateom-gvisor` eth0 idempotency on restore.
-- [NVIDIA/OpenShell PR #1548](https://github.com/NVIDIA/OpenShell/pull/1548) — `OPENSHELL_BEST_EFFORT_FAILURES` gate, the upstream-shaped change inside OpenShell.
+- [NVIDIA/OpenShell PR #1548](https://github.com/NVIDIA/OpenShell/pull/1548) — `OPENSHELL_BEST_EFFORT_FAILURES` gate.

@@ -1,0 +1,28 @@
+# ServiceAccount + ClusterRoleBinding for the substrate-driven gateway.
+#
+# The gateway's substrate driver dials ate-api-server and creates
+# ActorTemplates / Actors. We bind to the existing `ate-controller`
+# ClusterRole because it already carries the substrate ateapi RBAC
+# (ListActors, CreateActor, ResumeActor, SuspendActor, DeleteActor,
+# Apply ActorTemplate, etc.). The gateway lives in ate-openshell-m0
+# alongside the §7b POC so we can reuse its JWT signing secret; the
+# driver writes ActorTemplates into the helpdesk demo's namespace
+# (ate-demo-helpdesk).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openshell-gateway-substrate
+  namespace: ate-openshell-m0
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openshell-gateway-substrate
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ate-controller
+subjects:
+  - kind: ServiceAccount
+    name: openshell-gateway-substrate
+    namespace: ate-openshell-m0
