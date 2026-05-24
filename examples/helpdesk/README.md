@@ -8,7 +8,7 @@ operator  ──gRPC──>  openshell-gateway  ──in-process──>  openshe
                        ["substrate"])
 ```
 
-**Status: verified end-to-end on bigbox 2026-05-24** against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75) and `dims/OpenShell@chore/gvisor-degraded-netns` tip `8343b8d` (M3.14–M3.16). Every one of the gateway's lifecycle RPCs (`CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`) executed against the driver in the verified run; the driver's `validate_sandbox_create` + `create_sandbox` + `list_sandboxes` + `delete_sandbox` were all exercised. The supervisor stays in standalone mode (policy + OPA + Ollama Cloud routing all baked into the image) so the data plane (`/chat`, `/probe`) hits atenet directly — the demo proves the driver's control plane, not the gateway's data plane (the §7b POC covers that separately).
+**Status: verified end-to-end on bigbox 2026-05-24** against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75) and `dims/OpenShell@integration/openshell-driver-substrate` tip `8343b8d` (M3.14–M3.16). Every one of the gateway's lifecycle RPCs (`CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`) executed against the driver in the verified run; the driver's `validate_sandbox_create` + `create_sandbox` + `list_sandboxes` + `delete_sandbox` were all exercised. The supervisor stays in standalone mode (policy + OPA + Ollama Cloud routing all baked into the image) so the data plane (`/chat`, `/probe`) hits atenet directly — the demo proves the driver's control plane, not the gateway's data plane (the §7b POC covers that separately).
 
 ## The 10 beats
 
@@ -52,13 +52,13 @@ This demo lives on the in-flight M3 work for both substrate and OpenShell. You n
 
 | Repo + branch / PR | Required for | Status |
 |---|---|---|
-| [`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns) (tip `8343b8d`, M3.14–M3.16) | The gateway-side wiring (`ComputeDriverKind::Substrate` dispatch arm + `substrate_actor_template` annotation path) | local branch on personal fork |
+| [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate) (tip `8343b8d`, M3.14–M3.16) | The gateway-side wiring (`ComputeDriverKind::Substrate` dispatch arm + `substrate_actor_template` annotation path) | local branch on personal fork |
 | [`agent-substrate/substrate#75`](https://github.com/agent-substrate/substrate/pull/75) | Beat 9 (pod-kill migration) — without it, alice would strand in `STATUS_RUNNING` pointing at a dead pod | open PR |
 | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh --deploy-ate-system` publishes the `ateom-gvisor` image | open PR; skip if you already have `localhost:5001/ateom-gvisor` cached |
 | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | `ateom-gvisor` eth0 idempotency on restore — strongly recommended for repeated Beat 9 cycles | open PR |
-| [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) | `OPENSHELL_BEST_EFFORT_FAILURES` gate — required, but the chore/gvisor-degraded-netns branch above already carries the equivalent best-effort patches | open PR |
+| [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) | `OPENSHELL_BEST_EFFORT_FAILURES` gate — required, but the integration/openshell-driver-substrate branch above already carries the equivalent best-effort patches | open PR |
 
-The driver-side work (M3.1–M3.13) is already on `chore/gvisor-degraded-netns`. M3.14 + M3.16 land in this same demo cycle:
+The driver-side work (M3.1–M3.13) is already on `integration/openshell-driver-substrate`. M3.14 + M3.16 land in this same demo cycle:
 
 - **M3.14**: `wire ComputeDriverKind::Substrate dispatch into gateway compute runtime` — replaces the scaffold's placeholder `Err(...)` arm with a real `ComputeRuntime::new_substrate(...)` call, statically links the driver crate into the gateway binary.
 - **M3.16**: `read substrate_actor_template from public-API annotations path` — extends `template_name_from_spec` to also look under `platform_config["annotations"]["substrate_actor_template"]`, which is where the gateway's `build_platform_config` puts `SandboxTemplate.annotations`. Without this, the public OpenShell CreateSandbox API has no way to reference a pre-provisioned ActorTemplate.
@@ -79,7 +79,7 @@ git merge --no-edit dims/feat/install-publish-ateom-image dims/fix/ateom-gvisor-
 # 2. OpenShell with the M3 driver wiring.
 git clone https://github.com/dims/OpenShell ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded
 cd ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded
-git checkout chore/gvisor-degraded-netns
+git checkout integration/openshell-driver-substrate
 
 # 3. this repo (you're reading this README inside it).
 git clone https://github.com/dims/openshell-driver-substrate ~/go/src/github.com/dims/openshell-driver-substrate

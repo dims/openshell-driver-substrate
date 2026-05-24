@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build + push the substrate-driven openshell-gateway image to the
 # kind-registry. Builds from the dims/OpenShell M3 branch
-# (chore/gvisor-degraded-netns) which carries the M3.14 dispatch arm
+# (integration/openshell-driver-substrate) which carries the M3.14 dispatch arm
 # that statically links openshell-driver-substrate.
 #
 # Source-tree resolution order:

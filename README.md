@@ -18,7 +18,7 @@ for OpenShell.
 
 **Status (2026-05-24):** Driver crate is now load-bearing in a real
 OpenShell gateway. The M3 wiring landed on
-[`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns)
+[`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
 (commits M3.14 = [`917e969`](https://github.com/dims/OpenShell/commit/917e969)
 and M3.16 = [`8343b8d`](https://github.com/dims/OpenShell/commit/8343b8d));
 the helpdesk demo above exercises every
@@ -45,15 +45,16 @@ Cargo's `openshell-core` dep is pinned to the corresponding
 The crate is a library — consumers link it from Cargo and wire it into
 their compute-runtime dispatcher. The canonical consumer is OpenShell's
 `openshell-server`; the wiring landed on
-[`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns)
+[`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
 as [M3.14](https://github.com/dims/OpenShell/commit/917e969) +
 [M3.16](https://github.com/dims/OpenShell/commit/8343b8d). For a fresh
 consumer the three pieces are:
 
-**1. Cargo dep.** Add to `openshell-server/Cargo.toml`:
+**1. Cargo dep.** Add to `openshell-server/Cargo.toml`. Pin a specific commit so the build is reproducible; bump the rev to pick up new driver work:
 ```toml
-openshell-driver-substrate = { path = "../openshell-driver-substrate" }
+openshell-driver-substrate = { git = "https://github.com/dims/openshell-driver-substrate", rev = "<full-sha-from-main>" }
 ```
+The driver pins `openshell-core` to a specific rev of its own; if your workspace already builds `openshell-core` from a different rev, add a `[patch."https://github.com/dims/OpenShell"]` override at the workspace root pointing at your local copy.
 
 **2. Dispatcher arm.** `SubstrateComputeDriver` implements `ComputeDriver`
 directly (same `WatchSandboxesStream` type the gateway expects), so the

@@ -2,7 +2,7 @@
 # (substrate-driver-driven). One replica is enough at POC scale.
 #
 # The gateway image is built from the dims/OpenShell M3 branch
-# (chore/gvisor-degraded-netns, M3.14+) so it statically links the
+# (integration/openshell-driver-substrate, M3.14+) so it statically links the
 # substrate compute driver. Lifecycle calls go through
 #   gateway → openshell-driver-substrate → ate-api-server.
 #

@@ -1,5 +1,5 @@
 # OpenShell gateway image built from the dims/OpenShell M3 branch
-# (chore/gvisor-degraded-netns) — same multi-stage shape as
+# (integration/openshell-driver-substrate) — same multi-stage shape as
 # Dockerfile.gateway but pulls in the source tree that carries the
 # ComputeDriverKind::Substrate wiring landed by M3.14 (209fc46+).
 #
