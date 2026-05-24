@@ -688,13 +688,13 @@ fn synthesize_template(
         );
     }
     // Gateway-minted JWT, when the gateway populated it on the spec.
-    if let Some(spec) = sandbox.spec.as_ref() {
-        if !spec.sandbox_token.is_empty() {
-            env_map.insert(
-                openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
-                spec.sandbox_token.clone(),
-            );
-        }
+    if let Some(spec) = sandbox.spec.as_ref()
+        && !spec.sandbox_token.is_empty()
+    {
+        env_map.insert(
+            openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
+            spec.sandbox_token.clone(),
+        );
     }
     let env: Vec<EnvVar> = env_map
         .into_iter()
