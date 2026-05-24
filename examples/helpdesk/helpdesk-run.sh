@@ -34,7 +34,7 @@ GW_URL=localhost:50051
 ACTOR_TEMPLATE=helpdesk-agent
 
 if [ ! -f "$PROTO_DIR/openshell.proto" ]; then
-  echo "missing $PROTO_DIR/openshell.proto — copy from OpenShell-gvisor-degraded/proto/" >&2
+  echo "missing $PROTO_DIR/openshell.proto — copy from OpenShell-driver-substrate/proto/" >&2
   exit 1
 fi
 

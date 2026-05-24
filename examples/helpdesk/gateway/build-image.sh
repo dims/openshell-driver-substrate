@@ -6,8 +6,8 @@
 #
 # Source-tree resolution order:
 #   1. $OPENSHELL_REPO                                (operator override)
-#   2. ../../../OpenShell-gvisor-degraded             (sibling repo, local)
-#   3. ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded (bigbox layout)
+#   2. ../../../OpenShell-driver-substrate             (sibling repo, local)
+#   3. ~/go/src/github.com/nvidia/OpenShell-driver-substrate (bigbox layout)
 #
 # Prints the resulting <repo>@sha256:<digest>.
 set -euo pipefail
@@ -20,12 +20,12 @@ IMAGE_REF="$REGISTRY/$IMAGE_TAG"
 
 if [ -n "${OPENSHELL_REPO:-}" ] && [ -d "$OPENSHELL_REPO" ]; then
   SRC="$OPENSHELL_REPO"
-elif [ -d "$CRATE_ROOT/../OpenShell-gvisor-degraded" ]; then
-  SRC="$(cd "$CRATE_ROOT/../OpenShell-gvisor-degraded" && pwd)"
-elif [ -d "$HOME/go/src/github.com/nvidia/OpenShell-gvisor-degraded" ]; then
-  SRC="$HOME/go/src/github.com/nvidia/OpenShell-gvisor-degraded"
+elif [ -d "$CRATE_ROOT/../OpenShell-driver-substrate" ]; then
+  SRC="$(cd "$CRATE_ROOT/../OpenShell-driver-substrate" && pwd)"
+elif [ -d "$HOME/go/src/github.com/nvidia/OpenShell-driver-substrate" ]; then
+  SRC="$HOME/go/src/github.com/nvidia/OpenShell-driver-substrate"
 else
-  echo "[build-helpdesk-gateway] no OpenShell-gvisor-degraded source tree found; set OPENSHELL_REPO" >&2
+  echo "[build-helpdesk-gateway] no OpenShell-driver-substrate source tree found; set OPENSHELL_REPO" >&2
   exit 1
 fi
 
@@ -36,11 +36,11 @@ BUILD_CTX="$(mktemp -d)"
 trap 'rm -rf "$BUILD_CTX"' EXIT
 cp "$HERE/Dockerfile" "$BUILD_CTX/Dockerfile"
 
-if cp -alr "$SRC" "$BUILD_CTX/OpenShell-gvisor-degraded" 2>/dev/null; then
+if cp -alr "$SRC" "$BUILD_CTX/OpenShell-driver-substrate" 2>/dev/null; then
   echo "[build-helpdesk-gateway] source hardlinked into build context" >&2
 else
   echo "[build-helpdesk-gateway] hardlink unavailable; rsyncing source (~1 GB)" >&2
-  rsync -a --exclude target --exclude .git "$SRC/" "$BUILD_CTX/OpenShell-gvisor-degraded/"
+  rsync -a --exclude target --exclude .git "$SRC/" "$BUILD_CTX/OpenShell-driver-substrate/"
 fi
 
 echo "[build-helpdesk-gateway] docker build $IMAGE_REF" >&2

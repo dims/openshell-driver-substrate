@@ -77,8 +77,8 @@ git checkout -b try/helpdesk-prereqs dims/fix/actor-resume-recovery
 git merge --no-edit dims/feat/install-publish-ateom-image dims/fix/ateom-gvisor-eth0-rollback
 
 # 2. OpenShell with the M3 driver wiring.
-git clone https://github.com/dims/OpenShell ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded
-cd ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded
+git clone https://github.com/dims/OpenShell ~/go/src/github.com/nvidia/OpenShell-driver-substrate
+cd ~/go/src/github.com/nvidia/OpenShell-driver-substrate
 git checkout integration/openshell-driver-substrate
 
 # 3. this repo (you're reading this README inside it).
@@ -141,7 +141,7 @@ kubectl create secret generic -n ate-openshell-m0 ate-api-server-ca \
 
 # 8. Stage the .proto file so grpcurl can talk to the gateway.
 mkdir -p ~/proto
-cp ~/go/src/github.com/nvidia/OpenShell-gvisor-degraded/proto/*.proto ~/proto/
+cp ~/go/src/github.com/nvidia/OpenShell-driver-substrate/proto/*.proto ~/proto/
 
 # 9. Run the demo.
 SUPERVISOR_IMAGE="$SUPERVISOR_IMAGE" PROTO_DIR=$HOME/proto \
@@ -165,7 +165,7 @@ SUPERVISOR_IMAGE="$SUPERVISOR_IMAGE" PROTO_DIR=$HOME/proto \
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Builds `openshell-gateway` from `OpenShell-gvisor-degraded` (the M3 branch with the substrate driver). Same multi-stage shape as `tests/integration/gateway/Dockerfile.gateway`, different source tree. |
+| `Dockerfile` | Builds `openshell-gateway` from `OpenShell-driver-substrate` (the M3 branch with the substrate driver). Same multi-stage shape as `tests/integration/gateway/Dockerfile.gateway`, different source tree. |
 | `build-image.sh` | Wraps the Docker build + push to the kind-registry. Prints the resulting `<repo>@sha256:<digest>`. |
 | `gateway-rbac.yaml` | `ServiceAccount openshell-gateway-substrate` in `ate-openshell-m0` + `ClusterRoleBinding` to the existing `ate-controller` ClusterRole (cluster-wide RBAC for substrate ateapi operations). |
 | `gateway-config.yaml` | ConfigMap with `gateway.toml`: `compute_drivers = ["substrate"]` + `[openshell.drivers.substrate]` block. Reuses the §7b POC's JWT signing key. Includes a stub `[openshell.drivers.kubernetes]` block to satisfy the gateway's in-cluster JWT bootstrap check (SE-8) — the kubernetes driver is never invoked. |
@@ -230,7 +230,7 @@ Key signals:
 
 **Beat 1 returns `failed to connect to Substrate ate-api-server at api.ate-system.svc:443: transport error`** — the gateway pod can't reach or can't verify the ate-api-server's TLS cert. Most likely the `ate-api-server-ca` Secret in `ate-openshell-m0` is missing or has the wrong CA. Re-run the JSON→PEM conversion (see Quick Start step 7). Confirm the bundle validates with `openssl s_client -connect <api-svc-ip>:443 -servername api.ate-system.svc -CAfile /tmp/ate-api-ca.pem`.
 
-**Gateway pod CrashLoops with `multiple compute drivers are not supported yet`** — your OpenShell-gvisor-degraded tree is behind M3.14, where `ComputeDriverKind::Substrate` wasn't added to the single-driver allow-list. Pull the tip.
+**Gateway pod CrashLoops with `multiple compute drivers are not supported yet`** — your OpenShell-driver-substrate tree is behind M3.14, where `ComputeDriverKind::Substrate` wasn't added to the single-driver allow-list. Pull the tip.
 
 **Gateway pod CrashLoops with `K8s ServiceAccount bootstrap requires [openshell.drivers.kubernetes]`** — SE-8. Re-apply `gateway/gateway-config.yaml` which contains the stub `[openshell.drivers.kubernetes]` block.
 

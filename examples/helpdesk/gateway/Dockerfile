@@ -4,7 +4,7 @@
 # ComputeDriverKind::Substrate wiring landed by M3.14 (209fc46+).
 #
 # Build context layout (resolved by build-gateway-image.sh):
-#   ./OpenShell-gvisor-degraded/   — Cargo workspace root
+#   ./OpenShell-driver-substrate/   — Cargo workspace root
 #
 # Compared with Dockerfile.gateway (which builds the v3 branch and is
 # substrate-bypassed), this image's `openshell-gateway` binary statically
@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY OpenShell-gvisor-degraded /src
+COPY OpenShell-driver-substrate /src
 
 # Build the gateway binary only. Workspace-wide builds pull in the policy
 # prover (Z3-dependent) and the supervisor (long Linux-only build); we
