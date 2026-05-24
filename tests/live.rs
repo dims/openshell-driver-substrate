@@ -131,8 +131,8 @@ async fn live_write_path_round_trip() {
         eprintln!("skipping: SUBSTRATE_LIVE_* env vars not set");
         return;
     };
-    let template_name = std::env::var("SUBSTRATE_LIVE_TEMPLATE_NAME")
-        .unwrap_or_else(|_| "supervisor".to_string());
+    let template_name =
+        std::env::var("SUBSTRATE_LIVE_TEMPLATE_NAME").unwrap_or_else(|_| "supervisor".to_string());
     let driver = SubstrateComputeDriver::new(config.clone());
 
     // Build a sandbox whose platform_config selects the pre-provisioned

@@ -203,9 +203,7 @@ impl Default for SubstrateComputeConfig {
             runsc_amd64_sha256: String::from(
                 "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63",
             ),
-            runsc_amd64_url: String::from(
-                "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc",
-            ),
+            runsc_amd64_url: String::from("gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"),
             template_ready_timeout_secs: 180,
             // Empty by default keeps the local-policy story working
             // out of the box; operators flip this on when they want
@@ -256,7 +254,9 @@ pub enum SubstrateDriverError {
     Kube(#[from] kube::Error),
     #[error("ActorTemplate {namespace}/{name} failed during golden-snapshot creation")]
     TemplatePhaseFailed { namespace: String, name: String },
-    #[error("ActorTemplate {namespace}/{name} did not reach Ready in time (last phase: {last_phase:?})")]
+    #[error(
+        "ActorTemplate {namespace}/{name} did not reach Ready in time (last phase: {last_phase:?})"
+    )]
     TemplateTimeout {
         namespace: String,
         name: String,
@@ -293,7 +293,9 @@ impl From<template::TemplateError> for SubstrateDriverError {
 impl From<SubstrateDriverError> for Status {
     fn from(err: SubstrateDriverError) -> Self {
         match err {
-            SubstrateDriverError::InvalidEndpoint { .. } => Status::invalid_argument(err.to_string()),
+            SubstrateDriverError::InvalidEndpoint { .. } => {
+                Status::invalid_argument(err.to_string())
+            }
             SubstrateDriverError::Connect { .. } => Status::unavailable(err.to_string()),
             SubstrateDriverError::Rpc(status) => status,
             SubstrateDriverError::Kube(_) => Status::unavailable(err.to_string()),
@@ -494,8 +496,7 @@ impl SubstrateComputeDriver {
                 source,
             })?;
 
-        let client =
-            ateapi::control_client::ControlClient::with_interceptor(channel.clone(), auth);
+        let client = ateapi::control_client::ControlClient::with_interceptor(channel.clone(), auth);
         *guard = Some(channel);
         Ok(client)
     }
@@ -508,12 +509,12 @@ impl SubstrateComputeDriver {
         let Some(path) = self.config.api_bearer_token_path.as_ref() else {
             return Ok(AuthInterceptor { bearer: None });
         };
-        let raw = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|source| SubstrateDriverError::TlsConfig {
+        let raw = tokio::fs::read_to_string(path).await.map_err(|source| {
+            SubstrateDriverError::TlsConfig {
                 path: path.display().to_string(),
                 source,
-            })?;
+            }
+        })?;
         // Tokens written by Kubernetes (projected SA tokens, kubectl
         // exec auth helpers) typically end with a newline that
         // bearer-token validators reject; strip it once here.
@@ -546,19 +547,23 @@ impl SubstrateComputeDriver {
             // No CA configured -> plaintext.
             return Ok(None);
         };
-        let ca_pem = tokio::fs::read(ca_path)
-            .await
-            .map_err(|source| SubstrateDriverError::TlsConfig {
-                path: ca_path.display().to_string(),
-                source,
-            })?;
+        let ca_pem =
+            tokio::fs::read(ca_path)
+                .await
+                .map_err(|source| SubstrateDriverError::TlsConfig {
+                    path: ca_path.display().to_string(),
+                    source,
+                })?;
         let mut tls = tonic::transport::ClientTlsConfig::new()
             .ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
 
         // Optional mTLS client identity. Both halves must be present
         // for the pair to be honoured; a single half on its own is a
         // configuration error.
-        match (cfg.api_client_cert_path.as_ref(), cfg.api_client_key_path.as_ref()) {
+        match (
+            cfg.api_client_cert_path.as_ref(),
+            cfg.api_client_key_path.as_ref(),
+        ) {
             (Some(cert), Some(key)) => {
                 let cert_pem = tokio::fs::read(cert).await.map_err(|source| {
                     SubstrateDriverError::TlsConfig {
@@ -682,7 +687,13 @@ fn require_sandbox_id(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
 /// non-empty string.
 fn template_name_from_spec(sandbox: &DriverSandbox) -> Option<String> {
     use prost_types::value::Kind;
-    let cfg = sandbox.spec.as_ref()?.template.as_ref()?.platform_config.as_ref()?;
+    let cfg = sandbox
+        .spec
+        .as_ref()?
+        .template
+        .as_ref()?
+        .platform_config
+        .as_ref()?;
     // 1. Top-level key (driver-internal callers).
     if let Some(val) = cfg.fields.get("substrate_actor_template") {
         if let Some(Kind::StringValue(s)) = &val.kind {
@@ -758,9 +769,7 @@ fn synthesize_template(
     use std::collections::BTreeMap;
 
     let template_spec = sandbox.spec.as_ref().and_then(|s| s.template.as_ref());
-    let image = template_spec
-        .map(|t| t.image.clone())
-        .unwrap_or_default();
+    let image = template_spec.map(|t| t.image.clone()).unwrap_or_default();
 
     // Combine environment from spec.environment + spec.template.environment
     // into a stable, sorted list. Driver-injected vars
@@ -1156,10 +1165,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         // are left in place. Errors here are non-fatal: the actor is
         // gone, so the gateway's view is consistent even if the CR
         // cleanup is deferred.
-        if let Err(err) = self
-            .delete_synthesized_template_if_owned(&actor_id)
-            .await
-        {
+        if let Err(err) = self.delete_synthesized_template_if_owned(&actor_id).await {
             tracing::warn!(
                 actor_id = %actor_id,
                 error = ?err,
@@ -1194,9 +1200,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 let mut client = match driver.control_client().await {
                     Ok(c) => c,
                     Err(err) => {
-                        let _ = tx
-                            .send(Err(Status::from(err)))
-                            .await;
+                        let _ = tx.send(Err(Status::from(err))).await;
                         return;
                     }
                 };
@@ -1569,16 +1573,8 @@ mod tests {
             .security_context
             .as_ref()
             .expect("securityContext present when request_capabilities=true");
-        let caps = sc
-            .capabilities
-            .as_ref()
-            .expect("capabilities populated");
-        for required in [
-            "CAP_NET_ADMIN",
-            "CAP_SETUID",
-            "CAP_SETGID",
-            "CAP_SYS_ADMIN",
-        ] {
+        let caps = sc.capabilities.as_ref().expect("capabilities populated");
+        for required in ["CAP_NET_ADMIN", "CAP_SETUID", "CAP_SETGID", "CAP_SYS_ADMIN"] {
             assert!(
                 caps.add.iter().any(|c| c == required),
                 "expected {required} in security_context.capabilities.add"
