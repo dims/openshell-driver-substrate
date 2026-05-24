@@ -3,15 +3,28 @@
 Agent Substrate (gVisor + checkpoint/restore via runsc) compute driver
 for OpenShell.
 
+**Read first, depending on what you want:**
+
+- [**`docs/poc-intro.md`**](docs/poc-intro.md) — joint POC overview for
+  teammates familiar with OpenShell *or* Substrate. Explains what this
+  is, why OpenShell is better with Substrate, how the boot path
+  degrades safely under gVisor, and the boundary between this crate and
+  upstream.
+- [**`examples/helpdesk/README.md`**](examples/helpdesk/README.md) —
+  the 10-beat driver-driven helpdesk demo. Three acts (provisioning,
+  lifecycle, hygiene), every `CreateSandbox`/`ListSandboxes`/`DeleteSandbox`
+  flows through `openshell-gateway → openshell-driver-substrate →
+  ate-api-server`. Prereqs, quick-start, expected output, troubleshooting.
+
 **Status (2026-05-24):** Driver crate is now load-bearing in a real
 OpenShell gateway. The M3 wiring landed on
 [`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns)
 (commits M3.14 = [`917e969`](https://github.com/dims/OpenShell/commit/917e969)
 and M3.16 = [`8343b8d`](https://github.com/dims/OpenShell/commit/8343b8d));
-a 10-beat helpdesk demo at [`examples/helpdesk/`](examples/helpdesk/)
-exercises every `CreateSandbox`/`ListSandboxes`/`DeleteSandbox` through
-the driver against a real substrate kind cluster. Verified end-to-end
-on bigbox 2026-05-24 evening.
+the helpdesk demo above exercises every
+`CreateSandbox`/`ListSandboxes`/`DeleteSandbox` through the driver
+against a real substrate kind cluster. Verified end-to-end on bigbox
+2026-05-24 evening.
 
 This repository depends on a small change in OpenShell that lets the
 supervisor tolerate the bootstrap subsystems gVisor degrades. Two
@@ -132,3 +145,4 @@ external SSH driver / per-actor JWTs). See
 | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | `ateom-gvisor` `eth0` move/restore idempotency + deferred rollback. Without it, the test harness alternates between green and red runs. |
 | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` automatically, so a `WorkerPool` is usable out of `--deploy-ate-system`. Closes the manual `ko publish` operator step. |
 | [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) | Per-container `securityContext` on `ActorTemplate.spec.containers[]`: `capabilities.add` + `runAsUser` / `runAsGroup`. Empty templates produce the same OCI bundle as before. Unblocks the driver's `synthesize_template` from emitting capability adds + a non-root supervisor start UID once it merges. |
+| [`agent-substrate/substrate#75`](https://github.com/agent-substrate/substrate/pull/75) | `ateapi/syncer: release actor when host pod is deleted`. `WorkerPoolSyncer`'s pod-delete hook resets the bound actor to `STATUS_SUSPENDED` so the next request migrates it onto a free worker, instead of stranding it pointing at a dead pod. Beat 9 of the helpdesk demo (pod-kill migration with multi-tenant proof) depends on it; verified end-to-end on bigbox 2026-05-24. |
