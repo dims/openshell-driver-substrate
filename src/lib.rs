@@ -173,9 +173,7 @@ impl Default for SubstrateComputeConfig {
             runsc_amd64_sha256: String::from(
                 "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63",
             ),
-            runsc_amd64_url: String::from(
-                "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc",
-            ),
+            runsc_amd64_url: String::from("gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"),
             template_ready_timeout_secs: 180,
             gateway_endpoint: String::new(),
             api_tls_ca_path: None,
@@ -214,7 +212,9 @@ pub enum SubstrateDriverError {
     Kube(#[from] kube::Error),
     #[error("ActorTemplate {namespace}/{name} failed during golden-snapshot creation")]
     TemplatePhaseFailed { namespace: String, name: String },
-    #[error("ActorTemplate {namespace}/{name} did not reach Ready in time (last phase: {last_phase:?})")]
+    #[error(
+        "ActorTemplate {namespace}/{name} did not reach Ready in time (last phase: {last_phase:?})"
+    )]
     TemplateTimeout {
         namespace: String,
         name: String,
@@ -251,7 +251,9 @@ impl From<template::TemplateError> for SubstrateDriverError {
 impl From<SubstrateDriverError> for Status {
     fn from(err: SubstrateDriverError) -> Self {
         match err {
-            SubstrateDriverError::InvalidEndpoint { .. } => Status::invalid_argument(err.to_string()),
+            SubstrateDriverError::InvalidEndpoint { .. } => {
+                Status::invalid_argument(err.to_string())
+            }
             SubstrateDriverError::Connect { .. } => Status::unavailable(err.to_string()),
             SubstrateDriverError::Rpc(status) => status,
             SubstrateDriverError::Kube(_) => Status::unavailable(err.to_string()),
@@ -438,8 +440,7 @@ impl SubstrateComputeDriver {
                 source,
             })?;
 
-        let client =
-            ateapi::control_client::ControlClient::with_interceptor(channel.clone(), auth);
+        let client = ateapi::control_client::ControlClient::with_interceptor(channel.clone(), auth);
         *guard = Some(channel);
         Ok(client)
     }
@@ -450,12 +451,12 @@ impl SubstrateComputeDriver {
         let Some(path) = self.config.api_bearer_token_path.as_ref() else {
             return Ok(AuthInterceptor { bearer: None });
         };
-        let raw = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|source| SubstrateDriverError::TlsConfig {
+        let raw = tokio::fs::read_to_string(path).await.map_err(|source| {
+            SubstrateDriverError::TlsConfig {
                 path: path.display().to_string(),
                 source,
-            })?;
+            }
+        })?;
         // Tokens written by Kubernetes (projected SA tokens, kubectl
         // exec auth helpers) typically end with a newline that
         // bearer-token validators reject; strip it once here.
@@ -484,19 +485,23 @@ impl SubstrateComputeDriver {
             // No CA configured -> plaintext.
             return Ok(None);
         };
-        let ca_pem = tokio::fs::read(ca_path)
-            .await
-            .map_err(|source| SubstrateDriverError::TlsConfig {
-                path: ca_path.display().to_string(),
-                source,
-            })?;
+        let ca_pem =
+            tokio::fs::read(ca_path)
+                .await
+                .map_err(|source| SubstrateDriverError::TlsConfig {
+                    path: ca_path.display().to_string(),
+                    source,
+                })?;
         let mut tls = tonic::transport::ClientTlsConfig::new()
             .ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
 
         // Optional mTLS client identity. Both halves must be present
         // for the pair to be honoured; a single half on its own is a
         // configuration error.
-        match (cfg.api_client_cert_path.as_ref(), cfg.api_client_key_path.as_ref()) {
+        match (
+            cfg.api_client_cert_path.as_ref(),
+            cfg.api_client_key_path.as_ref(),
+        ) {
             (Some(cert), Some(key)) => {
                 let cert_pem = tokio::fs::read(cert).await.map_err(|source| {
                     SubstrateDriverError::TlsConfig {
@@ -603,7 +608,13 @@ fn require_sandbox_id(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
 /// when the key is absent or non-string (the driver then synthesizes).
 fn template_name_from_spec(sandbox: &DriverSandbox) -> Option<String> {
     use prost_types::value::Kind;
-    let cfg = sandbox.spec.as_ref()?.template.as_ref()?.platform_config.as_ref()?;
+    let cfg = sandbox
+        .spec
+        .as_ref()?
+        .template
+        .as_ref()?
+        .platform_config
+        .as_ref()?;
     let value = cfg.fields.get("substrate_actor_template")?;
     match &value.kind {
         Some(Kind::StringValue(s)) if !s.is_empty() => Some(s.clone()),
@@ -634,9 +645,7 @@ fn synthesize_template(
     use std::collections::BTreeMap;
 
     let template_spec = sandbox.spec.as_ref().and_then(|s| s.template.as_ref());
-    let image = template_spec
-        .map(|t| t.image.clone())
-        .unwrap_or_default();
+    let image = template_spec.map(|t| t.image.clone()).unwrap_or_default();
 
     // Combine environment from spec.environment + spec.template.environment
     // into a stable, sorted list. Driver-injected vars
@@ -660,7 +669,10 @@ fn synthesize_template(
     // the actor never finishes restore. Strict-mode operators can still
     // override on a per-template basis by re-setting this to an empty
     // string in their ActorTemplate spec.
-    env_map.insert("OPENSHELL_BEST_EFFORT_FAILURES".to_string(), "1".to_string());
+    env_map.insert(
+        "OPENSHELL_BEST_EFFORT_FAILURES".to_string(),
+        "1".to_string(),
+    );
 
     // Sandbox id (deterministic, always known).
     env_map.insert(
@@ -849,7 +861,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 if status.code() == tonic::Code::NotFound {
                     Status::not_found(format!("sandbox {actor_id} not found"))
                 } else {
-                    Status::from(status)
+                    status
                 }
             })?;
         let actor = resp
@@ -867,10 +879,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let mut client = self.control_client().await?;
-        let resp = client
-            .list_actors(ateapi::ListActorsRequest {})
-            .await
-            .map_err(Status::from)?;
+        let resp = client.list_actors(ateapi::ListActorsRequest {}).await?;
         // Tenancy boundary: only surface actors whose ActorTemplate
         // lives in the namespace the driver was configured for.
         let ns = self.config.default_namespace.as_str();
@@ -922,15 +931,13 @@ impl ComputeDriver for SubstrateComputeDriver {
                 actor_template_namespace: template_ns,
                 actor_template_name: template_name,
             })
-            .await
-            .map_err(Status::from)?;
+            .await?;
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor_id,
                 boot: false,
             })
-            .await
-            .map_err(Status::from)?;
+            .await?;
 
         Ok(Response::new(CreateSandboxResponse {}))
     }
@@ -946,8 +953,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         let mut client = self.control_client().await?;
         client
             .suspend_actor(ateapi::SuspendActorRequest { actor_id })
-            .await
-            .map_err(Status::from)?;
+            .await?;
         Ok(Response::new(StopSandboxResponse {}))
     }
 
@@ -973,7 +979,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             Err(status)
                 if status.code() == tonic::Code::FailedPrecondition
                     || status.code() == tonic::Code::Internal => {}
-            Err(other) => return Err(Status::from(other)),
+            Err(other) => return Err(other),
         }
 
         // NotFound surfaces as deleted=false so a double-delete or a
@@ -986,15 +992,12 @@ impl ComputeDriver for SubstrateComputeDriver {
         let deleted = match result {
             Ok(_) => true,
             Err(status) if status.code() == tonic::Code::NotFound => false,
-            Err(other) => return Err(Status::from(other)),
+            Err(other) => return Err(other),
         };
 
         // Drop the driver-owned ActorTemplate if any. Best-effort:
         // the actor is already gone so the gateway's view is consistent.
-        if let Err(err) = self
-            .delete_synthesized_template_if_owned(&actor_id)
-            .await
-        {
+        if let Err(err) = self.delete_synthesized_template_if_owned(&actor_id).await {
             tracing::warn!(
                 actor_id = %actor_id,
                 error = ?err,
@@ -1023,9 +1026,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 let mut client = match driver.control_client().await {
                     Ok(c) => c,
                     Err(err) => {
-                        let _ = tx
-                            .send(Err(Status::from(err)))
-                            .await;
+                        let _ = tx.send(Err(Status::from(err))).await;
                         return;
                     }
                 };
@@ -1072,7 +1073,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 // Emit upserts for new actors and changed projections
                 // (status transitions, instance moves).
                 for (id, sandbox) in &current {
-                    let changed = prior.get(id).map_or(true, |old| old != sandbox);
+                    let changed = prior.get(id) != Some(sandbox);
                     if changed {
                         let evt = WatchSandboxesEvent {
                             payload: Some(watch_sandboxes_event::Payload::Sandbox(
@@ -1423,7 +1424,8 @@ mod tests {
         // Driver-injected: opts the supervisor into best-effort
         // bootstrap so gVisor's degraded subsystems don't abort startup.
         assert_eq!(
-            env.get("OPENSHELL_BEST_EFFORT_FAILURES").map(String::as_str),
+            env.get("OPENSHELL_BEST_EFFORT_FAILURES")
+                .map(String::as_str),
             Some("1")
         );
     }

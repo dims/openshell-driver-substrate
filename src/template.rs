@@ -97,7 +97,9 @@ pub enum TemplateError {
     Kube(#[from] kube::Error),
     #[error("ActorTemplate {namespace}/{name} reached phase Failed; aborting create")]
     PhaseFailed { namespace: String, name: String },
-    #[error("timed out waiting for ActorTemplate {namespace}/{name} to reach Ready (last phase: {last_phase:?})")]
+    #[error(
+        "timed out waiting for ActorTemplate {namespace}/{name} to reach Ready (last phase: {last_phase:?})"
+    )]
     Timeout {
         namespace: String,
         name: String,
@@ -216,8 +218,7 @@ mod tests {
         // missing field must deserialize the same way.
         let s: ActorTemplateStatus = serde_json::from_str("{}").unwrap();
         assert_eq!(s.phase, "");
-        let s: ActorTemplateStatus =
-            serde_json::from_str(r#"{"phase":"Ready"}"#).unwrap();
+        let s: ActorTemplateStatus = serde_json::from_str(r#"{"phase":"Ready"}"#).unwrap();
         assert_eq!(s.phase, "Ready");
     }
 }
