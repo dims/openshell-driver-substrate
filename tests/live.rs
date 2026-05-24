@@ -110,9 +110,20 @@ async fn live_get_capabilities() {
     );
 }
 
-/// Full write path: create -> get -> stop -> delete against a real
-/// cluster, using a pre-provisioned `supervisor` ActorTemplate so the
-/// test does not need CR-apply RBAC.
+/// Exercise the full write path against a real cluster:
+///
+/// 1. Create a fresh `DriverSandbox` whose template
+///    `platform_config[substrate_actor_template]` names the
+///    pre-provisioned `supervisor` template (the M0.5 demo's golden
+///    snapshot).
+/// 2. `create_sandbox` -> Substrate `CreateActor` + `ResumeActor`.
+/// 3. `get_sandbox` to confirm the projection round-trip.
+/// 4. `stop_sandbox` -> Substrate `SuspendActor`.
+/// 5. `delete_sandbox` -> Substrate `DeleteActor`.
+///
+/// Uses a pre-provisioned template name so this test doesn't try to
+/// apply ActorTemplate CRs (would need additional RBAC). The template
+/// must exist; the M0.5 demo's `supervisor` template fits.
 #[tokio::test]
 #[ignore = "requires SUBSTRATE_LIVE_* env vars + a running ate-api-server"]
 async fn live_write_path_round_trip() {
@@ -120,8 +131,8 @@ async fn live_write_path_round_trip() {
         eprintln!("skipping: SUBSTRATE_LIVE_* env vars not set");
         return;
     };
-    let template_name =
-        std::env::var("SUBSTRATE_LIVE_TEMPLATE_NAME").unwrap_or_else(|_| "supervisor".to_string());
+    let template_name = std::env::var("SUBSTRATE_LIVE_TEMPLATE_NAME")
+        .unwrap_or_else(|_| "supervisor".to_string());
     let driver = SubstrateComputeDriver::new(config.clone());
 
     // Build a sandbox whose platform_config selects the pre-provisioned
@@ -150,7 +161,8 @@ async fn live_write_path_round_trip() {
         namespace: config.default_namespace.clone(),
         spec: Some(DriverSandboxSpec {
             template: Some(DriverSandboxTemplate {
-                // Digest-pinned; validate_sandbox_create rejects bare tags.
+                // image is the digest-pinned reference live in the M0.5
+                // demo; validate_sandbox_create rejects bare tags.
                 image: std::env::var("SUBSTRATE_LIVE_TEST_IMAGE").unwrap_or_else(|_| {
                     String::from(
                         "localhost:5001/openshell-sandbox-m0@sha256:4947aa0986d8f7fb5b875d784e2a62dd50bc491e692dd163c106ca94edf0a13e",
@@ -223,9 +235,14 @@ async fn live_write_path_round_trip() {
     eprintln!("[live_write] ok");
 }
 
-/// Synthesized-template path: the driver applies an ActorTemplate CR
-/// via kube-rs, waits for `Ready`, then creates + resumes the actor.
-/// `delete_sandbox` reaps both. Needs a kubeconfig.
+/// Exercise the **synthesized-template** path: the driver creates an
+/// `ActorTemplate` CR via kube-rs, waits for Substrate's controller
+/// to advance it to `Ready` (golden snapshot taken), then creates and
+/// resumes the actor. On teardown, `delete_sandbox` reaps both the
+/// actor and the synthesized template.
+///
+/// Requires a kubeconfig (`KUBECONFIG` / `~/.kube/config`) the test
+/// process can use to apply CRs.
 #[tokio::test]
 #[ignore = "requires SUBSTRATE_LIVE_* env vars + a kubeconfig + a real WorkerPool"]
 async fn live_synthesized_template_round_trip() {

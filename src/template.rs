@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `ActorTemplate` CRD support: a minimal mirror of
-//! `agent-substrate/substrate/api/v1alpha1/actortemplate_types.go`
-//! sufficient for the driver to synthesize a template, apply it, and
-//! wait for Substrate's controller to advance its phase to `Ready`
-//! (golden snapshot captured). Fields beyond what the driver writes
-//! or reads back fall through `serde(default)`.
+//! `ActorTemplate` CRD support.
+//!
+//! Mirrors `agent-substrate/substrate/api/v1alpha1/actortemplate_types.go`
+//! closely enough that this crate can synthesize and apply a template, then
+//! wait for Substrate's controller to advance its phase to `Ready` (which
+//! signals that the golden snapshot has been captured and the template is
+//! usable for actor creation).
+//!
+//! The mirror is intentionally minimal: only the fields the driver writes
+//! or reads back are typed. Anything Substrate's controller may add to the
+//! CRD over time falls through `serde(default)` and is ignored on read.
 
 use std::time::Duration;
 
@@ -20,8 +25,9 @@ use serde::{Deserialize, Serialize};
 const APPLY_FIELD_MANAGER: &str = "openshell-driver-substrate";
 const READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Minimal mirror of Substrate's `Container` Go struct: only the
-/// fields the driver writes are typed.
+/// A single workload container the actor will run inside the gVisor
+/// sandbox. Mirrors the Substrate `Container` Go struct -- only the
+/// fields the driver writes are listed; ports and env are pass-through.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Container {
@@ -34,6 +40,35 @@ pub struct Container {
     pub ports: Vec<ContainerPort>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<EnvVar>,
+    /// Substrate's per-container security context (CRD field
+    /// `securityContext`). When set, the additional capabilities are
+    /// merged with the cluster's default sandbox set inside the OCI
+    /// bundle builder. Older Substrate versions (pre-`SecurityContext`
+    /// support) silently ignore the field on apply, so emitting it
+    /// unconditionally is safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security_context: Option<ContainerSecurityContext>,
+}
+
+/// Substrate subset of K8s `SecurityContext` -- only what the
+/// ActorTemplate CRD admits today.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerSecurityContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
+}
+
+/// Linux capability adjustments applied on top of Substrate's default
+/// sandbox set (`CAP_AUDIT_WRITE`, `CAP_KILL`, `CAP_NET_BIND_SERVICE`).
+/// Names may carry or omit the `CAP_` prefix; the OCI builder
+/// normalizes them.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+pub struct Capabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drop: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
@@ -57,8 +92,8 @@ pub struct RunscConfig {
     pub arm64: Option<RunscPlatformConfig>,
 }
 
-/// `ate.dev/v1alpha1 ActorTemplate` CRD root; the derive emits the
-/// wrapper struct plus `kube::Api` glue.
+/// `ate.dev/v1alpha1 ActorTemplate` CRD root. The derive macro emits
+/// the wrapper struct (`ActorTemplate`) plus glue for `kube::Api`.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[kube(
     group = "ate.dev",
@@ -90,16 +125,15 @@ pub struct ActorTemplateStatus {
     pub golden_snapshot: String,
 }
 
-/// Template-management errors; lifted into `SubstrateDriverError`.
+/// Errors specific to template management. Lifted into
+/// `SubstrateDriverError` at the lib boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
     #[error("kube client error: {0}")]
     Kube(#[from] kube::Error),
     #[error("ActorTemplate {namespace}/{name} reached phase Failed; aborting create")]
     PhaseFailed { namespace: String, name: String },
-    #[error(
-        "timed out waiting for ActorTemplate {namespace}/{name} to reach Ready (last phase: {last_phase:?})"
-    )]
+    #[error("timed out waiting for ActorTemplate {namespace}/{name} to reach Ready (last phase: {last_phase:?})")]
     Timeout {
         namespace: String,
         name: String,
@@ -107,8 +141,9 @@ pub enum TemplateError {
     },
 }
 
-/// Server-side apply. Idempotent: replays of the same spec are no-ops
-/// in Substrate's controller, so the golden snapshot is not retaken.
+/// Server-side apply the template into the cluster. Idempotent: replays
+/// of the same spec produce the same template (the controller treats
+/// "spec unchanged" as a no-op and does not retake the golden snapshot).
 pub async fn apply(client: &Client, template: &ActorTemplate) -> Result<(), TemplateError> {
     let ns = template
         .namespace()
@@ -163,8 +198,9 @@ mod tests {
 
     #[test]
     fn actor_template_camel_cases_correctly() {
-        // The CRD's wire format is camelCase; our Rust fields are
-        // snake_case. Verify the serde rename rolls through.
+        // The CRD spec wire format is camelCase (matches the Go struct
+        // tags); the Rust struct field is snake_case. Verify the
+        // serde rename rolls through.
         let tmpl = ActorTemplate::new(
             "supervisor",
             ActorTemplateSpec {
@@ -175,6 +211,7 @@ mod tests {
                     command: vec!["/usr/local/bin/openshell-sandbox".into()],
                     ports: vec![],
                     env: vec![],
+                    security_context: None,
                 }],
                 snapshots_config: SnapshotsConfig {
                     location: "gs://ate-snapshots/ate-openshell-m0/".into(),
@@ -214,11 +251,13 @@ mod tests {
 
     #[test]
     fn status_phase_default_is_empty() {
-        // Substrate reports the initial phase as empty string; a
-        // missing field must deserialize the same way.
+        // The initial phase reported by Substrate is the empty string;
+        // make sure our deserialization treats a missing field the
+        // same way.
         let s: ActorTemplateStatus = serde_json::from_str("{}").unwrap();
         assert_eq!(s.phase, "");
-        let s: ActorTemplateStatus = serde_json::from_str(r#"{"phase":"Ready"}"#).unwrap();
+        let s: ActorTemplateStatus =
+            serde_json::from_str(r#"{"phase":"Ready"}"#).unwrap();
         assert_eq!(s.phase, "Ready");
     }
 }

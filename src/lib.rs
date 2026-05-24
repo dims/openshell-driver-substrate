@@ -1,15 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Agent Substrate compute driver.
+//! Agent Substrate compute driver (scaffold).
 //!
-//! Lets the OpenShell gateway own the sandbox lifecycle by issuing
-//! `ateapi.Control` RPCs against an Agent Substrate cluster (gVisor +
-//! checkpoint/restore via runsc) instead of Docker/Podman/Kubernetes.
-//! A sandbox maps to one `ActorTemplate` (synthesized by the driver
-//! unless the caller pre-provisions one) plus one resumed `Actor`;
-//! `stop_sandbox` checkpoints, `delete_sandbox` drops the actor and,
-//! if synthesized, the template.
+//! This crate is the M3 placeholder for letting OpenShell use Agent Substrate
+//! (gVisor + checkpoint/restore via runsc, managed through `ateapi.Control`)
+//! as a first-class compute backend. The four-commit
+//! `chore/gvisor-degraded-netns` patch series + the example harness under
+//! `examples/agent-substrate-demo/` prove the supervisor side already works
+//! inside a Substrate gVisor actor; what is missing is the *driver* side --
+//! the glue that lets the OpenShell gateway own the sandbox lifecycle by
+//! issuing Substrate API calls instead of Docker/Podman/Kubernetes ones.
+//!
+//! See the crate `README.md` for the design sketch. Every gRPC method below
+//! returns `Status::unimplemented` until the corresponding mapping is
+//! written.
 
 #![allow(clippy::result_large_err)]
 
@@ -35,8 +40,10 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
 
 /// Tonic interceptor that injects `Authorization: Bearer <jwt>` on
-/// outbound RPCs, no-op when `bearer` is `None`. `Debug` is
-/// hand-rolled to keep the token out of logs.
+/// every outbound RPC. When the token is `None` the interceptor is a
+/// no-op so the same type covers both the authenticated and the
+/// unauthenticated (dev) paths. `Debug` is hand-rolled to redact the
+/// bearer (logs of the driver state should not leak the JWT).
 #[derive(Clone)]
 pub struct AuthInterceptor {
     bearer: Option<Arc<String>>,
@@ -78,10 +85,13 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// workloads see drops.
 const WATCH_CHANNEL_BUFFER: usize = 64;
 
-/// Generated tonic client + message types for `ateapi.Control`. The
-/// proto lives at `proto/ateapi.proto` (vendored from
-/// `agent-substrate/substrate`); `build.rs` emits the stubs at compile
-/// time.
+/// Generated tonic client for Substrate's `ateapi.Control` service.
+///
+/// The proto lives at `proto/ateapi.proto` (vendored from
+/// `agent-substrate/substrate`); `build.rs` invokes `tonic_build` to emit
+/// the client stubs at compile time. The driver embeds the `ateapi`
+/// module to keep the generated code from leaking into the crate's
+/// public API.
 #[allow(
     clippy::all,
     clippy::pedantic,
@@ -91,14 +101,19 @@ const WATCH_CHANNEL_BUFFER: usize = 64;
     missing_docs
 )]
 pub mod ateapi {
+    // Generated client + message types. The package name `ateapi` matches
+    // the `package ateapi;` declaration in the proto.
     tonic::include_proto!("ateapi");
 }
 
 pub mod template;
 
-/// Static configuration for the Substrate driver. Populated from the
-/// gateway's TOML config or `OPENSHELL_SUBSTRATE_*` environment
-/// variables.
+/// Static configuration for the Substrate driver.
+///
+/// All fields are populated from the gateway's TOML config file or from
+/// `OPENSHELL_SUBSTRATE_*` environment variables (the exact mapping will land
+/// alongside the first real implementation). The shape is intentionally
+/// small while the driver is a stub.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubstrateComputeConfig {
     /// gRPC endpoint of the Substrate `ate-api-server` (e.g.
@@ -113,7 +128,8 @@ pub struct SubstrateComputeConfig {
     /// this once per cluster; the driver does not create or scale it.
     pub default_worker_pool: String,
     /// Pause-container image used as the sandbox root. Substrate
-    /// requires a content-addressed (digest) reference.
+    /// requires a content-addressed reference. Default is the off-GCP
+    /// pin from the M0.5 demo.
     pub pause_image: String,
     /// Cloud-storage location prefix the driver writes into
     /// `snapshotsConfig.location` of every synthesized ActorTemplate.
@@ -124,13 +140,15 @@ pub struct SubstrateComputeConfig {
     /// gs:// URL pointing at the `amd64` runsc binary.
     pub runsc_amd64_url: String,
     /// How long to wait for a synthesized `ActorTemplate` to reach
-    /// `Ready` (golden snapshot taken).
+    /// `Ready` (golden snapshot taken). 90 s matches the M0.5 demo
+    /// measurement.
     pub template_ready_timeout_secs: u64,
     /// OpenShell gateway endpoint reachable from inside the gVisor
     /// actor. Injected into the synthesized template as
-    /// `OPENSHELL_ENDPOINT` for policy fetch + OCSF telemetry. Empty
-    /// disables injection, leaving the supervisor in standalone
-    /// `--policy-rules`/`--policy-data` mode.
+    /// `OPENSHELL_ENDPOINT` so the supervisor can connect for policy
+    /// fetch and OCSF telemetry. Empty disables injection (the
+    /// supervisor then runs in the standalone --policy-rules /
+    /// --policy-data mode from the M0.5 demo).
     pub gateway_endpoint: String,
     /// Path to the CA bundle the driver uses to verify the
     /// `ate-api-server` certificate. When set, the driver dials
@@ -158,6 +176,18 @@ pub struct SubstrateComputeConfig {
     /// up without a driver restart. None disables bearer auth.
     #[serde(default)]
     pub api_bearer_token_path: Option<std::path::PathBuf>,
+    /// When `true`, synthesized `ActorTemplate` CRs carry a
+    /// `spec.containers[0].securityContext.capabilities.add` requesting
+    /// `CAP_NET_ADMIN` / `CAP_SETUID` / `CAP_SETGID` / `CAP_SYS_ADMIN`
+    /// for the OpenShell supervisor. Requires the cluster to be
+    /// running the `feat/openshell-driver-companion` Substrate branch
+    /// (commit `ca74ca9` or later) -- older clusters reject the
+    /// unknown field with HTTP 500 because the CRD's structural
+    /// schema validates field names. Default `false` keeps the
+    /// supervisor in M0.5 degraded mode and works against every
+    /// Substrate version.
+    #[serde(default)]
+    pub request_capabilities: bool,
 }
 
 impl Default for SubstrateComputeConfig {
@@ -173,20 +203,34 @@ impl Default for SubstrateComputeConfig {
             runsc_amd64_sha256: String::from(
                 "a397be1abc2420d26bce6c70e6e2ff96c73aaaab929756c56f5e2089ea842b63",
             ),
-            runsc_amd64_url: String::from("gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc"),
+            runsc_amd64_url: String::from(
+                "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc",
+            ),
             template_ready_timeout_secs: 180,
+            // Empty by default keeps the local-policy story working
+            // out of the box; operators flip this on when they want
+            // the supervisor to fetch policy from a gateway.
             gateway_endpoint: String::new(),
+            // Plaintext is the dev default. Production deployments set
+            // api_tls_ca_path (and optionally the mTLS pair) to switch
+            // to https://.
             api_tls_ca_path: None,
             api_client_cert_path: None,
             api_client_key_path: None,
             api_tls_server_name: None,
             api_bearer_token_path: None,
+            // Opt-in: requesting capabilities requires the substrate
+            // companion CRD to accept the field. Default false works
+            // against stock Substrate without surprises.
+            request_capabilities: false,
         }
     }
 }
 
-/// Marks templates the driver created so `delete_sandbox` only drops
-/// its own; pre-provisioned templates stay.
+/// Annotation on synthesized ActorTemplates marking the driver as the
+/// owner. The driver deletes only templates it created; pre-provisioned
+/// templates referenced via `substrate_actor_template` are left in
+/// place across DeleteSandbox.
 const SYNTHESIZED_BY_ANNOTATION: &str = "ate.openshell.io/synthesized-by";
 
 /// Errors specific to the Substrate driver. Sits above `tonic::Status`
@@ -212,9 +256,7 @@ pub enum SubstrateDriverError {
     Kube(#[from] kube::Error),
     #[error("ActorTemplate {namespace}/{name} failed during golden-snapshot creation")]
     TemplatePhaseFailed { namespace: String, name: String },
-    #[error(
-        "ActorTemplate {namespace}/{name} did not reach Ready in time (last phase: {last_phase:?})"
-    )]
+    #[error("ActorTemplate {namespace}/{name} did not reach Ready in time (last phase: {last_phase:?})")]
     TemplateTimeout {
         namespace: String,
         name: String,
@@ -251,9 +293,7 @@ impl From<template::TemplateError> for SubstrateDriverError {
 impl From<SubstrateDriverError> for Status {
     fn from(err: SubstrateDriverError) -> Self {
         match err {
-            SubstrateDriverError::InvalidEndpoint { .. } => {
-                Status::invalid_argument(err.to_string())
-            }
+            SubstrateDriverError::InvalidEndpoint { .. } => Status::invalid_argument(err.to_string()),
             SubstrateDriverError::Connect { .. } => Status::unavailable(err.to_string()),
             SubstrateDriverError::Rpc(status) => status,
             SubstrateDriverError::Kube(_) => Status::unavailable(err.to_string()),
@@ -268,12 +308,18 @@ impl From<SubstrateDriverError> for Status {
     }
 }
 
-/// Driver entry point. The `ateapi.Control` channel and the kube
-/// client are dialled lazily on the first call that needs them.
+/// Driver entry point. Holds the resolved config and a lazily-connected
+/// `ateapi.Control` client. The first method call that needs the client
+/// dials the endpoint; subsequent calls reuse the channel (tonic's
+/// `Channel` is cheap-to-clone and multiplexes RPCs).
 #[derive(Clone)]
 pub struct SubstrateComputeDriver {
     config: Arc<SubstrateComputeConfig>,
     channel: Arc<Mutex<Option<Channel>>>,
+    /// Lazily-initialized kube client. The driver uses this to apply
+    /// ActorTemplate CRs when the caller does not pre-provision one.
+    /// `kube::Client` is not `Debug`, so the parent struct has a hand-
+    /// written `Debug` impl that skips this field.
     kube_client: Arc<Mutex<Option<kube::Client>>>,
 }
 
@@ -382,14 +428,22 @@ impl SubstrateComputeDriver {
         }
     }
 
+    /// Access the immutable config -- useful for tests and for the
+    /// gateway-side wiring that needs to read the namespace/pool defaults
+    /// when materializing requests.
     #[must_use]
     pub fn config(&self) -> &SubstrateComputeConfig {
         &self.config
     }
 
-    /// Return a fresh `Control` client over the (lazily dialled,
-    /// cached) channel. The bearer token is re-read on every call so
-    /// SA-token rotation is picked up without a driver restart.
+    /// Dial (or reuse) the `ate-api-server` channel and return a fresh
+    /// `Control` client. The channel is built lazily on first use and
+    /// cached for the lifetime of the driver. The bearer token (when
+    /// configured) is re-read on every call so SA-token rotation is
+    /// picked up without restarting the driver. Callers get a new
+    /// client per call because tonic clients hold an exclusive `&mut`
+    /// to the underlying channel during the RPC; cloning the channel
+    /// is cheap.
     pub async fn control_client(&self) -> Result<ControlClient, SubstrateDriverError> {
         let auth = self.load_auth_interceptor().await?;
 
@@ -440,23 +494,26 @@ impl SubstrateComputeDriver {
                 source,
             })?;
 
-        let client = ateapi::control_client::ControlClient::with_interceptor(channel.clone(), auth);
+        let client =
+            ateapi::control_client::ControlClient::with_interceptor(channel.clone(), auth);
         *guard = Some(channel);
         Ok(client)
     }
 
-    /// Build a fresh `AuthInterceptor` from the token file (when
-    /// configured) or a no-op interceptor when the path is unset.
+    /// Read the bearer token from disk (when configured) and return a
+    /// fresh `AuthInterceptor`. None token path returns an interceptor
+    /// that no-ops, which keeps the same `ControlClient` type covering
+    /// both authenticated and unauthenticated deployments.
     async fn load_auth_interceptor(&self) -> Result<AuthInterceptor, SubstrateDriverError> {
         let Some(path) = self.config.api_bearer_token_path.as_ref() else {
             return Ok(AuthInterceptor { bearer: None });
         };
-        let raw = tokio::fs::read_to_string(path).await.map_err(|source| {
-            SubstrateDriverError::TlsConfig {
+        let raw = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|source| SubstrateDriverError::TlsConfig {
                 path: path.display().to_string(),
                 source,
-            }
-        })?;
+            })?;
         // Tokens written by Kubernetes (projected SA tokens, kubectl
         // exec auth helpers) typically end with a newline that
         // bearer-token validators reject; strip it once here.
@@ -475,8 +532,12 @@ impl SubstrateComputeDriver {
         })
     }
 
-    /// Build the tonic `ClientTlsConfig` from the driver's TLS paths,
-    /// or `None` for plaintext. Errors carry the offending path.
+    /// Materialize the tonic `ClientTlsConfig` from the driver's TLS
+    /// paths. Returns `None` when the driver is configured for
+    /// plaintext (development), `Some` when it should dial https://.
+    /// Errors surface as `SubstrateDriverError::TlsConfig` with the
+    /// offending path so operators can diagnose missing or
+    /// permission-denied files.
     async fn load_tls_config(
         &self,
     ) -> Result<Option<tonic::transport::ClientTlsConfig>, SubstrateDriverError> {
@@ -485,23 +546,19 @@ impl SubstrateComputeDriver {
             // No CA configured -> plaintext.
             return Ok(None);
         };
-        let ca_pem =
-            tokio::fs::read(ca_path)
-                .await
-                .map_err(|source| SubstrateDriverError::TlsConfig {
-                    path: ca_path.display().to_string(),
-                    source,
-                })?;
+        let ca_pem = tokio::fs::read(ca_path)
+            .await
+            .map_err(|source| SubstrateDriverError::TlsConfig {
+                path: ca_path.display().to_string(),
+                source,
+            })?;
         let mut tls = tonic::transport::ClientTlsConfig::new()
             .ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
 
         // Optional mTLS client identity. Both halves must be present
         // for the pair to be honoured; a single half on its own is a
         // configuration error.
-        match (
-            cfg.api_client_cert_path.as_ref(),
-            cfg.api_client_key_path.as_ref(),
-        ) {
+        match (cfg.api_client_cert_path.as_ref(), cfg.api_client_key_path.as_ref()) {
             (Some(cert), Some(key)) => {
                 let cert_pem = tokio::fs::read(cert).await.map_err(|source| {
                     SubstrateDriverError::TlsConfig {
@@ -537,10 +594,14 @@ impl SubstrateComputeDriver {
 
 type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>> + Send>>;
 
-/// Project a Substrate `Actor` into the gateway-facing `DriverSandbox`.
-/// Substrate has no separate "name" concept, so `id` and `name` both
-/// carry `actor_id`. `spec` is `None`: the gateway already has the
-/// spec it gave us at create time.
+/// Project a Substrate `Actor` into the gateway-facing `DriverSandbox` shape.
+///
+/// Sandbox id and name both map to `actor_id` -- Substrate has no
+/// separate "name" concept and reusing the id keeps lookups symmetric.
+/// The `namespace` carries the `ActorTemplate` namespace, which is what
+/// the gateway uses as a tenancy boundary. `spec` is intentionally None
+/// in observed snapshots: the gateway already has the spec it gave us at
+/// create time.
 fn actor_to_driver_sandbox(actor: &ateapi::Actor) -> DriverSandbox {
     DriverSandbox {
         id: actor.actor_id.clone(),
@@ -562,9 +623,10 @@ fn actor_to_driver_status(actor: &ateapi::Actor) -> DriverSandboxStatus {
     }
 }
 
-/// Translate `Actor.Status` into the driver-condition shape. The
-/// condition type is `Ready` so the gateway's existing phase
-/// derivation (`Ready=True` → `Running`) needs no changes.
+/// Translate Substrate's `Actor.Status` enum into the driver-condition
+/// shape the gateway derives `SandboxPhase` from. The mapping deliberately
+/// uses the type `Ready` so the gateway's existing phase derivation
+/// (which looks for a `Ready=True` condition) works without changes.
 fn actor_status_to_condition(status: ateapi::actor::Status) -> DriverCondition {
     use ateapi::actor::Status::*;
     let (cond_status, reason, message) = match status {
@@ -603,22 +665,73 @@ fn require_sandbox_id(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
     }
 }
 
-/// Read the pre-provisioned ActorTemplate name from
-/// `spec.template.platform_config["substrate_actor_template"]`. `None`
-/// when the key is absent or non-string (the driver then synthesizes).
+/// Extract the Substrate ActorTemplate name from the sandbox's
+/// driver-specific configuration. Two paths are checked, in order:
+///
+///  1. Top-level `platform_config["substrate_actor_template"]`. Used by
+///     in-process callers that build a `DriverSandbox` directly (and
+///     by the live integration test).
+///  2. `platform_config["annotations"]["substrate_actor_template"]`.
+///     The gateway's `build_platform_config` (compute/mod.rs:1333)
+///     nests `SandboxTemplate.annotations` under this key, so public
+///     OpenShell API callers can request a pre-provisioned template
+///     by setting `SandboxTemplate.annotations["substrate_actor_template"]`
+///     in their `CreateSandbox` request.
+///
+/// Returns `None` if neither path is present or the value is not a
+/// non-empty string.
 fn template_name_from_spec(sandbox: &DriverSandbox) -> Option<String> {
     use prost_types::value::Kind;
-    let cfg = sandbox
-        .spec
-        .as_ref()?
-        .template
-        .as_ref()?
-        .platform_config
-        .as_ref()?;
-    let value = cfg.fields.get("substrate_actor_template")?;
-    match &value.kind {
-        Some(Kind::StringValue(s)) if !s.is_empty() => Some(s.clone()),
-        _ => None,
+    let cfg = sandbox.spec.as_ref()?.template.as_ref()?.platform_config.as_ref()?;
+    // 1. Top-level key (driver-internal callers).
+    if let Some(val) = cfg.fields.get("substrate_actor_template") {
+        if let Some(Kind::StringValue(s)) = &val.kind {
+            if !s.is_empty() {
+                return Some(s.clone());
+            }
+        }
+    }
+    // 2. Nested under `annotations` (public-API gateway-translated path).
+    if let Some(annotations_val) = cfg.fields.get("annotations") {
+        if let Some(Kind::StructValue(annotations)) = &annotations_val.kind {
+            if let Some(val) = annotations.fields.get("substrate_actor_template") {
+                if let Some(Kind::StringValue(s)) = &val.kind {
+                    if !s.is_empty() {
+                        return Some(s.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Capability set the OpenShell supervisor needs to run in its full
+/// (non-degraded) mode under Substrate. Mirrors the privileged
+/// bootstrap surface enumerated in RFC 0005:
+///
+/// - `CAP_NET_ADMIN`: `unshare(CLONE_NEWNET)` + `ip link` so the
+///   supervisor can build its egress netns.
+/// - `CAP_SETUID` / `CAP_SETGID`: `initgroups` + `setresuid/gid`
+///   inside `drop_privileges` when running as a non-`root` user.
+/// - `CAP_SYS_ADMIN`: mount/unshare ops the supervisor's nftables
+///   and Landlock helpers issue.
+///
+/// On Substrate releases without `SecurityContext` support (anything
+/// before `feat/openshell-driver-companion`), this field is ignored
+/// at apply time -- the supervisor stays in degraded mode and the
+/// M0.5 patches in `lib.rs:run_sandbox` keep it alive.
+fn supervisor_security_context() -> template::ContainerSecurityContext {
+    template::ContainerSecurityContext {
+        capabilities: Some(template::Capabilities {
+            add: vec![
+                String::from("CAP_NET_ADMIN"),
+                String::from("CAP_SETUID"),
+                String::from("CAP_SETGID"),
+                String::from("CAP_SYS_ADMIN"),
+            ],
+            drop: vec![],
+        }),
     }
 }
 
@@ -645,7 +758,9 @@ fn synthesize_template(
     use std::collections::BTreeMap;
 
     let template_spec = sandbox.spec.as_ref().and_then(|s| s.template.as_ref());
-    let image = template_spec.map(|t| t.image.clone()).unwrap_or_default();
+    let image = template_spec
+        .map(|t| t.image.clone())
+        .unwrap_or_default();
 
     // Combine environment from spec.environment + spec.template.environment
     // into a stable, sorted list. Driver-injected vars
@@ -663,17 +778,6 @@ fn synthesize_template(
             env_map.insert(k.clone(), v.clone());
         }
     }
-    // Opt the supervisor into best-effort bootstrap. gVisor degrades
-    // unshare(CLONE_NEWNET) and seccomp(2) by design; without this flag
-    // the supervisor aborts before it gets to a checkpointable state and
-    // the actor never finishes restore. Strict-mode operators can still
-    // override on a per-template basis by re-setting this to an empty
-    // string in their ActorTemplate spec.
-    env_map.insert(
-        "OPENSHELL_BEST_EFFORT_FAILURES".to_string(),
-        "1".to_string(),
-    );
-
     // Sandbox id (deterministic, always known).
     env_map.insert(
         openshell_core::sandbox_env::SANDBOX_ID.to_string(),
@@ -688,13 +792,13 @@ fn synthesize_template(
         );
     }
     // Gateway-minted JWT, when the gateway populated it on the spec.
-    if let Some(spec) = sandbox.spec.as_ref()
-        && !spec.sandbox_token.is_empty()
-    {
-        env_map.insert(
-            openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
-            spec.sandbox_token.clone(),
-        );
+    if let Some(spec) = sandbox.spec.as_ref() {
+        if !spec.sandbox_token.is_empty() {
+            env_map.insert(
+                openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
+                spec.sandbox_token.clone(),
+            );
+        }
     }
     let env: Vec<EnvVar> = env_map
         .into_iter()
@@ -716,15 +820,21 @@ fn synthesize_template(
         containers: vec![template::Container {
             name: "supervisor".to_string(),
             image,
-            // Substrate's atelet ignores the image's CMD/ENTRYPOINT, so
-            // an explicit command is required: empty args make runsc
-            // refuse to start, and the supervisor's own default
-            // (`/bin/bash`) exits without a TTY -- runsc then fails
-            // restore with "inconsistent private memory files". Load
-            // policy from the supervisor image's baked-in paths and
-            // park the child in a sleep loop so checkpoint/restore
-            // always captures a live process. Operators who need a
-            // different command should pre-provision an ActorTemplate.
+            // Substrate's atelet does not (yet) read the image's CMD/
+            // Entrypoint when synthesizing the OCI bundle; an empty
+            // `args` makes runsc refuse to start with
+            // "Spec.Process.Arg must be defined". The supervisor's
+            // own default for empty COMMAND is `/bin/bash`, which
+            // exits without a TTY and leaves the gVisor sandbox in a
+            // half-dead state runsc can't snapshot
+            // ("inconsistent private memory files on restore").
+            //
+            // Default to the M0.5 demo's full command: load policy
+            // from /etc/openshell/{policy.rego,data.yaml} baked into
+            // the image, drop into a long-running sleep loop as the
+            // child workload so checkpoint/restore stays consistent.
+            // Operators who need a custom entry point should
+            // pre-provision an ActorTemplate (M3.3 path).
             command: vec![
                 String::from("/usr/local/bin/openshell-sandbox"),
                 String::from("--policy-rules"),
@@ -740,6 +850,17 @@ fn synthesize_template(
             ],
             ports: vec![],
             env,
+            // Ask Substrate to grant the supervisor the privileged
+            // syscalls it needs for its full (non-degraded) feature
+            // set when the driver is configured to do so. Pre-
+            // companion Substrate CRDs reject the unknown field with
+            // a structural-schema 500, so this is opt-in via
+            // `config.request_capabilities`.
+            security_context: if config.request_capabilities {
+                Some(supervisor_security_context())
+            } else {
+                None
+            },
         }],
         snapshots_config: template::SnapshotsConfig {
             location: config.snapshots_location.clone(),
@@ -770,8 +891,10 @@ fn synthesize_template(
     }
 }
 
-/// Reject sandbox specs the Substrate backend cannot honour so the
-/// gateway returns the typed error before any platform state is touched.
+/// Driver-specific validation rules applied before `CreateSandbox`.
+/// These reject sandbox specs that cannot be honoured by the Substrate
+/// backend so the gateway can return a typed error to its caller before
+/// any platform state is touched.
 fn validate_substrate_sandbox(sandbox: &DriverSandbox) -> Result<(), Status> {
     let spec = sandbox
         .spec
@@ -825,8 +948,14 @@ impl ComputeDriver for SubstrateComputeDriver {
         Ok(Response::new(GetCapabilitiesResponse {
             driver_name: String::from(DRIVER_NAME),
             driver_version: String::from(env!("CARGO_PKG_VERSION")),
-            // The gateway supplies the image per sandbox.
+            // Substrate sandboxes are policy-baked into their image; the
+            // driver does not pick a default image, the gateway supplies
+            // one per sandbox.
             default_image: String::new(),
+            // GPU support is real in Substrate (CDI passthrough) but the
+            // driver has not wired the request -> ActorTemplate plumbing
+            // yet. Will flip to true when DriverResourceRequirements.gpu
+            // is honored.
             supports_gpu: false,
             gpu_count: 0,
         }))
@@ -849,7 +978,18 @@ impl ComputeDriver for SubstrateComputeDriver {
         request: Request<GetSandboxRequest>,
     ) -> Result<Response<GetSandboxResponse>, Status> {
         let req = request.into_inner();
-        let actor_id = require_sandbox_id(&req.sandbox_id, &req.sandbox_name)?;
+        // OpenShell's identifier semantics: prefer sandbox_id, fall back
+        // to sandbox_name. The Substrate mapping reuses the same string
+        // for both, so either is accepted.
+        let actor_id = if !req.sandbox_id.is_empty() {
+            req.sandbox_id
+        } else if !req.sandbox_name.is_empty() {
+            req.sandbox_name
+        } else {
+            return Err(Status::invalid_argument(
+                "sandbox_id or sandbox_name is required",
+            ));
+        };
 
         let mut client = self.control_client().await?;
         let resp = client
@@ -861,7 +1001,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 if status.code() == tonic::Code::NotFound {
                     Status::not_found(format!("sandbox {actor_id} not found"))
                 } else {
-                    status
+                    Status::from(status)
                 }
             })?;
         let actor = resp
@@ -879,10 +1019,15 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let mut client = self.control_client().await?;
-        let resp = client.list_actors(ateapi::ListActorsRequest {}).await?;
-        // Tenancy boundary: only surface actors whose ActorTemplate
-        // lives in the namespace the driver was configured for.
+        let resp = client
+            .list_actors(ateapi::ListActorsRequest {})
+            .await
+            .map_err(Status::from)?;
         let ns = self.config.default_namespace.as_str();
+        // Tenancy boundary: surface only actors whose ActorTemplate lives
+        // in the namespace the driver was configured for. A future
+        // iteration may also key on a label or naming convention so the
+        // same Substrate cluster can host multiple OpenShell gateways.
         let sandboxes = resp
             .into_inner()
             .actors
@@ -903,8 +1048,10 @@ impl ComputeDriver for SubstrateComputeDriver {
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
         let actor_id = require_sandbox_id(&sandbox.id, &sandbox.name)?;
 
-        // Re-validate so create_sandbox is safe without a prior
-        // validate_sandbox_create round-trip.
+        // Re-validate here so create_sandbox is safe to call without a
+        // prior validate_sandbox_create round-trip; the gateway's own
+        // flow always calls validate first, but RPC consumers outside
+        // the gateway might not.
         validate_substrate_sandbox(&sandbox)?;
         let template_ns = if sandbox.namespace.is_empty() {
             self.config.default_namespace.clone()
@@ -912,10 +1059,15 @@ impl ComputeDriver for SubstrateComputeDriver {
             sandbox.namespace.clone()
         };
 
-        // Reuse a caller-named ActorTemplate when present in
-        // spec.template.platform_config; otherwise synthesize one from
-        // the sandbox spec, wait for it to reach Ready, and let
-        // delete_sandbox clean it up via the SYNTHESIZED_BY_ANNOTATION.
+        // Two paths:
+        //   (a) Operator pre-provisioned an ActorTemplate and named it
+        //       in spec.template.platform_config[substrate_actor_template].
+        //       Reuse it as-is; do not touch the cluster's CRs.
+        //   (b) No pre-provisioned name: synthesize a fresh template
+        //       from the sandbox spec, apply it, wait for Ready, then
+        //       derive the actor from it. The synthesized template
+        //       carries an annotation so delete_sandbox knows it owns
+        //       the CR and can clean up.
         let template_name = match template_name_from_spec(&sandbox) {
             Some(name) => name,
             None => {
@@ -931,13 +1083,15 @@ impl ComputeDriver for SubstrateComputeDriver {
                 actor_template_namespace: template_ns,
                 actor_template_name: template_name,
             })
-            .await?;
+            .await
+            .map_err(Status::from)?;
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor_id,
                 boot: false,
             })
-            .await?;
+            .await
+            .map_err(Status::from)?;
 
         Ok(Response::new(CreateSandboxResponse {}))
     }
@@ -948,12 +1102,13 @@ impl ComputeDriver for SubstrateComputeDriver {
     ) -> Result<Response<StopSandboxResponse>, Status> {
         let req = request.into_inner();
         let actor_id = require_sandbox_id(&req.sandbox_id, &req.sandbox_name)?;
-        // OpenShell "stop" -> Substrate "suspend" (checkpoint, free
-        // the worker, keep the snapshot for later resume).
         let mut client = self.control_client().await?;
+        // OpenShell "stop" -> Substrate "suspend" (checkpoint + free
+        // the worker slot, snapshot retained).
         client
             .suspend_actor(ateapi::SuspendActorRequest { actor_id })
-            .await?;
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(StopSandboxResponse {}))
     }
 
@@ -979,11 +1134,12 @@ impl ComputeDriver for SubstrateComputeDriver {
             Err(status)
                 if status.code() == tonic::Code::FailedPrecondition
                     || status.code() == tonic::Code::Internal => {}
-            Err(other) => return Err(other),
+            Err(other) => return Err(Status::from(other)),
         }
 
-        // NotFound surfaces as deleted=false so a double-delete or a
-        // sandbox the gateway never created is a clean no-op.
+        // DeleteActor can still return NotFound for a sandbox the gateway
+        // never created or that has already been wiped. Surface that as
+        // deleted=false so the gateway can treat it as a no-op.
         let result = client
             .delete_actor(ateapi::DeleteActorRequest {
                 actor_id: actor_id.clone(),
@@ -992,12 +1148,18 @@ impl ComputeDriver for SubstrateComputeDriver {
         let deleted = match result {
             Ok(_) => true,
             Err(status) if status.code() == tonic::Code::NotFound => false,
-            Err(other) => return Err(other),
+            Err(other) => return Err(Status::from(other)),
         };
 
-        // Drop the driver-owned ActorTemplate if any. Best-effort:
-        // the actor is already gone so the gateway's view is consistent.
-        if let Err(err) = self.delete_synthesized_template_if_owned(&actor_id).await {
+        // If the driver synthesized the ActorTemplate (annotation
+        // present), tear it down too. Operator-provisioned templates
+        // are left in place. Errors here are non-fatal: the actor is
+        // gone, so the gateway's view is consistent even if the CR
+        // cleanup is deferred.
+        if let Err(err) = self
+            .delete_synthesized_template_if_owned(&actor_id)
+            .await
+        {
             tracing::warn!(
                 actor_id = %actor_id,
                 error = ?err,
@@ -1013,10 +1175,16 @@ impl ComputeDriver for SubstrateComputeDriver {
         &self,
         _request: Request<WatchSandboxesRequest>,
     ) -> Result<Response<Self::WatchSandboxesStream>, Status> {
-        // Substrate has no streaming watch yet, so synthesize one by
-        // diffing successive ListActors polls. Terminates when the
-        // receiver is dropped or on a hard RPC failure; transient
-        // ListActors errors are logged and retried.
+        // Substrate's ateapi.Control does not (yet) expose a streaming
+        // watch. We materialise one by polling ListActors every
+        // WATCH_POLL_INTERVAL and emitting an event for every actor
+        // whose snapshot differs from the prior tick, plus a deletion
+        // event for actors that drop out of the listing.
+        //
+        // The poll loop terminates when the receiver is dropped (i.e.
+        // the gRPC stream is cancelled). It also terminates on hard
+        // RPC failures so the caller can reconnect; transient
+        // ListActors failures are logged and retried.
         let (tx, rx) = mpsc::channel(WATCH_CHANNEL_BUFFER);
         let driver = self.clone();
         tokio::spawn(async move {
@@ -1026,7 +1194,9 @@ impl ComputeDriver for SubstrateComputeDriver {
                 let mut client = match driver.control_client().await {
                     Ok(c) => c,
                     Err(err) => {
-                        let _ = tx.send(Err(Status::from(err))).await;
+                        let _ = tx
+                            .send(Err(Status::from(err)))
+                            .await;
                         return;
                     }
                 };
@@ -1050,9 +1220,10 @@ impl ComputeDriver for SubstrateComputeDriver {
                     .map(|a| (a.actor_id.clone(), actor_to_driver_sandbox(&a)))
                     .collect();
 
-                // Skip deletes on the first tick so the consumer gets
-                // a clean snapshot rather than synthetic deletes for
-                // state it never saw.
+                // Emit deletes for actors that disappeared. Skip on the
+                // first tick (`bootstrapped == false`) so the consumer
+                // gets a clean snapshot, not a flood of synthetic
+                // deletes for state it never saw.
                 if bootstrapped {
                     for id in prior.keys() {
                         if !current.contains_key(id) {
@@ -1070,10 +1241,11 @@ impl ComputeDriver for SubstrateComputeDriver {
                     }
                 }
 
-                // Emit upserts for new actors and changed projections
-                // (status transitions, instance moves).
+                // Emit upserts for new actors and for actors whose
+                // projection changed (currently keyed on the whole
+                // DriverSandbox: status transitions, instance moves).
                 for (id, sandbox) in &current {
-                    let changed = prior.get(id) != Some(sandbox);
+                    let changed = prior.get(id).map_or(true, |old| old != sandbox);
                     if changed {
                         let evt = WatchSandboxesEvent {
                             payload: Some(watch_sandboxes_event::Payload::Sandbox(
@@ -1321,7 +1493,9 @@ mod tests {
 
     #[test]
     fn validate_accepts_missing_template_name() {
-        // Template name is optional; absence triggers synthesize_template.
+        // M3.5 made the template name optional: when absent,
+        // create_sandbox synthesizes a fresh ActorTemplate from the
+        // sandbox spec. validate must not reject that path.
         use openshell_core::proto::compute::v1::{DriverSandboxSpec, DriverSandboxTemplate};
         let s = DriverSandbox {
             id: "a".into(),
@@ -1372,6 +1546,47 @@ mod tests {
         assert!(env_names.contains(&"OPENSHELL_SANDBOX_ID"));
         // Empty gateway_endpoint default skips the endpoint var.
         assert!(!env_names.contains(&"OPENSHELL_ENDPOINT"));
+        // Default request_capabilities=false MUST keep security_context
+        // empty so the field is not emitted onto pre-companion CRDs.
+        // Substrate's apiserver structural-schema validation rejects
+        // the unknown field with HTTP 500 if it's present.
+        assert!(
+            tmpl.spec.containers[0].security_context.is_none(),
+            "default config must not emit securityContext"
+        );
+    }
+
+    #[test]
+    fn synthesize_template_emits_security_context_when_requested() {
+        let sandbox = sandbox_with_image_and_template("img@sha256:abc", false);
+        let cfg = SubstrateComputeConfig {
+            request_capabilities: true,
+            ..Default::default()
+        };
+        let tmpl = synthesize_template("sb1", "ns1", &sandbox, &cfg);
+        // When opted in, the supervisor's full cap set is requested.
+        let sc = tmpl.spec.containers[0]
+            .security_context
+            .as_ref()
+            .expect("securityContext present when request_capabilities=true");
+        let caps = sc
+            .capabilities
+            .as_ref()
+            .expect("capabilities populated");
+        for required in [
+            "CAP_NET_ADMIN",
+            "CAP_SETUID",
+            "CAP_SETGID",
+            "CAP_SYS_ADMIN",
+        ] {
+            assert!(
+                caps.add.iter().any(|c| c == required),
+                "expected {required} in security_context.capabilities.add"
+            );
+        }
+        // Drop is intentionally empty; the default sandbox cap set is
+        // already minimal.
+        assert!(caps.drop.is_empty());
     }
 
     #[test]
@@ -1420,13 +1635,6 @@ mod tests {
         assert_eq!(
             env.get("OPENSHELL_SANDBOX_ID").map(String::as_str),
             Some("sbid")
-        );
-        // Driver-injected: opts the supervisor into best-effort
-        // bootstrap so gVisor's degraded subsystems don't abort startup.
-        assert_eq!(
-            env.get("OPENSHELL_BEST_EFFORT_FAILURES")
-                .map(String::as_str),
-            Some("1")
         );
     }
 
