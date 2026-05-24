@@ -17,13 +17,15 @@ for OpenShell.
   ate-api-server`. Prereqs, quick-start, expected output, troubleshooting.
 
 **Status (2026-05-25):** Driver crate is now load-bearing in a real
-OpenShell gateway. The M3 wiring landed on
+OpenShell gateway. The OpenShell-side wiring lives on
 [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
-as M3.14 (dispatch arm), M3.16 (public-API annotation path), and
-M3.17 (consume this crate as a Cargo git dep rather than holding an
-in-tree copy). This repo's `main` is the authoritative source for
-the driver code; OpenShell branches consume a pinned rev. The
-helpdesk demo above exercises every
+as a single integration commit
+([`299dab22`](https://github.com/dims/OpenShell/commit/299dab22)) that
+adds the `ComputeDriverKind::Substrate` enum entry, the dispatch arm,
+the `[openshell.drivers.substrate]` config parser, and a Cargo git-rev
+pin to this repo. **This repo's `main` is the authoritative source for
+the driver code**; the OpenShell integration branch consumes a pinned
+rev. The helpdesk demo above exercises every
 `CreateSandbox`/`ListSandboxes`/`DeleteSandbox` through the driver
 against a real substrate kind cluster — verified end-to-end on bigbox
 2026-05-24 evening and re-verified on a fresh cluster 2026-05-25.
@@ -46,11 +48,11 @@ Cargo's `openshell-core` dep is pinned to the corresponding
 
 The crate is a library — consumers link it from Cargo and wire it into
 their compute-runtime dispatcher. The canonical consumer is OpenShell's
-`openshell-server`; the wiring landed on
+`openshell-server`; the wiring lives on
 [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
-as [M3.14](https://github.com/dims/OpenShell/commit/0e677590) +
-[M3.16](https://github.com/dims/OpenShell/commit/89333e00). For a fresh
-consumer the three pieces are:
+as a single integration commit
+([`299dab22`](https://github.com/dims/OpenShell/commit/299dab22)).
+For a fresh consumer the three pieces are:
 
 **1. Cargo dep.** Add to `openshell-server/Cargo.toml`. Pin a specific commit so the build is reproducible; bump the rev to pick up new driver work:
 ```toml

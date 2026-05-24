@@ -8,7 +8,7 @@ operator  ──gRPC──>  openshell-gateway  ──in-process──>  openshe
                        ["substrate"])
 ```
 
-**Status: verified end-to-end on bigbox 2026-05-24** against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75) and `dims/OpenShell@integration/openshell-driver-substrate` tip `89333e00` (M3.14–M3.16). Every one of the gateway's lifecycle RPCs (`CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`) executed against the driver in the verified run; the driver's `validate_sandbox_create` + `create_sandbox` + `list_sandboxes` + `delete_sandbox` were all exercised. The supervisor stays in standalone mode (policy + OPA + Ollama Cloud routing all baked into the image) so the data plane (`/chat`, `/probe`) hits atenet directly — the demo proves the driver's control plane, not the gateway's data plane (the §7b POC covers that separately).
+**Status: verified end-to-end on bigbox 2026-05-24** against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75) and `dims/OpenShell@integration/openshell-driver-substrate` tip `299dab22` (M3.14–M3.16). Every one of the gateway's lifecycle RPCs (`CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`) executed against the driver in the verified run; the driver's `validate_sandbox_create` + `create_sandbox` + `list_sandboxes` + `delete_sandbox` were all exercised. The supervisor stays in standalone mode (policy + OPA + Ollama Cloud routing all baked into the image) so the data plane (`/chat`, `/probe`) hits atenet directly — the demo proves the driver's control plane, not the gateway's data plane (the §7b POC covers that separately).
 
 ## The 10 beats
 
@@ -52,7 +52,7 @@ This demo lives on the in-flight M3 work for both substrate and OpenShell. You n
 
 | Repo + branch / PR | Required for | Status |
 |---|---|---|
-| [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate) (tip `89333e00`, M3.14–M3.16) | The gateway-side wiring (`ComputeDriverKind::Substrate` dispatch arm + `substrate_actor_template` annotation path) | local branch on personal fork |
+| [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate) (tip `299dab22`, M3.14–M3.16) | The gateway-side wiring (`ComputeDriverKind::Substrate` dispatch arm + `substrate_actor_template` annotation path) | local branch on personal fork |
 | [`agent-substrate/substrate#75`](https://github.com/agent-substrate/substrate/pull/75) | Beat 9 (pod-kill migration) — without it, alice would strand in `STATUS_RUNNING` pointing at a dead pod | open PR |
 | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh --deploy-ate-system` publishes the `ateom-gvisor` image | open PR; skip if you already have `localhost:5001/ateom-gvisor` cached |
 | [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) | `ateom-gvisor` eth0 idempotency on restore — strongly recommended for repeated Beat 9 cycles | open PR |
