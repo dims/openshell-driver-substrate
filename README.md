@@ -40,6 +40,55 @@ alternative shapes are filed upstream; one of them will land:
 Cargo's `openshell-core` dep is pinned to the corresponding
 `dims/OpenShell` fork tip.
 
+## How to use it
+
+The crate is a library — consumers link it from Cargo and wire it into
+their compute-runtime dispatcher. The canonical consumer is OpenShell's
+`openshell-server`; the wiring landed on
+[`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns)
+as [M3.14](https://github.com/dims/OpenShell/commit/917e969) +
+[M3.16](https://github.com/dims/OpenShell/commit/8343b8d). For a fresh
+consumer the three pieces are:
+
+**1. Cargo dep.** Add to `openshell-server/Cargo.toml`:
+```toml
+openshell-driver-substrate = { path = "../openshell-driver-substrate" }
+```
+
+**2. Dispatcher arm.** `SubstrateComputeDriver` implements `ComputeDriver`
+directly (same `WatchSandboxesStream` type the gateway expects), so the
+constructor mirrors `new_kubernetes` but skips the adapter:
+```rust
+let driver: SharedComputeDriver =
+    Arc::new(SubstrateComputeDriver::new(config));
+ComputeRuntime::from_driver(driver, /* … */).await
+```
+
+**3. Activate in `gateway.toml`:**
+```toml
+[openshell.gateway]
+compute_drivers = ["substrate"]
+
+[openshell.drivers.substrate]
+api_endpoint          = "api.ate-system.svc:443"
+api_tls_ca_path       = "/etc/openshell-substrate/ca.crt"
+api_bearer_token_path = "/etc/openshell-substrate/token"
+default_namespace     = "ate-demo-helpdesk"
+default_worker_pool   = "helpdesk-pool"
+pause_image           = "registry.k8s.io/pause:3.10.2@sha256:…"
+snapshots_location    = "gs://ate-snapshots/ate-demo-helpdesk/"
+runsc_amd64_sha256    = "a397…"
+runsc_amd64_url       = "gs://gvisor/releases/nightly/…/runsc"
+gateway_endpoint      = ""    # empty → supervisors stay in standalone mode
+```
+
+With those three pieces in place, every `openshell.v1.OpenShell.CreateSandbox`
+call routes through this crate. A working sample — gateway image build,
+projected SA-token + CA bundle wiring, kustomize-shaped Deployment, RBAC —
+lives at [`examples/helpdesk/gateway/`](examples/helpdesk/gateway/); the
+10-beat helpdesk demo at [`examples/helpdesk/`](examples/helpdesk/) drives
+it end-to-end.
+
 ## What's in the box
 
 | path | what |
