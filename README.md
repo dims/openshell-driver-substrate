@@ -20,7 +20,7 @@ for OpenShell.
 OpenShell gateway. The OpenShell-side wiring lives on
 [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
 as a single integration commit
-([`299dab22`](https://github.com/dims/OpenShell/commit/299dab22)) that
+([`753d3e4c`](https://github.com/dims/OpenShell/commit/753d3e4c)) that
 adds the `ComputeDriverKind::Substrate` enum entry, the dispatch arm,
 the `[openshell.drivers.substrate]` config parser, and a Cargo git-rev
 pin to this repo. **This repo's `main` is the authoritative source for
@@ -51,7 +51,7 @@ their compute-runtime dispatcher. The canonical consumer is OpenShell's
 `openshell-server`; the wiring lives on
 [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate)
 as a single integration commit
-([`299dab22`](https://github.com/dims/OpenShell/commit/299dab22)).
+([`753d3e4c`](https://github.com/dims/OpenShell/commit/753d3e4c)).
 For a fresh consumer the three pieces are:
 
 **1. Cargo dep.** Add to `openshell-server/Cargo.toml`. Pin a specific commit so the build is reproducible; bump the rev to pick up new driver work:
