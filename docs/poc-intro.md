@@ -265,9 +265,9 @@ Supervisor-side coverage: a feature-observation harness (`tests/integration/`) b
 
 ---
 
-## 6. The two upstream-shaped commits
+## 6. The upstream-shaped PRs
 
-The driver crate itself stands alone in the new repo. The other two pieces are surgical single-commit changes to the canonical projects.
+The driver crate itself stands alone in the new repo. The pieces filed against the canonical projects: one alternative-shape pair against OpenShell, and three against Agent Substrate.
 
 ### 6.1. OpenShell: [`#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` *or* [`#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) — alternative shapes
 
@@ -310,6 +310,27 @@ The success path is unchanged.
 
 **Why it's upstreamable independent of OpenShell.** Any heavy ateom-gvisor user hits this; OpenShell happens to be the consumer that surfaced it. The fix is structural, small, and well-tested (verified by repeated create+resume cycles via the integration harness without alternating failures).
 
+### 6.3. Substrate: [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67)
+
+**Scope.** `hack/install-ate.sh` learns to `ko publish` `ateom-gvisor` alongside `atelet`, captures the resulting `<repo>@sha256:<digest>` into `.ate-kind/ateom-image`, and exposes a `--publish-ateom-image` flag for standalone rebuilds.
+
+**Why it's needed.** Without it, the first-run operator handshake against a fresh kind cluster is two steps: `install-ate-kind.sh --deploy-ate-system` brings the control plane up, but `WorkerPool.spec.ateomImage` references an image nothing has built. Operators have to run `ko publish ./cmd/ateom-gvisor` by hand and `export ATEOM_IMAGE=<digest>` before the first `WorkerPool` apply. §8.1 below documents this manual step — #67 deletes it.
+
+**Why it's upstreamable independent of OpenShell.** Same shape of argument as #66: any first-time operator hits this, OpenShell happens to be the integration that surfaced it.
+
+### 6.4. Substrate: [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73)
+
+**Scope.** Per-container `securityContext` on `ActorTemplate.spec.containers[]`: `capabilities.add` (Linux capability names — with or without the `CAP_` prefix, case-insensitive) and `runAsUser` / `runAsGroup` (`*int64`, K8s shape). Plumbed through `ateletpb` to atelet's OCI bundle builder. Empty templates produce the same OCI bundle as before; opt-in per container.
+
+**Why it's needed for this POC.** Two reasons, both load-bearing once we want a real non-root supervisor under gVisor:
+
+1. **`capabilities.add`** lets the driver request `CAP_NET_ADMIN` (for whatever network setup the supervisor still wants to attempt), `CAP_SETUID` / `CAP_SETGID` (so the supervisor's `drop_privileges` fast-path can transition out of root), and eventually `CAP_CHOWN` (so `prepare_filesystem` can chown the policy's `read_write` paths to the sandbox user). A gVisor compatibility spike (`~/notes/openshell-on-substrate/2026-05-24-12a-gvisor-caps-spike.md`) confirmed runsc honours the OCI cap set exactly: granting `CAP_SETUID` / `CAP_SETGID` unblocks `setresuid` inside the actor.
+2. **`runAsUser` / `runAsGroup`** is what actually makes the supervisor *start* at a non-root UID. atelet's OCI bundle builder previously hardcoded `Process.User.{UID,GID} = 0`; the new fields override that for app containers. The pause container always runs as root (the call site passes `0, 0`).
+
+**Why it's upstreamable independent of OpenShell.** Substrate's existing CRD surface had no way to express either field. Any workload that needs a capability beyond the default sandbox set (`CAP_AUDIT_WRITE`, `CAP_KILL`, `CAP_NET_BIND_SERVICE`) or a non-root start UID needs this. OpenShell happens to be the integration that surfaced it.
+
+**Notes on shape.** The PR text in #73 has the full reasoning, but two decisions worth flagging here: (a) `Capabilities.Drop` is intentionally absent — K8s exposes it but the gVisor OCI bundle builder has no use for it, so it would be do-nothing public surface; (b) the proto fields for `run_as_user` / `run_as_group` are bare `int64` rather than `optional` — at the proto boundary "unset" and "0" both collapse to root, which is identical to atelet's behaviour. The CRD shape keeps `*int64` so K8s YAML retains the usual nullability distinction.
+
 ---
 
 ## 7. Known limitations
@@ -323,7 +344,7 @@ The Linux kernel features the supervisor would normally use to harden itself in-
 - **Network namespace isolation is off.** The supervisor's HTTP CONNECT proxy still works as a *cooperating-client* enforcement point, but direct egress bypasses it — a non-cooperating workload can `curl https://example.com` without going through 127.0.0.1:3128 and the supervisor neither blocks nor sees the request. Operators rely on the outer sandbox (gVisor's own filter + K8s `NetworkPolicy`) for bypass-proof egress.
 - **In-process seccomp filter is off.** gVisor is itself a syscall-filtering boundary and rejects further filter installs.
 - **Landlock filesystem sandbox is off.** gVisor doesn't implement Landlock; the supervisor's policy `read_only`/`read_write` paths are *not* enforced at the filesystem level.
-- **Non-root `drop_privileges` is unsupported.** The supervisor relies on its own idempotent fast-path (skip `setresuid` when already at target uid). `run_as_user` must equal the actor's starting uid (root, in the default template) until Substrate's `SecurityContext.capabilities.add` plumbing is restored.
+- **Non-root `drop_privileges` is unsupported on stock substrate `main`.** The supervisor relies on its own idempotent fast-path (skip `setresuid` when already at target uid). `run_as_user` must equal the actor's starting uid (root, in the default template) until [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) (per-container `securityContext.{capabilities.add,runAsUser,runAsGroup}`) merges and the driver starts emitting both `CAP_SETUID` / `CAP_SETGID` and a non-root `runAsUser`. See §6.4.
 
 None of these are bugs. They're the price of running inside a smaller, opinionated sandbox runtime. The threat model has to be re-stated: the **enforcing boundary** in this deployment is gVisor + outer cluster policy, not the OpenShell supervisor's in-process hardening.
 
@@ -341,9 +362,9 @@ The supervisor's cluster-mode features have now been exercised end-to-end agains
 
 The full harness lives under `tests/integration/gateway/` on `main` (commit `b7b059b`). It deploys the gateway with a `docker:28-dind` sidecar, generates Ed25519 JWT signing material via `generate-jwt-keys.sh` (private key never enters the repo), renders templates with three new env vars (`OPENSHELL_ENDPOINT`, `OPENSHELL_SANDBOX_TOKEN`, `OPENSHELL_SANDBOX_ID`), spawns a test actor, and produces a PASS/FAIL summary. See `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md` §7b verification for sharp edges (SE-8 through SE-13) discovered while standing the gateway up.
 
-### c) Operator handshake is two steps
+### c) Operator handshake is two steps (until #67 merges)
 
-`install-ate-kind.sh` builds `atelet` but **not** `ateom-gvisor`. The first-run handshake (`ko publish` + `export ATEOM_IMAGE`) is documented in §8.1 below; once the WorkerPool exists, subsequent runs don't need it. Substrate-side upstream change worth landing: have `install-ate-kind.sh` build + push `ateom-gvisor` alongside `atelet`.
+`install-ate-kind.sh` on stock substrate `main` builds `atelet` but **not** `ateom-gvisor`. The first-run handshake (`ko publish` + `export ATEOM_IMAGE`) is documented in §8.1 below; once the WorkerPool exists, subsequent runs don't need it. The upstream fix is filed as [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) (see §6.3); once it lands, §8.1 collapses into a no-op.
 
 ---
 
@@ -359,7 +380,7 @@ This is the exact sequence used on bigbox; every command is real.
 
 ### 8.1. Build + push `ateom-gvisor` (one time per cluster)
 
-`install-ate-kind.sh` builds `atelet` but not `ateom-gvisor`. Produce + push the image:
+`install-ate-kind.sh` on stock substrate `main` builds `atelet` but not `ateom-gvisor`. Produce + push the image:
 
 ```sh
 cd ~/go/src/github.com/agent-substrate/substrate         # apply PR #66 first if not yet merged upstream
@@ -368,6 +389,8 @@ KO_DOCKER_REPO=localhost:5001 KO_DEFAULTPLATFORMS=linux/$(go env GOARCH) \
 # Capture the digest from ko's output:
 export ATEOM_IMAGE='localhost:5001/ateom-gvisor@sha256:...'
 ```
+
+Once [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) merges, this whole step goes away — `install-ate-kind.sh` will build and push `ateom-gvisor` automatically and write the digest to `.ate-kind/ateom-image`.
 
 ### 8.2. Bootstrap the OpenShell namespace + WorkerPool + supervisor template (one time)
 
@@ -491,5 +514,7 @@ In rough priority order:
 
 - Per-feature evidence + sharp-edges register: `~/notes/openshell-on-substrate/2026-05-23-openshell-features-findings.md`. Lists each Tier-1/2 test with status, the SE-1..SE-7 enumeration of caveats, and the disposition of each.
 - Current snapshot of branch tips, commit SHAs, and cluster fixture: `~/notes/openshell-on-substrate/2026-05-23-openshell-on-substrate-state.md`.
+- Prioritised next-steps punch list: `~/notes/openshell-on-substrate/2026-05-24-next-steps.md`.
+- gVisor cap-honouring spike (the experiment that gated #73): `~/notes/openshell-on-substrate/2026-05-24-12a-gvisor-caps-spike.md`.
 - Cluster bring-up runbook (kind on macOS, plus the Shorewall recovery recipe for NVIDIA-managed Linux hosts): `~/notes/agent-substrate/2026-05-21-agent-substrate-kind-local-dev.md`.
 - Original feature-test plan: `~/notes/openshell-on-substrate/2026-05-23-openshell-features-test-plan.md`.
