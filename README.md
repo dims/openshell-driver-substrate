@@ -3,6 +3,16 @@
 Agent Substrate (gVisor + checkpoint/restore via runsc) compute driver
 for OpenShell.
 
+**Status (2026-05-24):** Driver crate is now load-bearing in a real
+OpenShell gateway. The M3 wiring landed on
+[`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns)
+(commits M3.14 = [`917e969`](https://github.com/dims/OpenShell/commit/917e969)
+and M3.16 = [`8343b8d`](https://github.com/dims/OpenShell/commit/8343b8d));
+a 10-beat helpdesk demo at [`examples/helpdesk/`](examples/helpdesk/)
+exercises every `CreateSandbox`/`ListSandboxes`/`DeleteSandbox` through
+the driver against a real substrate kind cluster. Verified end-to-end
+on bigbox 2026-05-24 evening.
+
 This repository depends on a small change in OpenShell that lets the
 supervisor tolerate the bootstrap subsystems gVisor degrades. Two
 alternative shapes are filed upstream; one of them will land:

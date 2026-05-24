@@ -1,11 +1,15 @@
 # OpenShell on Agent Substrate — proof-of-concept overview
 
-**Status:** working end-to-end on a kind cluster as of 2026-05-23.
-**Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (tip `2b68a6d`).
-**Companion change in OpenShell:** two alternative shapes filed, one will land — [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` (env-var gate, 3 files / +51/-7) and [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) (`SandboxFailureHandler` trait + setter, 3 files / +71/-7).
-**Companion change in Agent Substrate:** [`agent-substrate/substrate#66`](https://github.com/agent-substrate/substrate/pull/66) — single commit, eth0 race fix in `ateom-gvisor`.
-**Operator-handshake follow-up:** [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) — `install-ate-kind.sh` builds + pushes the `ateom-gvisor` image so a `WorkerPool` is usable straight out of `--deploy-ate-system`.
-**Substrate-side `securityContext` surface (2026-05-24):** [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) — per-container `capabilities.add` + `runAsUser` / `runAsGroup` on `ActorTemplate.spec.containers[]`. Empty templates produce the same OCI bundle as before; opt-in per container. Driver-side `synthesize_template` can start emitting these fields once #73 merges.
+**Status (2026-05-24 evening):** **M3 finish line reached.** The driver crate is wired into the OpenShell gateway and a 10-beat helpdesk demo runs every sandbox lifecycle call through `openshell-gateway → openshell-driver-substrate → ate-api-server`. End-to-end verified on bigbox.
+**Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (tip [`8cf03e2`](https://github.com/dims/openshell-driver-substrate/commit/8cf03e2) — driver-driven helpdesk demo). Driver crate is also embedded in [`dims/OpenShell@chore/gvisor-degraded-netns`](https://github.com/dims/OpenShell/tree/chore/gvisor-degraded-netns) (tip [`8343b8d`](https://github.com/dims/OpenShell/commit/8343b8d)) where the gateway-side wiring lives (M3.14 + M3.16).
+**Demo entry point:** [`examples/helpdesk/README.md`](../examples/helpdesk/README.md) — the canonical 10-beat showcase.
+**Companion change in OpenShell:** two alternative shapes filed for the bootstrap-failure gate, one will land — [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` (env-var gate, 3 files / +51/-7) and [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) (`SandboxFailureHandler` trait + setter, 3 files / +71/-7).
+**Companion changes in Agent Substrate:**
+- [`#66`](https://github.com/agent-substrate/substrate/pull/66) — eth0 race fix in `ateom-gvisor`.
+- [`#67`](https://github.com/agent-substrate/substrate/pull/67) — `install-ate-kind.sh` publishes the `ateom-gvisor` image.
+- [`#73`](https://github.com/agent-substrate/substrate/pull/73) — per-container `securityContext` on `ActorTemplate.spec.containers[]` (capabilities + runAsUser/runAsGroup). Driver-side `synthesize_template` can start emitting these fields once it merges.
+- [`#75`](https://github.com/agent-substrate/substrate/pull/75) — `ateapi/syncer: release actor when host pod is deleted`. Closes the controller-recovery gap behind the helpdesk demo's pod-kill migration beat; verified twice on bigbox 2026-05-24.
+
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
 
 ---
