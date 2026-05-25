@@ -10,6 +10,20 @@ operator  ──gRPC──>  openshell-gateway  ──in-process──>  openshe
 
 **Status: verified end-to-end on bigbox 2026-05-24** against substrate `main` + [PR #75](https://github.com/agent-substrate/substrate/pull/75) and `dims/OpenShell@integration/openshell-driver-substrate` tip `753d3e4c` (M3.14–M3.16). Every one of the gateway's lifecycle RPCs (`CreateSandbox`, `GetSandbox`, `ListSandboxes`, `DeleteSandbox`) executed against the driver in the verified run; the driver's `validate_sandbox_create` + `create_sandbox` + `list_sandboxes` + `delete_sandbox` were all exercised. The supervisor stays in standalone mode (policy + OPA + Ollama Cloud routing all baked into the image) so the data plane (`/chat`, `/probe`) hits atenet directly — the demo proves the driver's control plane, not the gateway's data plane (the §7b POC covers that separately).
 
+## Recording
+
+A ~2 minute screen recording of the full 10-beat run — two tmux panes, top is the live `kubectl-ate get actors / get workers` watch, bottom walks the beats. Every command is echoed at a green `$` prompt before its output, so the recording is intelligible without audio.
+
+- [`helpdesk-demo.mp4`](helpdesk-demo.mp4) — h.264, ~1.6 MB. Plays in any browser / QuickTime / Slack.
+
+Regenerate from `~/Downloads/helpdesk-demo.cast` (or any fresh asciicast) with:
+```sh
+agg --idle-time-limit 2 --font-size 14 helpdesk-demo.cast helpdesk-demo.gif
+ffmpeg -y -i helpdesk-demo.gif -movflags +faststart -pix_fmt yuv420p \
+       -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" \
+       -c:v libx264 -preset veryslow -crf 23 helpdesk-demo.mp4
+```
+
 ## The 10 beats
 
 Organized as three acts.
