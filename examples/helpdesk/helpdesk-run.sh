@@ -55,14 +55,12 @@ declare -A ACTOR_ID
 
 create_sandbox() {
   local name=$1
-  local resp
-  resp=$(kubectl osh create sandbox "$name" \
+  local json
+  json=$(kubectl osh create sandbox "$name" \
                     --image="$SUPERVISOR_IMAGE" \
-                    --template="$ACTOR_TEMPLATE")
-  echo "$resp"
-  # Default output is `sandbox/<name> created (id=<uuid>)`; pluck the uuid.
-  ACTOR_ID[$name]=$(echo "$resp" | sed -nE 's/.*\(id=([0-9a-f-]+)\).*/\1/p')
-  echo "  -> $name → actor_id ${ACTOR_ID[$name]}"
+                    --template="$ACTOR_TEMPLATE" -o json)
+  ACTOR_ID[$name]=$(echo "$json" | jq -r '.metadata.id')
+  echo "sandbox/$name created (id=${ACTOR_ID[$name]})"
 }
 
 actor_worker() { kubectl ate get actor "$1" -o json | jq -r '.actors[0].ateomPodName // empty'; }
