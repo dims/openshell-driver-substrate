@@ -65,10 +65,8 @@ create_sandbox() {
   echo "  -> $name → actor_id ${ACTOR_ID[$name]}"
 }
 
-delete_sandbox() { kubectl osh delete sandbox "$1"; }
-list_sandboxes() { kubectl osh get sandboxes; }
-actor_worker()   { kubectl ate get actor "$1" -o json | jq -r '.actors[0].ateomPodName // empty'; }
-actor_status()   { kubectl ate get actor "$1" -o json | jq -r '.actors[0].status'; }
+actor_worker() { kubectl ate get actor "$1" -o json | jq -r '.actors[0].ateomPodName // empty'; }
+actor_status() { kubectl ate get actor "$1" -o json | jq -r '.actors[0].status'; }
 
 # Port-forwards: atenet for data plane, gateway for OpenShell gRPC.
 kubectl port-forward -n ate-system svc/atenet-router 8000:80 >/dev/null 2>&1 &
@@ -101,7 +99,7 @@ time create_sandbox bob
 sleep 5
 
 beat 3 "ListSandboxes (gateway-mediated, driver-backed)"
-list_sandboxes
+kubectl osh get sandboxes
 
 # ─── Act II — One actor's life ────────────────────────────────────────────
 
@@ -152,9 +150,9 @@ chat "$BOB" chat '{"message":"Are you still here?"}'
 # ─── Act III — Hygiene via gateway → driver → substrate ───────────────────
 
 beat 10 "Delete alice via OpenShell.DeleteSandbox (driver path; bob untouched)"
-time delete_sandbox alice
+time kubectl osh delete sandbox alice
 sleep 3
 echo "post-delete list (bob should remain):"
-list_sandboxes
+kubectl osh get sandboxes
 echo "Pre-provisioned ActorTemplate survives (driver did NOT synthesize it):"
 kubectl get actortemplate -n "$NS_HD" "$ACTOR_TEMPLATE" -o jsonpath='{.metadata.name}{"\n"}'
