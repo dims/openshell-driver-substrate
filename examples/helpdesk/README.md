@@ -41,7 +41,7 @@ Organized as three acts.
 | `go` | 1.22+ | distro package |
 | `cargo` (rust, for image builds) | 1.88+ | rustup |
 | `ko` | latest | `go install github.com/google/ko@latest` |
-| `grpcurl` | latest | `go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest` |
+| `kubectl-osh` (this repo) | built locally | `(cd cmd/kubectl-osh && make install)` |
 | `jq` | 1.6+ | distro package |
 | `curl` | any | distro package |
 | Ollama Cloud API key (free tier) | — | https://ollama.com/settings |
@@ -139,13 +139,13 @@ kubectl create secret generic -n ate-openshell-m0 ate-api-server-ca \
                                      # deploys RBAC + ConfigMap +
                                      # Deployment + Service.
 
-# 8. Stage the .proto file so grpcurl can talk to the gateway.
-mkdir -p ~/proto
-cp ~/go/src/github.com/nvidia/OpenShell-driver-substrate/proto/*.proto ~/proto/
+# 8. Build + install kubectl-osh on PATH. The demo invokes it as
+#    `kubectl osh ...`; protos ship with the source tree, no manual
+#    .proto staging needed.
+(cd cmd/kubectl-osh && make install)
 
 # 9. Run the demo.
-SUPERVISOR_IMAGE="$SUPERVISOR_IMAGE" PROTO_DIR=$HOME/proto \
-    ./examples/helpdesk/helpdesk-run.sh
+SUPERVISOR_IMAGE="$SUPERVISOR_IMAGE" ./examples/helpdesk/helpdesk-run.sh
 ```
 
 ## What's in this folder
@@ -230,13 +230,9 @@ Key signals:
 
 **Beat 1 returns `failed to connect to Substrate ate-api-server at api.ate-system.svc:443: transport error`** — the gateway pod can't reach or can't verify the ate-api-server's TLS cert. Most likely the `ate-api-server-ca` Secret in `ate-openshell-m0` is missing or has the wrong CA. Re-run the JSON→PEM conversion (see Quick Start step 7). Confirm the bundle validates with `openssl s_client -connect <api-svc-ip>:443 -servername api.ate-system.svc -CAfile /tmp/ate-api-ca.pem`.
 
-**Gateway pod CrashLoops with `multiple compute drivers are not supported yet`** — your OpenShell-driver-substrate tree is behind M3.14, where `ComputeDriverKind::Substrate` wasn't added to the single-driver allow-list. Pull the tip.
-
 **Gateway pod CrashLoops with `K8s ServiceAccount bootstrap requires [openshell.drivers.kubernetes]`** — SE-8. Re-apply `gateway/gateway-config.yaml` which contains the stub `[openshell.drivers.kubernetes]` block.
 
 **Beat 4 returns "not found" from atenet** — the demo client is using the wrong actor ID for the `Host:` header. The gateway assigns sandbox `metadata.id` as a UUID, and that UUID is the substrate actor_id. The demo captures the returned id from CreateSandbox into the `ACTOR_ID[alice]` shell associative array; check that it was populated.
-
-**`error: services "atenet-router-envoy" not found`** — substrate vintage. Use `atenet-router` (already in this script).
 
 **Beat 9 returns 502 or stalls** — substrate without PR #75. The actor stays `STATUS_RUNNING` pointing at the deleted pod and atenet times out. Verify your ate-api-server build is on a branch that contains `cmd/ateapi/internal/controlapi/syncer.go`'s `releaseActorOnDeadWorker` helper.
 
@@ -244,11 +240,8 @@ Key signals:
 
 ```bash
 # Delete both demo actors via the gateway.
-for name in alice bob; do
-  printf '{"name":"%s"}' "$name" | grpcurl -plaintext \
-    -import-path ~/proto -proto openshell.proto \
-    -d @ localhost:50051 openshell.v1.OpenShell/DeleteSandbox || true
-done
+OPENSHELL_GATEWAY=localhost:50051 \
+  kubectl osh delete sandbox alice bob --ignore-not-found
 
 # Tear down the gateway.
 kubectl delete -n ate-openshell-m0 deploy/openshell-gateway-substrate svc/openshell-gateway-substrate

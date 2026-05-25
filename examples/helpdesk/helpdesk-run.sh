@@ -21,26 +21,27 @@
 #
 # Required env (or use defaults):
 #   SUPERVISOR_IMAGE — digest-pinned image, must match helpdesk-template.yaml.
-#   PROTO_DIR        — directory containing openshell.proto + friends.
+#
+# Required tools on PATH:
+#   kubectl, kubectl-ate, kubectl-osh, jq, curl. kubectl-osh is the
+#   substrate-aware kubectl plugin built from cmd/kubectl-osh in this
+#   repo — install with `make install` from that directory.
 set -euo pipefail
 export PATH="$HOME/go/bin:$PATH"
 
 NS_HD=ate-demo-helpdesk
 NS_GW=ate-openshell-m0
 SUPERVISOR_IMAGE="${SUPERVISOR_IMAGE:?set SUPERVISOR_IMAGE=<image>@sha256:<digest>}"
-PROTO_DIR="${PROTO_DIR:-$HOME/proto}"
 ROUTER_URL=http://localhost:8000
-GW_URL=localhost:50051
+export OPENSHELL_GATEWAY=localhost:50051
 ACTOR_TEMPLATE=helpdesk-agent
 
-if [ ! -f "$PROTO_DIR/openshell.proto" ]; then
-  echo "missing $PROTO_DIR/openshell.proto — copy from OpenShell-driver-substrate/proto/" >&2
+if ! command -v kubectl-osh >/dev/null 2>&1; then
+  echo "missing kubectl-osh on PATH — build with: (cd cmd/kubectl-osh && make install)" >&2
   exit 1
 fi
 
 beat() { printf "\n\033[1;33m=== Beat %s: %s ===\033[0m\n" "$1" "$2"; }
-osh()  { grpcurl -plaintext -import-path "$PROTO_DIR" -proto openshell.proto \
-                -d @ "$GW_URL" "openshell.v1.OpenShell/$1" ; }
 chat() { curl -sS -X POST -H "Host: $1.actors.resources.substrate.ate.dev" \
               -H "Content-Type: application/json" \
               -d "$3" "$ROUTER_URL/$2"; echo; }
@@ -55,24 +56,17 @@ declare -A ACTOR_ID
 create_sandbox() {
   local name=$1
   local resp
-  resp=$(printf '{
-    "name": "%s",
-    "spec": {
-      "log_level": "info",
-      "policy": {"version": 1},
-      "template": {
-        "image": "%s",
-        "annotations": {"substrate_actor_template": "%s"}
-      }
-    }
-  }' "$name" "$SUPERVISOR_IMAGE" "$ACTOR_TEMPLATE" | osh CreateSandbox)
+  resp=$(kubectl osh create sandbox "$name" \
+                    --image="$SUPERVISOR_IMAGE" \
+                    --template="$ACTOR_TEMPLATE")
   echo "$resp"
-  ACTOR_ID[$name]=$(echo "$resp" | jq -r '.sandbox.metadata.id')
+  # Default output is `sandbox/<name> created (id=<uuid>)`; pluck the uuid.
+  ACTOR_ID[$name]=$(echo "$resp" | sed -nE 's/.*\(id=([0-9a-f-]+)\).*/\1/p')
   echo "  -> $name → actor_id ${ACTOR_ID[$name]}"
 }
 
-delete_sandbox() { printf '{"name":"%s"}' "$1" | osh DeleteSandbox; }
-list_sandboxes() { printf '{}' | osh ListSandboxes | jq '.sandboxes // [] | map({id:.metadata.id, phase})'; }
+delete_sandbox() { kubectl osh delete sandbox "$1"; }
+list_sandboxes() { kubectl osh get sandboxes; }
 actor_worker()   { kubectl ate get actor "$1" -o json | jq -r '.actors[0].ateomPodName // empty'; }
 actor_status()   { kubectl ate get actor "$1" -o json | jq -r '.actors[0].status'; }
 
@@ -82,15 +76,19 @@ PF_ROUTER=$!
 kubectl port-forward -n "$NS_GW" svc/openshell-gateway-substrate 50051:50051 >/dev/null 2>&1 &
 PF_GATEWAY=$!
 trap '
+  # Tear down demo actors BEFORE killing port-forwards — otherwise the
+  # delete calls have nothing to talk to. --ignore-not-found because
+  # alice is already gone by Beat 10 on a successful run.
+  kubectl osh delete sandbox alice bob --ignore-not-found 2>/dev/null || true
   kill $PF_ROUTER $PF_GATEWAY 2>/dev/null || true
-  # Best-effort: tear down both demo actors so the next run starts clean.
-  for name in alice bob; do
-    printf "{\"name\":\"%s\"}" "$name" | grpcurl -plaintext \
-      -import-path "$PROTO_DIR" -proto openshell.proto \
-      -d @ "$GW_URL" openshell.v1.OpenShell/DeleteSandbox >/dev/null 2>&1 || true
-  done
 ' EXIT
 sleep 3
+
+# Pre-run cleanup: if a previous demo crashed mid-flight, alice/bob may
+# linger in the gateway's name index (invisible to ListSandboxes but
+# blocks CreateSandbox with AlreadyExists). Delete by well-known name
+# unconditionally.
+kubectl osh delete sandbox alice bob --ignore-not-found 2>/dev/null || true
 
 # ─── Act I — Provisioning via gateway → driver → substrate ────────────────
 
