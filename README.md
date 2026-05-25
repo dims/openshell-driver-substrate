@@ -15,6 +15,12 @@ for OpenShell.
   lifecycle, hygiene), every `CreateSandbox`/`ListSandboxes`/`DeleteSandbox`
   flows through `openshell-gateway → openshell-driver-substrate →
   ate-api-server`. Prereqs, quick-start, expected output, troubleshooting.
+- [**`cmd/kubectl-osh/README.md`**](cmd/kubectl-osh/README.md) —
+  `kubectl-osh`, an operator-shaped kubectl plugin that talks to the
+  gateway. Exposes the substrate-driver-specific
+  `substrate_actor_template` annotation (M3.16) which the upstream
+  `openshell` CLI can't set today. The helpdesk demo uses it instead of
+  raw `grpcurl`.
 
 **Status (2026-05-25):** Driver crate is now load-bearing in a real
 OpenShell gateway. The OpenShell-side wiring lives on
@@ -100,11 +106,12 @@ it end-to-end.
 |---|---|
 | `src/lib.rs` | `SubstrateComputeDriver` — implements OpenShell's `ComputeDriver` gRPC trait against Substrate's `ateapi.Control`. The driver synthesizes `ate.dev/v1alpha1 ActorTemplate` resources and injects `OPENSHELL_BEST_EFFORT_FAILURES=1` into the supervisor container's env. |
 | `src/template.rs` | `kube-rs` mirror of Substrate's `ActorTemplate` CRD; just the fields the driver writes and waits on. |
-| `proto/ateapi.proto` | Vendored from `agent-substrate/substrate`; `build.rs` runs `tonic_build` over it. |
 | `tests/live.rs` | Four live integration tests against a real `ate-api-server` (`#[ignore]`d; gated on `SUBSTRATE_LIVE_*` env vars). |
 | `tests/integration/` | Feature-observation harness: builds the patched supervisor image, applies templates, spawns an actor, dumps `[oshl-test]` markers from worker pod logs. |
 | `tests/integration/gateway/` | §7b end-to-end harness: deploys a real `openshell-gateway` (with a `docker:28-dind` sidecar + stub `supervisor_bin`), mints Ed25519 JWT signing material via `generate-jwt-keys.sh` (private key never lands in the repo), spawns a test actor wired with `OPENSHELL_ENDPOINT` + `OPENSHELL_SANDBOX_TOKEN` + `OPENSHELL_SANDBOX_ID`, and runs `verify-features.sh` to record PASS/FAIL for each of the five gateway-driven features. |
-| `examples/helpdesk/` | Six-beat OpenShell-on-Substrate demo: cold ask → suspend → idle → follow-up (memory preserved) → exfil deny → pod-kill migration. Builds on `tests/integration/`. See [`examples/helpdesk/README.md`](examples/helpdesk/README.md). |
+| `examples/helpdesk/` | 10-beat OpenShell-on-Substrate demo, three acts (provisioning, lifecycle, hygiene): create alice + bob → cold ask → suspend → idle → follow-up (memory preserved) → exfil deny → pod-kill migration → delete. Drives the gateway via `kubectl osh`; uses `kubectl ate` for ops OpenShell doesn't expose publicly (suspend, raw actor inspection). See [`examples/helpdesk/README.md`](examples/helpdesk/README.md). |
+| `cmd/kubectl-osh/` | `kubectl-osh` plugin: operator-shaped CRUD against the gateway gRPC. Exposes the M3.16 `substrate_actor_template` annotation the upstream `openshell` CLI can't set. Used by the helpdesk demo and intended as the operator-facing tool for substrate-backed gateways. `make install` puts it on `$GOBIN`. See [`cmd/kubectl-osh/README.md`](cmd/kubectl-osh/README.md). |
+| `proto/` | Vendored proto definitions: `ateapi.proto` (substrate, consumed by the Rust driver via `build.rs`), `openshell.proto` + `sandbox.proto` + `datamodel.proto` (OpenShell, consumed by the Go kubectl-osh plugin via `make proto`). |
 
 ## Build
 
