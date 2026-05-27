@@ -15,6 +15,14 @@ for OpenShell.
   lifecycle, hygiene), every `CreateSandbox`/`ListSandboxes`/`DeleteSandbox`
   flows through `openshell-gateway → openshell-driver-substrate →
   ate-api-server`. Prereqs, quick-start, expected output, troubleshooting.
+- [**`examples/gpu-counter/README.md`**](examples/gpu-counter/README.md) —
+  sibling of the helpdesk demo for NVIDIA GPU passthrough. The
+  openshell-sandbox supervisor execs a Python agent that holds a 1 MiB
+  on-device CUDA buffer via libcuda. Proves the new
+  `ActorTemplate.containers[*].resources.gpu` CRD field (substrate
+  [PR #96](https://github.com/agent-substrate/substrate/pull/96)) round-trips
+  through atelet's OCI builder and ateom-gvisor's `runsc --nvproxy`
+  invocations end-to-end on an L40S (driver 580.126.09).
 - [**`cmd/kubectl-osh/README.md`**](cmd/kubectl-osh/README.md) —
   `kubectl-osh`, an operator-shaped kubectl plugin that talks to the
   gateway. Exposes the substrate-driver-specific
@@ -110,6 +118,7 @@ it end-to-end.
 | `tests/integration/` | Feature-observation harness: builds the patched supervisor image, applies templates, spawns an actor, dumps `[oshl-test]` markers from worker pod logs. |
 | `tests/integration/gateway/` | §7b end-to-end harness: deploys a real `openshell-gateway` (with a `docker:28-dind` sidecar + stub `supervisor_bin`), mints Ed25519 JWT signing material via `generate-jwt-keys.sh` (private key never lands in the repo), spawns a test actor wired with `OPENSHELL_ENDPOINT` + `OPENSHELL_SANDBOX_TOKEN` + `OPENSHELL_SANDBOX_ID`, and runs `verify-features.sh` to record PASS/FAIL for each of the five gateway-driven features. |
 | `examples/helpdesk/` | 10-beat OpenShell-on-Substrate demo, three acts (provisioning, lifecycle, hygiene): create alice + bob → cold ask → suspend → idle → follow-up (memory preserved) → exfil deny → pod-kill migration → delete. Drives the gateway via `kubectl osh`; uses `kubectl ate` for ops OpenShell doesn't expose publicly (suspend, raw actor inspection). See [`examples/helpdesk/README.md`](examples/helpdesk/README.md). |
+| `examples/gpu-counter/` | 6-beat GPU passthrough demo. Same gateway → driver → substrate provisioning path as helpdesk, but the supervisor execs a Python agent holding a 1 MiB on-device CUDA buffer via libcuda. Substrate's atelet picks up `containers[*].resources.gpu`, ateom-gvisor adds `--nvproxy` to runsc. Includes `validate-bare.sh` for pre-substrate `docker --runtime=runsc-gpu` validation. See [`examples/gpu-counter/README.md`](examples/gpu-counter/README.md). |
 | `cmd/kubectl-osh/` | `kubectl-osh` plugin: operator-shaped CRUD against the gateway gRPC. Exposes the M3.16 `substrate_actor_template` annotation the upstream `openshell` CLI can't set. Used by the helpdesk demo and intended as the operator-facing tool for substrate-backed gateways. `make install` puts it on `$GOBIN`. See [`cmd/kubectl-osh/README.md`](cmd/kubectl-osh/README.md). |
 | `proto/` | Vendored proto definitions: `ateapi.proto` (substrate, consumed by the Rust driver via `build.rs`), `openshell.proto` + `sandbox.proto` + `datamodel.proto` (OpenShell, consumed by the Go kubectl-osh plugin via `make proto`). |
 
@@ -207,3 +216,4 @@ external SSH driver / per-actor JWTs). See
 | [`agent-substrate/substrate#67`](https://github.com/agent-substrate/substrate/pull/67) | `install-ate-kind.sh` builds + pushes `ateom-gvisor` automatically, so a `WorkerPool` is usable out of `--deploy-ate-system`. Closes the manual `ko publish` operator step. |
 | [`agent-substrate/substrate#73`](https://github.com/agent-substrate/substrate/pull/73) | Per-container `securityContext` on `ActorTemplate.spec.containers[]`: `capabilities.add` + `runAsUser` / `runAsGroup`. Empty templates produce the same OCI bundle as before. Unblocks the driver's `synthesize_template` from emitting capability adds + a non-root supervisor start UID once it merges. |
 | [`agent-substrate/substrate#75`](https://github.com/agent-substrate/substrate/pull/75) | `ateapi/syncer: release actor when host pod is deleted`. `WorkerPoolSyncer`'s pod-delete hook resets the bound actor to `STATUS_SUSPENDED` so the next request migrates it onto a free worker, instead of stranding it pointing at a dead pod. Beat 9 of the helpdesk demo (pod-kill migration with multi-tenant proof) depends on it; verified end-to-end on bigbox 2026-05-24. |
+| [`agent-substrate/substrate#96`](https://github.com/agent-substrate/substrate/pull/96) | GPU passthrough end-to-end: new `ActorTemplate.containers[*].resources.gpu` CRD field, ateletpb/ateompb proto threading, atelet OCI builder injects `/dev/nvidia*` + bind-mounts `cuda-checkpoint`, ateom-gvisor adds `--nvproxy --nvproxy-driver-version --nvproxy-allowed-driver-capabilities` to runsc create/checkpoint/restore. Driver-side counterpart in this repo: `0b46450` (single squashed commit). Required by [`examples/gpu-counter/`](examples/gpu-counter/). Verified end-to-end on an NVIDIA L40S (driver 580.126.09) 2026-05-27. |

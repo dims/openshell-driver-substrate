@@ -276,8 +276,10 @@ kubectl delete namespace ate-demo-helpdesk
 - [`../../src/lib.rs`](../../src/lib.rs) — the substrate driver's `ComputeDriver` implementation.
 - [`../../tests/live.rs`](../../tests/live.rs) — driver-side integration tests (the unit-test analog of this demo).
 - [`../../tests/integration/gateway/`](../../tests/integration/gateway/) — the §7b POC: real openshell-gateway against substrate, verifying the supervisor↔gateway channel (F1/F2/F3 — settings poll, inference routing, log push). Complementary to this demo, which verifies the gateway↔driver↔substrate channel (create/list/delete).
+- [`../gpu-counter/README.md`](../gpu-counter/README.md) — sibling demo proving GPU passthrough + checkpoint/restore on the same gateway → driver → substrate path. The workload owns 1 MiB of on-device CUDA memory and survives `kubectl ate suspend actor` → resume.
 - [`../../docs/poc-intro.md`](../../docs/poc-intro.md) — architecture overview for the OpenShell-on-Substrate driver.
 - [substrate PR #75](https://github.com/agent-substrate/substrate/pull/75) — `ateapi/syncer: release actor when host pod is deleted` (Beat 9's enabling change).
 - [substrate PR #73](https://github.com/agent-substrate/substrate/pull/73) — `ActorTemplate.spec.containers[].securityContext`.
 - [substrate PR #66](https://github.com/agent-substrate/substrate/pull/66) — `ateom-gvisor` eth0 idempotency on restore.
+- [substrate PR #96](https://github.com/agent-substrate/substrate/pull/96) — `ActorTemplate.spec.containers[].resources.gpu`; the load-bearing PR for the gpu-counter demo above.
 - [NVIDIA/OpenShell PR #1548](https://github.com/NVIDIA/OpenShell/pull/1548) — `OPENSHELL_BEST_EFFORT_FAILURES` gate.

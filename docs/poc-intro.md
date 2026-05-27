@@ -2,13 +2,16 @@
 
 **Status (2026-05-24 — M3 finish line; refreshed 2026-05-25 with operator tooling):** The driver crate is wired into the OpenShell gateway and a 10-beat helpdesk demo runs every sandbox lifecycle call through `openshell-gateway → openshell-driver-substrate → ate-api-server`. End-to-end verified on bigbox. The 2026-05-25 refresh ships [`kubectl-osh`](../cmd/kubectl-osh) — a kubectl plugin that drives the helpdesk demo (replacing raw grpcurl) and exposes the substrate-specific `substrate_actor_template` annotation the upstream `openshell` CLI cannot set today.
 **Repo:** [`dims/openshell-driver-substrate`](https://github.com/dims/openshell-driver-substrate) (`main`; check `git log` for the current tip). Driver crate is also embedded in [`dims/OpenShell@integration/openshell-driver-substrate`](https://github.com/dims/OpenShell/tree/integration/openshell-driver-substrate) (tip [`753d3e4c`](https://github.com/dims/OpenShell/commit/753d3e4c)) where the gateway-side wiring lives (M3.14 + M3.16).
-**Demo entry point:** [`examples/helpdesk/README.md`](../examples/helpdesk/README.md) — the canonical 10-beat showcase. Includes a ~2 minute screen recording ([`helpdesk-demo.mp4`](../examples/helpdesk/helpdesk-demo.mp4)) of the full run with every command echoed at a green `$` prompt.
+**Demo entry points:**
+- [`examples/helpdesk/README.md`](../examples/helpdesk/README.md) — the canonical 10-beat showcase. Includes a ~2 minute screen recording ([`helpdesk-demo.mp4`](../examples/helpdesk/helpdesk-demo.mp4)) of the full run with every command echoed at a green `$` prompt.
+- [`examples/gpu-counter/README.md`](../examples/gpu-counter/README.md) — sibling 6-beat demo proving NVIDIA GPU passthrough + cuda-checkpoint via gVisor's nvproxy. Verified on L40S (driver 580.126.09) 2026-05-27. Substrate-side PR: [`agent-substrate/substrate#96`](https://github.com/agent-substrate/substrate/pull/96).
 **Companion change in OpenShell:** two alternative shapes filed for the bootstrap-failure gate, one will land — [`NVIDIA/OpenShell#1548`](https://github.com/NVIDIA/OpenShell/pull/1548) `[WIP]` (env-var gate, 3 files / +51/-7) and [`NVIDIA/OpenShell#1549`](https://github.com/NVIDIA/OpenShell/pull/1549) (`SandboxFailureHandler` trait + setter, 3 files / +71/-7).
 **Companion changes in Agent Substrate:**
 - [`#66`](https://github.com/agent-substrate/substrate/pull/66) — eth0 race fix in `ateom-gvisor`.
 - [`#67`](https://github.com/agent-substrate/substrate/pull/67) — `install-ate-kind.sh` publishes the `ateom-gvisor` image.
 - [`#73`](https://github.com/agent-substrate/substrate/pull/73) — per-container `securityContext` on `ActorTemplate.spec.containers[]` (capabilities + runAsUser/runAsGroup). Driver-side `synthesize_template` can start emitting these fields once it merges.
 - [`#75`](https://github.com/agent-substrate/substrate/pull/75) — `ateapi/syncer: release actor when host pod is deleted`. Closes the controller-recovery gap behind the helpdesk demo's pod-kill migration beat; verified twice on bigbox 2026-05-24.
+- [`#96`](https://github.com/agent-substrate/substrate/pull/96) — `ActorTemplate.spec.containers[].resources.gpu`: end-to-end NVIDIA GPU passthrough via gVisor nvproxy + cuda-checkpoint. Load-bearing PR for the gpu-counter demo; verified end-to-end on L40S (driver 580.126.09) 2026-05-27. Driver-side counterpart merged on this repo's `main` at `0b46450`.
 
 **Audience:** teammates familiar with at least one of OpenShell or Agent Substrate; this doc gives the joint picture.
 
