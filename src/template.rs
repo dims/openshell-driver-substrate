@@ -48,6 +48,33 @@ pub struct Container {
     /// unconditionally is safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_context: Option<ContainerSecurityContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ContainerResources>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerResources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuResource>,
+}
+
+/// Mirror of substrate's GPUResource.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuResource {
+    #[serde(default = "default_gpu_count")]
+    pub count: i32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub driver_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub driver_version: String,
+}
+
+fn default_gpu_count() -> i32 {
+    1
 }
 
 /// Substrate subset of K8s `SecurityContext` -- only what the
@@ -214,6 +241,7 @@ mod tests {
                     ports: vec![],
                     env: vec![],
                     security_context: None,
+                    resources: None,
                 }],
                 snapshots_config: SnapshotsConfig {
                     location: "gs://ate-snapshots/ate-openshell-m0/".into(),

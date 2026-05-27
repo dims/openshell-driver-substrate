@@ -866,6 +866,16 @@ fn synthesize_template(
             } else {
                 None
             },
+            resources: sandbox.spec.as_ref().filter(|s| s.gpu).map(|s| {
+                template::ContainerResources {
+                    gpu: Some(template::GpuResource {
+                        count: 1,
+                        device: s.gpu_device.clone(),
+                        driver_capabilities: vec![],
+                        driver_version: String::new(),
+                    }),
+                }
+            }),
         }],
         snapshots_config: template::SnapshotsConfig {
             location: config.snapshots_location.clone(),
@@ -926,15 +936,6 @@ fn validate_substrate_sandbox(sandbox: &DriverSandbox) -> Result<(), Status> {
              atelet's pull cache",
         ));
     }
-    // GPU support is real in Substrate (CDI passthrough) but the
-    // driver has not wired the request -> ActorTemplate plumbing yet.
-    // Reject the request up front rather than silently dropping it.
-    if spec.gpu {
-        return Err(Status::failed_precondition(
-            "Substrate driver does not yet honour DriverSandboxSpec.gpu \
-             requests; see the README for the planned wiring",
-        ));
-    }
     // platform_config['substrate_actor_template'] is now optional. When
     // absent, create_sandbox synthesizes a fresh ActorTemplate from the
     // sandbox spec. When present, it names a pre-provisioned template
@@ -957,12 +958,8 @@ impl ComputeDriver for SubstrateComputeDriver {
             // driver does not pick a default image, the gateway supplies
             // one per sandbox.
             default_image: String::new(),
-            // GPU support is real in Substrate (CDI passthrough) but the
-            // driver has not wired the request -> ActorTemplate plumbing
-            // yet. Will flip to true when DriverResourceRequirements.gpu
-            // is honored.
-            supports_gpu: false,
-            gpu_count: 0,
+            supports_gpu: true,
+            gpu_count: 1,
         }))
     }
 
@@ -1478,11 +1475,36 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_gpu_request() {
+    fn validate_accepts_gpu_request() {
+        // Substrate now honours spec.gpu by populating the template
+        // containers[*].resources.gpu field. validate must not reject.
         let s = sandbox_with_image_and_template("img@sha256:1234", true);
-        let err = validate_substrate_sandbox(&s).unwrap_err();
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-        assert!(err.message().contains("gpu"));
+        validate_substrate_sandbox(&s).expect("gpu requests must validate");
+    }
+
+    #[test]
+    fn synthesize_template_populates_gpu_resources_when_requested() {
+        let sandbox = sandbox_with_image_and_template("img@sha256:1234", true);
+        let cfg = SubstrateComputeConfig::default();
+        let tmpl = synthesize_template("sb1", "ns1", &sandbox, &cfg);
+        let ctr = &tmpl.spec.containers[0];
+        let resources = ctr.resources.as_ref().expect("resources present");
+        let gpu = resources.gpu.as_ref().expect("gpu present");
+        assert_eq!(gpu.count, 1);
+        // Sandbox helper leaves gpu_device empty by default.
+        assert_eq!(gpu.device, "");
+    }
+
+    #[test]
+    fn synthesize_template_omits_gpu_resources_when_not_requested() {
+        let sandbox = sandbox_with_image_and_template("img@sha256:1234", false);
+        let cfg = SubstrateComputeConfig::default();
+        let tmpl = synthesize_template("sb1", "ns1", &sandbox, &cfg);
+        let ctr = &tmpl.spec.containers[0];
+        assert!(
+            ctr.resources.as_ref().and_then(|r| r.gpu.as_ref()).is_none(),
+            "gpu resources should be absent when spec.gpu is false"
+        );
     }
 
     #[test]
