@@ -12,13 +12,59 @@ operator  ──gRPC──>  openshell-gateway  ──in-process──>  openshe
 ```
 
 **Status:** Substrate-side wiring landed via
-[`agent-substrate/substrate#96`](https://github.com/agent-substrate/substrate/pull/96).
-Driver-side counterpart on this repo's `main` at commit `0b46450`. Verified
-end-to-end on an NVIDIA L40S (driver 580.126.09) 2026-05-27: substrate's
-golden-actor `RunWorkload` + `CheckpointWorkload` RPCs both succeed with
-`--nvproxy` on every runsc invocation; gVisor's nvproxy auto-registers
-cuda-checkpoint internally on `release-20260520.0`. Two follow-up items are
-documented under "Open follow-ups" below.
+[`agent-substrate/substrate#96`](https://github.com/agent-substrate/substrate/pull/96)
+— two commits, `c358dff` (original) + `fca2df4` (five follow-up fixes from the
+2026-05-27 demo bring-up). Driver-side counterpart on this repo at
+commit `eabfbb7`. **Demo verified end-to-end on three GPU classes
+2026-05-27:**
+
+- **L40S** brev (driver 580.126.09) — substrate Run + Checkpoint RPCs
+  succeed.
+- **H100** brev `front-emerald-krill` (driver 570.195.03) — full 6-beat
+  with CUDA buffer preserved across substrate suspend/resume.
+- **H200 NVL** `bigbox-h200` (driver 580.159.03) — full 6-beat,
+  `dev_ptr=0x7f9b69e00000` preserved across `kubectl ate suspend gpu1`
+  + idle + `kubectl ate resume gpu1`.
+
+Five substrate-side fixes (in `fca2df4`) needed for the full 6-beat to
+pass:
+1. `spec.Linux.Resources.Devices` cgroup-allow entries for each nvidia
+   device.
+2. GPU spec passed to the pause container too (not just supervisor), so
+   the sandbox kernel boots with `--dev-io-fd>=0` (dev gofer wired up).
+3. cuda-checkpoint + wrapper bind-mounted from
+   `/run/ateom-gvisor/static-files/` (atelet runs inside a distroless
+   kind-control-plane container that doesn't have `/usr/local/bin/...`).
+4. External CUDA drain via `runsc exec supervisor
+   /usr/local/bin/cuda-checkpoint --toggle --pid 1` before
+   `runsc checkpoint pause` — gVisor's `--save-restore-exec-argv` runs
+   the exec in pause's container, which is distroless and has no
+   `/bin/sh`, so a wrapper script fails to load.
+5. `gpuSaveRestoreFlags=nil` — gVisor does **not** auto-register
+   cuda-checkpoint (the previous comment in this code claiming so was
+   wrong; the gVisor source has no auto-registration path).
+
+Operational requirements for the demo:
+- **(2026-05-28+)** Workload image **no longer needs** to bake `libcuda.so.<host-driver>`. atelet's `injectNVIDIAAssetsIntoRootfs` (in [substrate's `cmd/atelet/oci.go`](https://github.com/agent-substrate/substrate/blob/main/cmd/atelet/oci.go)) mirrors the host's NVIDIA driver libs into each new actor's rootfs at sandbox-create time. The bring-up script stages those libs once into `/run/ateom-gvisor/static-files/nvidia-libs/` on the kind-node; atelet hard-fails if the staging dir is empty. The demo now uses a plain `ubuntu:24.04 + python3` workload image (see `gpu-counter.Dockerfile`). Pre-2026-05-28 boxes still need the baked variant; see "Historical: pre-2026-05-28 libcuda-baking Dockerfile" in the runbook.
+- runsc must be the **gVisor nightly 2026-05-26 or later** —
+  `release-20260520.0` has a multi-container dev-gofer bug.
+- For host drivers not in `runsc nvproxy list-supported-drivers` (e.g.
+  580.159.03), tell substrate it's the nearest supported version with
+  the same major (e.g. 580.126.20) — patch-level NVIDIA 580.x ioctls
+  are wire-compatible. The setup script (below) derives this
+  automatically with the snippet:
+  ```bash
+  HOST=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader \
+          | head -1 | tr -d ' ')
+  NVPROXY=$(runsc nvproxy list-supported-drivers \
+            | awk -v m="${HOST%%.*}" 'index($0, m".") == 1' \
+            | sort -V | tail -1)
+  # Use $NVPROXY as both the daemon.json --nvproxy-driver-version and
+  # the ActorTemplate's spec.containers[*].resources.gpu.driverVersion
+  ```
+  For an exact-match host (e.g. 570.195.03) the picker returns the
+  same string; for an unlisted patch (e.g. 580.159.03) it picks the
+  highest same-major entry (580.126.20).
 
 ## The 6 beats
 
@@ -31,7 +77,7 @@ Organized as three acts.
 | 2 | `GET /info` + `GET /sum` | Boot-time sanity: agent reports the CUDA `dev_ptr` it allocated, the host driver version (read via `cuDriverGetVersion`), and the boot-sentinel byte (`0x42 == 66`) read back through a 4 KiB `cuMemcpyDtoH_v2` probe. Proves nvproxy is live and libcuda inside the sandbox can ioctl through to the host driver. | curl → atenet → sandbox → /dev/nvidia* → host driver |
 | **II — Mutate, suspend, resume** | | | |
 | 3 | `POST /set?val=99` + `GET /sum` | `cuMemsetD8_v2` rewrites every byte of the 1 MiB device buffer to `99 == 0x63`. `/sum` confirms `sample == 99`. The buffer is genuinely on-device — no host shadow. | curl → atenet → cuMemsetD8_v2 |
-| 4 | `kubectl ate suspend actor gpu1` | Substrate's atelet calls ateom-gvisor's CheckpointWorkload; ateom-gvisor invokes `runsc checkpoint pause`. gVisor's nvproxy auto-runs cuda-checkpoint to drain GPU FDs before serialising sentry state. Actor transitions `STATUS_RUNNING → STATUS_SUSPENDING → STATUS_SUSPENDED`. | substrate ateapi.SuspendActor → atelet.Checkpoint → ateom.CheckpointWorkload → runsc checkpoint |
+| 4 | `kubectl ate suspend actor gpu1` | Substrate's atelet calls ateom-gvisor's CheckpointWorkload. Before invoking `runsc checkpoint pause`, ateom-gvisor first runs `runsc exec supervisor /usr/local/bin/cuda-checkpoint --toggle --pid 1` (the `cmdDrainCUDA` helper) to drain CUDA state out of every live nvproxy client. The `runsc checkpoint pause` then serialises sentry state cleanly. Actor transitions `STATUS_RUNNING → STATUS_SUSPENDING → STATUS_SUSPENDED`. | substrate ateapi.SuspendActor → atelet.Checkpoint → ateom.CheckpointWorkload → cuda-checkpoint --toggle → runsc checkpoint |
 | 5 | `GET /sum` after resume | Implicit resume on traffic. atenet routes the request, substrate restores the sandbox via `runsc restore`, nvproxy re-toggles the CUDA state, the agent serves the request. **`sample` MUST still be 99** — on-device GPU memory survived the round-trip. | curl → substrate restore → cuMemcpyDtoH_v2 |
 | **III — Hygiene** | | | |
 | 6 | `OpenShell.DeleteSandbox gpu1` | Driver reaps the actor; the pre-provisioned `gpu-counter` ActorTemplate survives. | Gateway → driver.delete_sandbox → ateapi.DeleteActor |
@@ -40,7 +86,7 @@ Organized as three acts.
 
 | Tool / resource | Version / details |
 |---|---|
-| Linux host with an NVIDIA GPU on `runsc nvproxy list-supported-drivers` (R570+ for cuda-checkpoint NVML support) | Verified on L40S, driver 580.126.09. The `release-20260520.0` runsc supports 16 driver versions across the 535/550/570/580/590 families. |
+| Linux host with an NVIDIA GPU on `runsc nvproxy list-supported-drivers` (R570+ for cuda-checkpoint NVML support) | Verified on **L40S** (580.126.09), **H100** (570.195.03), **H200 NVL** (580.159.03, claimed to nvproxy as 580.126.20 since 580.159.03 is not in the supported list yet — patch-level 580.x ioctls are wire-compatible). Use the **gVisor nightly 2026-05-26 or later** (sha256 `5810ade5…7842`); `release-20260520.0` has a multi-container dev-gofer bug. |
 | `docker` | 28+ (Brev box ships 29.4.3) |
 | `kind` | `v0.31.0+` — `go install sigs.k8s.io/kind@v0.31.0` |
 | `kubectl` | matches kind |
@@ -104,9 +150,11 @@ docker exec kind-control-plane chmod 755 \
 ## Quick start
 
 ```bash
-# 1. Build the gpu-counter actor image with libcuda baked in. The Ubuntu
-#    noble packages match the host driver line; the gpu-counter agent
-#    loads /usr/lib/x86_64-linux-gnu/libcuda.so.1 at startup.
+# 1. Build the gpu-counter actor image — vanilla ubuntu:24.04 + python3.
+#    No libcuda baking; atelet's injectNVIDIAAssetsIntoRootfs (substrate
+#    >= 2026-05-28) mirrors the host's NVIDIA driver libs into the
+#    rootfs at sandbox-create time. The gpu-counter agent loads
+#    /usr/lib/x86_64-linux-gnu/libcuda.so.1 at startup.
 cd examples/gpu-counter
 docker build -t localhost:5001/gpu-counter:demo .
 docker push localhost:5001/gpu-counter:demo
@@ -134,7 +182,7 @@ kubectl wait --for=jsonpath='{.status.phase}'=Ready \
 |---|---|
 | `gpu-counter-agent.py` | Python HTTP server. Holds a 1 MiB on-device CUDA buffer via `libcuda` ctypes. `GET /info` reports `dev_ptr` + driver version; `GET /sum` reads a 4 KiB probe via `cuMemcpyDtoH_v2`; `POST /set?val=N` calls `cuMemsetD8_v2`. |
 | `gpu-counter-data.yaml` | OPA + Landlock policy. Same shape as helpdesk's `data.yaml`; allow-list extended with `/dev/nvidia*`. |
-| `gpu-counter.Dockerfile` | Layered on the openshell-sandbox `${BASE}` image (same `BASE` arg the helpdesk demo uses). Adds python3 + `libnvidia-compute-580` + `nvidia-utils-580` from Ubuntu noble. Substrate's atelet doesn't run `nvidia-container-cli configure` today, so libcuda has to come from the image. |
+| `gpu-counter.Dockerfile` | Layered on `ubuntu:24.04` (intentionally not `nvidia/cuda` — that base bundles a libcuda that may not match the host driver). **As of 2026-05-28** no libcuda / libnvidia-ml baking — atelet's `injectNVIDIAAssetsIntoRootfs` mirrors the host's NVIDIA driver libs into the rootfs at sandbox-create time. The setup script stages those libs once at `/run/ateom-gvisor/static-files/nvidia-libs/`. |
 | `gpu-counter-template.yaml` | Substrate `ActorTemplate` with the new `containers[*].resources.gpu.{count,device,driverCapabilities,driverVersion}` block. WorkerPool replicas=1 (bump for capacity). |
 | `gpu-counter-run.sh` | 6-beat demo driver. Provisions via `kubectl osh create sandbox`, hits the data plane via atenet port-forward, suspends via `kubectl ate suspend actor`, resumes implicitly, asserts the sample byte. |
 | `validate-bare.sh` | Pre-substrate validation: drives `docker --runtime=runsc-gpu --gpus all` directly to stress-test the cuda-checkpoint wrapper on any host. The way the substrate-shipped wrapper was first proven on the L40S brev box before the kind-cluster integration. |
@@ -182,8 +230,10 @@ runsc ... --root=... --nvproxy checkpoint --image-path=... pause
 | symptom | fix |
 |---|---|
 | `FATAL ERROR: error setting up FS: mounting /run/nvidia-persistenced/socket: open(...): no such device or address` | gVisor's gofer can't bind-mount Unix sockets; replace the socket with a regular file. See pre-flight step 1. |
-| `FATAL ERROR: checkpoint failed: ... save/restore binary is already set` | gVisor's nvproxy on `release-20260520.0` auto-registers cuda-checkpoint when `--nvproxy` is set on `create`. Don't pass `--save-restore-exec-argv` at checkpoint time. Substrate's wiring already accounts for this (`gpuSaveRestoreFlags()` returns nil); this error means you're running a stale substrate binary. |
-| `FATAL ERROR: starting sub-container [...]: inconsistent private memory files on restore: savedMFOwners = [pause:/]` | gVisor multi-container restore limitation — see "Open follow-ups" item 2. |
+| `FATAL ERROR: checkpoint failed: ... save/restore binary is already set` | A previous checkpoint attempt left `kernel.SaveRestoreExecConfig` set after a failed exec. With the `fca2df4` substrate fix this is no longer reachable: `gpuSaveRestoreFlags()` returns nil and substrate drains CUDA externally via `runsc exec supervisor cuda-checkpoint --toggle --pid 1` (`cmdDrainCUDA`) before invoking `runsc checkpoint`. If you see this, your atelet/ateom-gvisor is older than `fca2df4`. |
+| `FATAL ERROR: checkpoint failed: can't save with live nvproxy clients` | gVisor refuses to checkpoint a sandbox while CUDA contexts are open. Substrate's `cmdDrainCUDA` is supposed to drain them just before `runsc checkpoint`; if you hit this, either `cuda-checkpoint` is missing from `/run/ateom-gvisor/static-files/` (pre-stage it; see pre-flight) or the supervisor sub-container is named something other than `supervisor`. |
+| `FATAL ERROR: starting sub-container [...]: inconsistent private memory files on restore: savedMFOwners = [pause:/]` | Symptom of supervisor crashing pre-checkpoint, NOT a gVisor multi-container bug. Almost always: workload's libcuda doesn't match the host driver, so `cuInit` returns `CUDA_ERROR_NO_DEVICE`, agent.py raises and exits, supervisor sub-container's memory is empty at checkpoint time. **2026-05-28+**: atelet auto-injects host libcuda, so this should not happen unless setup-host.sh didn't populate `/run/ateom-gvisor/static-files/nvidia-libs/`. Verify with `docker exec kind-control-plane ls /run/ateom-gvisor/static-files/nvidia-libs/ \| wc -l` (expect 50+ entries). |
+| `nvproxy: failed to open device gofer nvidiactl: devutil.CtxDevGoferClient is not set` | The root sandbox booted without `--nvproxy` (no dev gofer wired). With `fca2df4` substrate puts the GPU spec on the pause container's OCI bundle so `runsc create pause` carries `--nvproxy` and the dev gofer is set up. If you still see this you're on a pre-`fca2df4` substrate, OR on `release-20260520.0`-era runsc which has a multi-container nvproxy bug — switch to the 2026-05-26 nightly. |
 | `python3 -c "import ctypes; ctypes.CDLL('libcuda.so.1')"` raises `OSError` inside the sandbox | The workload image isn't carrying `libnvidia-compute-580` (or matching). Check `docker run --rm <image> ls /usr/lib/x86_64-linux-gnu/libcuda.so*`. Build with the full `python3` package; `python3-minimal` doesn't include `_ctypes`. |
 | `kubectl ate get actor` shows STATUS_RESUMING that won't progress | The worker pod the actor was bound to is gone. Either wait for substrate's syncer to recover (PR #75 release-on-pod-delete) or scale the WorkerPool replicas up. Stuck STATUS_RESUMING actors block `delete actor`. |
 | Image build pulls `nvidia-utils-580` for several minutes | Ubuntu noble's NVIDIA package is ~270 MB. Cache `docker pull nvidia/cuda:12.6.3-runtime-ubuntu24.04` once; the layered installs are then deterministic. |
@@ -205,22 +255,40 @@ no-ops (the persistenced fixup) or read-only file installs.
 
 ## Open follow-ups (not in PR #96)
 
-1. **atelet should run `nvidia-container-cli configure` against the rootfs
-   when the container has `resources.gpu`.** Without it, the workload image
-   must bake matching driver libs (this demo bakes `libnvidia-compute-580`
-   + `nvidia-utils-580` from Ubuntu noble). Production-grade integration
-   would call `nvidia-container-cli` from atelet so any unmodified CUDA
-   workload image works without driver libs baked in. Tracked in
-   `~/notes/openshell-on-substrate/2026-05-27-gpu-passthrough-impl-log.md`.
+1. ~~**atelet should run `nvidia-container-cli configure` against the rootfs.**~~
+   ✅ **Landed 2026-05-28** (substrate-gpu, not yet pushed to PR #96).
+   atelet now has `injectNVIDIAAssetsIntoRootfs` in `cmd/atelet/oci.go`
+   which mirrors host NVIDIA driver libs (real `.so` + symlinks) from
+   `/run/ateom-gvisor/static-files/nvidia-libs/` into the rootfs at
+   sandbox-create time. setup-host.sh stages the libs there once per box
+   (see Appendix I of [`2026-05-27-gpu-passthrough-runbook.md`](https://github.com/dims/notes/blob/main/openshell-on-substrate/2026-05-27-gpu-passthrough-runbook.md)).
+   The Dockerfile no longer needs `COPY libcuda.so.<driver>` — verified
+   end-to-end on bigbox-h200 with an unmodified `ubuntu:24.04 + python3`
+   workload image (full 6-beat demo passes; CUDA buffer + dev_ptr
+   preserved across suspend/resume). atelet does its own copy+symlink
+   rather than exec'ing `nvidia-container-cli configure` because atelet
+   runs on `distroless/static-debian13` and has no dynamic linker for
+   `libnvidia-container.so.1`; the end state is identical.
 
-2. **gVisor multi-container restore of nvproxy state drops the supervisor
-   sub-container.** `runsc checkpoint pause` saves `savedMFOwners=[pause:/]`
-   — the supervisor's process memory isn't captured. On restore, gVisor
-   fails the sub-container start with `inconsistent private memory files
-   on restore`. Empirically verified on L40S 2026-05-27 with libcuda + a
-   live CUDA context inside the supervisor. Either substrate switches to
-   a per-sub-container checkpoint loop, or this needs an upstream gVisor
-   issue. Same notes file has the full error trace + theory.
+2. **Kind-node DaemonSet for cuda-checkpoint + wrapper.** The demo
+   pre-stages those binaries into `/run/ateom-gvisor/static-files/`
+   inside `kind-control-plane` as a one-shot manual step (see
+   pre-flight). For multi-node kind clusters or for a production-cleaner
+   single-node bring-up, ship a DaemonSet that drops them automatically
+   so atelet's `prepareOCIDirectory` finds them at sandbox-create time.
+
+3. **gVisor nvproxy ABI list extension.** Host drivers not in
+   `runsc nvproxy list-supported-drivers` need substrate told a
+   neighbouring supported version (e.g. host 580.159.03 → tell substrate
+   580.126.20). Patch-level NVIDIA 580.x ioctls are wire-compatible so
+   this works, but upstream gVisor should accept a PR adding the
+   missing driver versions.
+
+The earlier "gVisor multi-container restore quirk" / `savedMFOwners=[pause:/]`
+follow-up turned out to be a downstream symptom of the libcuda mismatch above
+(supervisor crashed at boot before checkpoint), not a gVisor bug. Once libcuda
+matched the host driver, restore worked cleanly. Verified on H100 + H200 on
+2026-05-27.
 
 ## Further reading
 
