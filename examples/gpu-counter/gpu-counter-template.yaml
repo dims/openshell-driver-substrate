@@ -50,6 +50,10 @@ spec:
     resources:
       gpu:
         count: 1
+        # Host driver is 580.159.03, which this runsc's nvproxy doesn't list;
+        # claim a supported ABI-compatible version so nvproxy attaches the GPU.
+        # (`runsc nvproxy list-supported-drivers` → 580.126.20 is the closest.)
+        driverVersion: "580.126.20"
   workerPoolRef:
     namespace: ate-demo-gpu-counter
     name: gpu-counter-pool
