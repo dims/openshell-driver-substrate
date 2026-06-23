@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::set_var("PROTOC", protobuf_src::protoc());
     }
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(false) // client-only -- the driver speaks to ate-api-server
         .build_client(true)
         .compile_protos(&["proto/ateapi.proto"], &["proto"])?;

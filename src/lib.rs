@@ -866,7 +866,7 @@ fn synthesize_template(
             } else {
                 None
             },
-            resources: sandbox.spec.as_ref().filter(|s| s.gpu).map(|s| {
+            resources: sandbox.spec.as_ref().filter(|s| s.gpu).map(|_| {
                 template::ContainerResources {
                     gpu: Some(template::GpuResource {
                         count: 1,
