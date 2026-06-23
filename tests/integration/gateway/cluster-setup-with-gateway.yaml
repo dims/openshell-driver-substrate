@@ -47,8 +47,8 @@ spec:
         - -c
         - while true; do sleep 60; done
       env:
-        - name: OPENSHELL_BEST_EFFORT_FAILURES
-          value: "1"
+        - name: OPENSHELL_BEST_EFFORT_BOOTSTRAP
+          value: "all"
         - name: OPENSHELL_ENDPOINT
           value: __GATEWAY_ENDPOINT__
         - name: OPENSHELL_SANDBOX_TOKEN

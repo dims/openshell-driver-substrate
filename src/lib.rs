@@ -870,7 +870,11 @@ fn synthesize_template(
                 template::ContainerResources {
                     gpu: Some(template::GpuResource {
                         count: 1,
-                        device: s.gpu_device.clone(),
+                        // `gpu_device` was removed from the compute proto
+                        // (now reserved); GPU is signalled by the `gpu` bool
+                        // alone. Leave device empty so substrate's CRD default
+                        // applies.
+                        device: String::new(),
                         driver_capabilities: vec![],
                         driver_version: String::new(),
                     }),
@@ -958,8 +962,6 @@ impl ComputeDriver for SubstrateComputeDriver {
             // driver does not pick a default image, the gateway supplies
             // one per sandbox.
             default_image: String::new(),
-            supports_gpu: true,
-            gpu_count: 1,
         }))
     }
 

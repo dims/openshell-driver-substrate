@@ -44,9 +44,9 @@ spec:
     - /opt/helpdesk/agent.py
     env:
     # atelet's OCI bundle builder does not inherit the base image's ENV,
-    # so we re-state OPENSHELL_BEST_EFFORT_FAILURES=1 explicitly here.
-    - name: OPENSHELL_BEST_EFFORT_FAILURES
-      value: "1"
+    # so we re-state OPENSHELL_BEST_EFFORT_BOOTSTRAP=all explicitly here.
+    - name: OPENSHELL_BEST_EFFORT_BOOTSTRAP
+      value: "all"
     ports:
     - containerPort: 80
   workerPoolRef:

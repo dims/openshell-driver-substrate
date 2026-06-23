@@ -10,7 +10,7 @@
 #   * test-workload.sh as the supervisor's child workload command
 #
 # The supervisor is opted into best-effort bootstrap via
-# OPENSHELL_BEST_EFFORT_FAILURES=1; under gVisor this lets the supervisor
+# OPENSHELL_BEST_EFFORT_BOOTSTRAP=all; under gVisor this lets the supervisor
 # survive the network-namespace, supervisor-seccomp, and workload-seccomp
 # subsystems that the runtime degrades.
 #
@@ -32,5 +32,5 @@ RUN chmod 0755 /usr/local/bin/openshell-sandbox /usr/local/bin/test-workload.sh 
 ENV OPENSHELL_POLICY_RULES=/etc/openshell/policy.rego \
     OPENSHELL_POLICY_DATA=/etc/openshell/data.yaml \
     OPENSHELL_LOG_LEVEL=info \
-    OPENSHELL_BEST_EFFORT_FAILURES=1 \
+    OPENSHELL_BEST_EFFORT_BOOTSTRAP=all \
     RUST_BACKTRACE=1
