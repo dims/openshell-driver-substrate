@@ -20,14 +20,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         protobuf-compiler \
         libsqlite3-dev \
         pkg-config \
+        libz3-dev \
+        clang \
+        libclang-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY OpenShell-driver-substrate /src
 
-# Build the gateway binary only. Workspace-wide builds pull in the policy
-# prover (Z3-dependent) and the supervisor (long Linux-only build); we
-# need neither in the gateway image.
+# Build the gateway binary only (not the supervisor — long Linux-only build).
+# openshell-server transitively depends on openshell-policy -> z3-sys, whose
+# bindgen build script needs libz3-dev + libclang, hence the apt deps above.
 RUN cargo build --release -p openshell-server --bin openshell-gateway
 
 # ─── runtime ──────────────────────────────────────────────────────────────
