@@ -51,6 +51,12 @@ for _ in $(seq 1 30); do [ "$(actor_status "$GPU1")" = "STATUS_SUSPENDED" ] && b
 echo "status=$(actor_status "$GPU1")"
 
 beat 5 "Resume by requesting /sum — sample MUST still be 99"
+# Requesting a suspended actor triggers an async resume; the GPU restore
+# (runsc restore + cuda-checkpoint untoggle) can take longer than a single
+# request, so kick the resume, wait for STATUS_RUNNING, then read the buffer.
+req "$GPU1" GET /sum >/dev/null 2>&1 || true
+for _ in $(seq 1 60); do [ "$(actor_status "$GPU1")" = "STATUS_RUNNING" ] && break; sleep 1; done
+echo "status=$(actor_status "$GPU1")"
 req "$GPU1" GET /sum
 
 beat 6 "Delete"
