@@ -50,7 +50,7 @@ spec:
       env:
         # Tolerate the bootstrap subsystems gVisor degrades
         # (network-namespace, supervisor-seccomp, workload-seccomp).
-        - name: OPENSHELL_BEST_EFFORT_BOOTSTRAP
+        - name: OPENSHELL_SKIP_BOOTSTRAP
           value: "all"
   snapshotsConfig:
     location: gs://ate-snapshots/ate-openshell-m0/

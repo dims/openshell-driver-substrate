@@ -1232,7 +1232,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "openshell-core"
 version = "0.0.0"
-source = "git+https://github.com/dims/OpenShell?rev=4f6da827f1c642a6fdafd60e1c5ea80e7ab073cc#4f6da827f1c642a6fdafd60e1c5ea80e7ab073cc"
+source = "git+https://github.com/dims/OpenShell?rev=5112fca71d52fab22d8823cc8f2e3fb776abd17c#5112fca71d52fab22d8823cc8f2e3fb776abd17c"
 dependencies = [
  "base64 0.22.1",
  "chrono",

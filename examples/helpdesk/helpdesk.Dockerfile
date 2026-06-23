@@ -5,7 +5,7 @@
 # The base image already has:
 #   * the patched openshell-sandbox binary (b6d3a35)
 #   * OPENSHELL_POLICY_RULES / OPENSHELL_POLICY_DATA / OPENSHELL_LOG_LEVEL /
-#     OPENSHELL_BEST_EFFORT_BOOTSTRAP=all env vars
+#     OPENSHELL_SKIP_BOOTSTRAP=all env vars
 #   * python3 from the openshell-community/sandboxes/base image
 ARG BASE
 FROM ${BASE}

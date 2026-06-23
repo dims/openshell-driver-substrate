@@ -17,8 +17,8 @@ build = "build.rs"
 # types from openshell-core (SANDBOX_ID, ENDPOINT, SANDBOX_TOKEN, ComputeDriver);
 # the patched openshell-sandbox binary itself is built from the same source by
 # tests/integration/build-image.sh. Degraded boot is opt-in via the
-# --best-effort-bootstrap flag / OPENSHELL_BEST_EFFORT_BOOTSTRAP env var.
-openshell-core = { git = "https://github.com/dims/OpenShell", rev = "4f6da827f1c642a6fdafd60e1c5ea80e7ab073cc" }
+# --skip-bootstrap flag / OPENSHELL_SKIP_BOOTSTRAP env var.
+openshell-core = { git = "https://github.com/dims/OpenShell", rev = "5112fca71d52fab22d8823cc8f2e3fb776abd17c" }
 
 tokio = { version = "1.43", features = ["full"] }
 # `tls-native-roots` pulls in tonic's rustls-based TLS stack with the
