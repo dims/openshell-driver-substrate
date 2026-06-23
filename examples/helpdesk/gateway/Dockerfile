@@ -37,6 +37,7 @@ RUN cargo build --release -p openshell-server --bin openshell-gateway
 FROM debian:${DEBIAN_VERSION}-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 \
+        libz3-4 \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
