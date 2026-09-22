@@ -1,0 +1,71 @@
+# Two-container OpenShell ActorTemplate for the micro-VM backend.
+#
+# sandbox    - openshell-sandbox at its own USER 65532:65532, no capabilities,
+#              a writable /tmp for the Landlock probe, and its bootstrap baked
+#              into the image (see harness/images/sandbox-with-bootstrap).
+# supervisor - stock openshell-supervisor (root), descriptor + auth bundle on a
+#              read-only image volume, which it does not consume.
+metadata:
+  atespace: ${ATESPACE}
+  name: openshell-microvm
+workerSelector:
+  matchLabels:
+    workload: openshell-microvm
+containers:
+  - name: sandbox
+    image: "${SANDBOX_BAKED_IMAGE}"
+    command: ["/openshell-sandbox"]
+    args: ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: socket-dir
+        mountPath: "/run/openshell"
+      - name: tmp
+        mountPath: "/tmp"
+  - name: supervisor
+    image: "${SUPERVISOR_IMAGE}"
+    command: ["/openshell-supervisor"]
+    args:
+      - "--role"
+      - "isolation-backend"
+      - "--sandbox-id"
+      - "test-sandbox-1"
+      - "--backend-descriptor-file"
+      - "/.openshell/supervisor/runtime-descriptor.json"
+      - "--auth-bundle-file"
+      - "/.openshell/supervisor/auth.json"
+      - "--log-level"
+      - "info"
+      - "--"
+      - "/busybox"
+      - "sh"
+      - "-c"
+      - "echo hello-from-real-openshell-workload; /busybox sleep infinity"
+    volumeMounts:
+      - name: bootstrap
+        mountPath: "/.openshell"
+      - name: socket-dir
+        mountPath: "/run/openshell"
+resources:
+  limits:
+    - name: cpu
+      quantity: "1"
+    - name: memory
+      quantity: 1Gi
+volumes:
+  - name: bootstrap
+    image:
+      reference: "${BOOTSTRAP_FILES_IMAGE}"
+  - name: socket-dir
+    durableDir: {}
+  - name: tmp
+    durableDir: {}
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: "gs://${BUCKET_NAME}/${ATESPACE}/"
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_MICROVM
+  configName: microvm

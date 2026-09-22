@@ -1,0 +1,35 @@
+# Runs `openshell-sandbox capability-probe` on its own. Fastest way to see
+# which runtime-qualification gate fails; prints a JSON report.
+metadata:
+  atespace: ${ATESPACE}
+  name: osh-capprobe
+workerSelector:
+  matchLabels:
+    workload: openshell-microvm
+containers:
+  - name: capprobe
+    image: "${SANDBOX_IMAGE}"
+    command: ["/openshell-sandbox"]
+    args: ["capability-probe"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: tmp
+        mountPath: "/tmp"
+resources:
+  limits:
+    - name: cpu
+      quantity: "1"
+    - name: memory
+      quantity: 512Mi
+volumes:
+  - name: tmp
+    durableDir: {}
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: "gs://${BUCKET_NAME}/${ATESPACE}/"
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_MICROVM
+  configName: microvm

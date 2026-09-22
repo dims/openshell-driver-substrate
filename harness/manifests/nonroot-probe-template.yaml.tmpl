@@ -1,0 +1,19 @@
+# Minimal non-root container. Reproduces the Substrate bugs in README §"What
+# broke" without any OpenShell parts: a busybox image whose only distinguishing
+# feature is USER 1000:1000. Works on either sandbox class.
+metadata:
+  atespace: ${ATESPACE}
+  name: nonroot-probe
+sandboxConfig:
+  sandboxClass: ${SANDBOX_CLASS}
+  configName: ${SANDBOX_CONFIG_NAME}
+snapshotsConfig:
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onResume:
+    fromData: RESUME_SOURCE_COLD_BOOT
+  storageLocation: "gs://${BUCKET_NAME}/${ATESPACE}/"
+containers:
+  - name: probe
+    image: "${NONROOT_PROBE_IMAGE}"
+    args: ["sh", "-c", "echo probe-started; sleep infinity"]

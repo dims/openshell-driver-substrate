@@ -1,220 +1,215 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `ActorTemplate` CRD support.
+//! `ActorTemplate` synthesis.
 //!
-//! Mirrors `agent-substrate/substrate/api/v1alpha1/actortemplate_types.go`
-//! closely enough that this crate can synthesize and apply a template, then
-//! wait for Substrate's controller to advance its phase to `Ready` (which
-//! signals that the golden snapshot has been captured and the template is
-//! usable for actor creation).
-//!
-//! The mirror is intentionally minimal: only the fields the driver writes
-//! or reads back are typed. Anything Substrate's controller may add to the
-//! CRD over time falls through `serde(default)` and is ignored on read.
+//! Substrate's `ActorTemplate` is a plain `ateapi.Control` gRPC resource (see
+//! `CreateActorTemplate`/`GetActorTemplate` in `proto/ateapi.proto`) — there is
+//! no CRD and no Kubernetes client involved. A template is derived once per
+//! distinct (image, command) pair and reused by content-derived name, so
+//! repeat `create_sandbox` calls for the same workload skip straight to
+//! `CreateActor` instead of rebuilding a golden snapshot.
 
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::{ContainerPort, EnvVar, ObjectReference};
-use kube::CustomResource;
-use kube::api::{Api, Patch, PatchParams};
-use kube::{Client, ResourceExt};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use openshell_core::proto::compute::v1::DriverSandbox;
+use tonic::Status;
 
-const APPLY_FIELD_MANAGER: &str = "openshell-driver-substrate";
+use crate::{ControlClient, SubstrateComputeConfig, ateapi};
+
 const READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A single workload container the actor will run inside the gVisor
-/// sandbox. Mirrors the Substrate `Container` Go struct -- only the
-/// fields the driver writes are listed; ports and env are pass-through.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Container {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub image: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub command: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ports: Vec<ContainerPort>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env: Vec<EnvVar>,
-    /// Substrate's per-container security context (CRD field
-    /// `securityContext`). When set, the additional capabilities are
-    /// merged with the cluster's default sandbox set inside the OCI
-    /// bundle builder. Older Substrate versions (pre-`SecurityContext`
-    /// support) silently ignore the field on apply, so emitting it
-    /// unconditionally is safe.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub security_context: Option<ContainerSecurityContext>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ContainerResources>,
+/// Deterministic, DNS-1123-safe template name derived from the parts of the
+/// sandbox spec that affect the golden snapshot (image + command). Same
+/// inputs -> same name -> `CreateActorTemplate` returns `AlreadyExists` and
+/// the caller reuses the existing golden snapshot instead of rebuilding one.
+#[must_use]
+pub fn template_name_for(image: &str, command: &[String]) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    image.hash(&mut hasher);
+    command.hash(&mut hasher);
+    format!("oshl-{:016x}", hasher.finish())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerResources {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu: Option<GpuResource>,
-}
+/// Build an `ActorTemplate` from the sandbox spec and driver config. Pure:
+/// does not touch the cluster.
+#[must_use]
+pub fn synthesize(
+    name: &str,
+    atespace: &str,
+    sandbox: &DriverSandbox,
+    config: &SubstrateComputeConfig,
+) -> ateapi::ActorTemplate {
+    let template_spec = sandbox.spec.as_ref().and_then(|s| s.template.as_ref());
+    let image = template_spec.map(|t| t.image.clone()).unwrap_or_default();
+    let command = sandbox
+        .spec
+        .as_ref()
+        .map(|s| s.command.clone())
+        .unwrap_or_default();
 
-/// Mirror of substrate's GPUResource.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct GpuResource {
-    #[serde(default = "default_gpu_count")]
-    pub count: i32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub device: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub driver_capabilities: Vec<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub driver_version: String,
-}
+    // Merge spec.environment + spec.template.environment (template wins on
+    // conflict), then layer driver-injected identity vars on top so the
+    // caller's environment cannot override them.
+    let mut env_map: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(spec) = sandbox.spec.as_ref() {
+        env_map.extend(spec.environment.clone());
+    }
+    if let Some(t) = template_spec {
+        env_map.extend(t.environment.clone());
+    }
+    env_map.insert(
+        openshell_core::sandbox_env::SANDBOX_ID.to_string(),
+        sandbox.id.clone(),
+    );
+    if !config.gateway_endpoint.is_empty() {
+        env_map.insert(
+            openshell_core::sandbox_env::ENDPOINT.to_string(),
+            config.gateway_endpoint.clone(),
+        );
+    }
+    if let Some(spec) = sandbox.spec.as_ref()
+        && !spec.sandbox_token.is_empty()
+    {
+        // ponytail: OPENSHELL_SANDBOX_TOKEN is openshell-core's test-harness
+        // env-var path (see sandbox_env.rs), not the production
+        // SANDBOX_TOKEN_FILE bind-mount path. Good enough while proving the
+        // driver contract; move to a mounted file if a real deployment
+        // needs it.
+        env_map.insert(
+            openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
+            spec.sandbox_token.clone(),
+        );
+    }
+    let env: Vec<ateapi::EnvVar> = env_map
+        .into_iter()
+        .map(|(name, value)| ateapi::EnvVar { name, value })
+        .collect();
 
-fn default_gpu_count() -> i32 {
-    1
-}
-
-/// Substrate subset of K8s `SecurityContext` -- only what the
-/// ActorTemplate CRD admits today.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ContainerSecurityContext {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capabilities: Option<Capabilities>,
-}
-
-/// Linux capability adjustments applied on top of Substrate's default
-/// sandbox set (`CAP_AUDIT_WRITE`, `CAP_KILL`, `CAP_NET_BIND_SERVICE`).
-/// Names may carry or omit the `CAP_` prefix; the OCI builder
-/// normalizes them.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Default)]
-pub struct Capabilities {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub add: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub drop: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-pub struct SnapshotsConfig {
-    pub location: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RunscPlatformConfig {
-    pub sha256_hash: String,
-    pub url: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct RunscConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub amd64: Option<RunscPlatformConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arm64: Option<RunscPlatformConfig>,
-}
-
-/// `ate.dev/v1alpha1 ActorTemplate` CRD root. The derive macro emits
-/// the wrapper struct (`ActorTemplate`) plus glue for `kube::Api`.
-#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[kube(
-    group = "ate.dev",
-    version = "v1alpha1",
-    kind = "ActorTemplate",
-    namespaced,
-    status = "ActorTemplateStatus"
-)]
-#[serde(rename_all = "camelCase")]
-pub struct ActorTemplateSpec {
-    pub pause_image: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub containers: Vec<Container>,
-    pub snapshots_config: SnapshotsConfig,
-    pub worker_pool_ref: ObjectReference,
-    pub runsc: RunscConfig,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ActorTemplateStatus {
-    /// Substrate's controller advances through:
-    /// `""` (initial) → `ResumeGoldenActor` → `WaitGoldenActor` → `Ready` | `Failed`.
-    #[serde(default)]
-    pub phase: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub golden_actor_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub golden_snapshot: String,
+    ateapi::ActorTemplate {
+        metadata: Some(ateapi::ResourceMetadata {
+            atespace: atespace.to_string(),
+            name: name.to_string(),
+            ..Default::default()
+        }),
+        worker_selector: None,
+        containers: vec![ateapi::Container {
+            name: "sandbox".to_string(),
+            image,
+            command,
+            args: vec![],
+            env,
+            readyz: None,
+            volume_mounts: vec![],
+            security_context: None,
+            resources: None,
+        }],
+        volumes: vec![],
+        snapshots_config: Some(ateapi::SnapshotsConfig {
+            on_pause: ateapi::SnapshotContentScope::Full as i32,
+            on_commit: ateapi::SnapshotContentScope::Full as i32,
+            on_resume: Some(ateapi::OnResumeConfig {
+                from_data: ateapi::ResumeSource::ColdBoot as i32,
+            }),
+            storage_location: config.snapshots_location.clone(),
+        }),
+        sandbox_config: Some(ateapi::SandboxConfig {
+            sandbox_class: ateapi::SandboxClass::Gvisor as i32,
+            config_name: config.sandbox_config_name.clone(),
+        }),
+        resources: None,
+        status: None,
+    }
 }
 
 /// Errors specific to template management. Lifted into
 /// `SubstrateDriverError` at the lib boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
-    #[error("kube client error: {0}")]
-    Kube(#[from] kube::Error),
-    #[error("ActorTemplate {namespace}/{name} reached phase Failed; aborting create")]
-    PhaseFailed { namespace: String, name: String },
-    #[error(
-        "timed out waiting for ActorTemplate {namespace}/{name} to reach Ready (last phase: {last_phase:?})"
-    )]
-    Timeout {
-        namespace: String,
+    #[error("Substrate RPC failed while managing ActorTemplate {atespace}/{name}: {source}")]
+    Rpc {
+        atespace: String,
         name: String,
-        last_phase: String,
+        #[source]
+        source: Status,
     },
+    #[error("ActorTemplate {atespace}/{name} failed during golden-snapshot creation: {message}")]
+    PhaseFailed {
+        atespace: String,
+        name: String,
+        message: String,
+    },
+    #[error("timed out waiting for ActorTemplate {atespace}/{name} to reach Ready")]
+    Timeout { atespace: String, name: String },
 }
 
-/// Server-side apply the template into the cluster. Idempotent: replays
-/// of the same spec produce the same template (the controller treats
-/// "spec unchanged" as a no-op and does not retake the golden snapshot).
-pub async fn apply(client: &Client, template: &ActorTemplate) -> Result<(), TemplateError> {
-    let ns = template
-        .namespace()
-        .expect("ActorTemplate must be namespaced before apply");
-    let api: Api<ActorTemplate> = Api::namespaced(client.clone(), &ns);
-    let name = template.name_any();
-    let params = PatchParams::apply(APPLY_FIELD_MANAGER).force();
-    api.patch(&name, &params, &Patch::Apply(template))
-        .await
-        .map(|_| ())
-        .map_err(TemplateError::from)
-}
-
-/// Block until the template reports `status.phase == "Ready"` or
-/// `Failed`. Polls every `READY_POLL_INTERVAL`; gives up after
-/// `timeout`.
-pub async fn wait_until_ready(
-    client: &Client,
-    namespace: &str,
+/// Ensure a template named `name` exists in `atespace`, creating it from
+/// `sandbox` if not already present, then block until its golden snapshot is
+/// ready (or failed / timed out). Idempotent: a second call with the same
+/// name and an existing, healthy template is a single `GetActorTemplate`.
+pub async fn ensure_ready(
+    client: &mut ControlClient,
     name: &str,
-    timeout: Duration,
+    atespace: &str,
+    sandbox: &DriverSandbox,
+    config: &SubstrateComputeConfig,
 ) -> Result<(), TemplateError> {
-    let api: Api<ActorTemplate> = Api::namespaced(client.clone(), namespace);
+    let template = synthesize(name, atespace, sandbox, config);
+    let create = client
+        .create_actor_template(ateapi::CreateActorTemplateRequest {
+            actor_template: Some(template),
+        })
+        .await;
+    match create {
+        Ok(_) => {}
+        // Reuse: same content hash means the same image + command, so the
+        // existing golden snapshot is valid for this create too.
+        Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+        Err(status) => {
+            return Err(TemplateError::Rpc {
+                atespace: atespace.to_string(),
+                name: name.to_string(),
+                source: status,
+            });
+        }
+    }
+
     let started = std::time::Instant::now();
     loop {
-        let tmpl = api.get_status(name).await?;
-        let phase = tmpl.status.unwrap_or_default().phase;
-        match phase.as_str() {
-            "Ready" => return Ok(()),
-            "Failed" => {
-                return Err(TemplateError::PhaseFailed {
-                    namespace: namespace.to_string(),
+        let resp = client
+            .get_actor_template(ateapi::GetActorTemplateRequest {
+                actor_template: Some(ateapi::ObjectRef {
+                    atespace: atespace.to_string(),
                     name: name.to_string(),
+                }),
+            })
+            .await
+            .map_err(|source| TemplateError::Rpc {
+                atespace: atespace.to_string(),
+                name: name.to_string(),
+                source,
+            })?
+            .into_inner();
+        if let Some(status) = resp.status.as_ref()
+            && let Some(golden) = status.golden_snapshot_status.as_ref()
+        {
+            if !golden.error_message.is_empty() {
+                return Err(TemplateError::PhaseFailed {
+                    atespace: atespace.to_string(),
+                    name: name.to_string(),
+                    message: golden.error_message.clone(),
                 });
             }
-            _ => {}
+            if golden.golden_tag.is_some() {
+                return Ok(());
+            }
         }
-        if started.elapsed() > timeout {
+        if started.elapsed() > Duration::from_secs(config.template_ready_timeout_secs) {
             return Err(TemplateError::Timeout {
-                namespace: namespace.to_string(),
+                atespace: atespace.to_string(),
                 name: name.to_string(),
-                last_phase: phase,
             });
         }
         tokio::time::sleep(READY_POLL_INTERVAL).await;
@@ -226,67 +221,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn actor_template_camel_cases_correctly() {
-        // The CRD spec wire format is camelCase (matches the Go struct
-        // tags); the Rust struct field is snake_case. Verify the
-        // serde rename rolls through.
-        let tmpl = ActorTemplate::new(
-            "supervisor",
-            ActorTemplateSpec {
-                pause_image: "registry.k8s.io/pause:3.10.2@sha256:abc".into(),
-                containers: vec![Container {
-                    name: "supervisor".into(),
-                    image: "localhost:5001/openshell-sandbox-m0@sha256:def".into(),
-                    command: vec!["/usr/local/bin/openshell-sandbox".into()],
-                    ports: vec![],
-                    env: vec![],
-                    security_context: None,
-                    resources: None,
-                }],
-                snapshots_config: SnapshotsConfig {
-                    location: "gs://ate-snapshots/ate-openshell-m0/".into(),
-                },
-                worker_pool_ref: ObjectReference {
-                    name: Some("openshell-m0-pool".into()),
-                    namespace: Some("ate-openshell-m0".into()),
-                    ..Default::default()
-                },
-                runsc: RunscConfig {
-                    amd64: Some(RunscPlatformConfig {
-                        sha256_hash: "a397be1abc".into(),
-                        url: "gs://gvisor/releases/nightly/2026-05-19/x86_64/runsc".into(),
-                    }),
-                    arm64: None,
-                },
-            },
-        );
-        let json = serde_json::to_value(&tmpl).unwrap();
-        let spec = json.get("spec").expect("has spec");
-        assert!(spec.get("pauseImage").is_some(), "camelCase: pauseImage");
+    fn template_name_is_deterministic_and_dns_safe() {
+        let a = template_name_for("img@sha256:abc", &["/bin/foo".to_string()]);
+        let b = template_name_for("img@sha256:abc", &["/bin/foo".to_string()]);
+        let c = template_name_for("img@sha256:def", &["/bin/foo".to_string()]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
         assert!(
-            spec.get("snapshotsConfig").is_some(),
-            "camelCase: snapshotsConfig"
-        );
-        assert!(
-            spec.get("workerPoolRef").is_some(),
-            "camelCase: workerPoolRef"
-        );
-        assert!(spec.get("runsc").is_some(), "lower: runsc");
-        let runsc = spec.get("runsc").unwrap();
-        assert!(
-            runsc.get("amd64").unwrap().get("sha256Hash").is_some(),
-            "camelCase: sha256Hash"
+            a.chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
         );
     }
 
     #[test]
-    fn status_phase_default_is_empty() {
-        // The initial phase reported by Substrate is the empty string;
-        // make sure our deserialization treats a missing field the
-        // same way.
-        let s: ActorTemplateStatus = serde_json::from_str("{}").unwrap();
-        assert_eq!(s.phase, "");
-        let s: ActorTemplateStatus = serde_json::from_str(r#"{"phase":"Ready"}"#).unwrap();
-        assert_eq!(s.phase, "Ready");
+    fn synthesize_injects_sandbox_id_and_endpoint() {
+        let sandbox = DriverSandbox {
+            id: "actor-1".to_string(),
+            spec: Some(openshell_core::proto::compute::v1::DriverSandboxSpec {
+                template: Some(openshell_core::proto::compute::v1::DriverSandboxTemplate {
+                    image: "img@sha256:abc".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let config = SubstrateComputeConfig {
+            gateway_endpoint: "gateway:443".to_string(),
+            ..SubstrateComputeConfig::default()
+        };
+        let tmpl = synthesize("oshl-abc123", "ws", &sandbox, &config);
+        let env = &tmpl.containers[0].env;
+        assert!(
+            env.iter()
+                .any(|e| e.name == openshell_core::sandbox_env::SANDBOX_ID && e.value == "actor-1")
+        );
+        assert!(
+            env.iter().any(
+                |e| e.name == openshell_core::sandbox_env::ENDPOINT && e.value == "gateway:443"
+            )
+        );
     }
 }

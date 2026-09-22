@@ -1,0 +1,28 @@
+# Worker pool for the micro-VM OpenShell actor.
+# Render with harness/scripts/render.sh.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ATESPACE}
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: openshell-microvm
+  namespace: ${ATESPACE}
+  labels:
+    workload: openshell-microvm
+spec:
+  replicas: 2
+  sandboxClass: microvm
+  workerImage: ${ATEOM_MICROVM_IMAGE}
+  template:
+    nodeSelector:
+      ate.dev/substrate-version: "${SUBSTRATE_VERSION}"
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: 250m
+        memory: 2Gi
