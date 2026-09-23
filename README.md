@@ -75,8 +75,8 @@ docs/                 upstream branch index
 harness/
   bootstrap-gen/      mints the Ed25519/JWT/TLS bundle the binaries require
   capability-probe/   Go probe for uid, caps, seccomp, Landlock, task memory
-  images/             derived sandbox image with its bootstrap baked in
-  manifests/          ActorTemplate / WorkerPool templates
+  images/             derived sandbox image, and the non-root probe image
+  manifests/          ActorTemplate / WorkerPool templates (gVisor and micro-VM)
   scripts/            guest-kernel build + staging, version retargeting
 ```
 
@@ -96,14 +96,48 @@ reachable `ate-api-server` and is ignored by default.
 
 ## Reproducing a working run
 
-Prerequisites: a Substrate cluster whose node has `/dev/kvm`, and a container
-registry it can pull from. A kind cluster on a bare-metal box works; the
-micro-VM backend is the only part that needs KVM.
+### 0. Prerequisites
 
-### 1. Patch Substrate
+A Linux host with **`/dev/kvm`**. The micro-VM backend is the only sandbox
+class the OpenShell sandbox runs on, and it needs real virtualisation — a cloud
+VM without nested virt will not do. Check before anything else:
 
-Apply the six commits from
-[`docs/upstream-branches.md`](docs/upstream-branches.md). Without them:
+```sh
+ls /dev/kvm && grep -oE 'vmx|svm' /proc/cpuinfo | head -1
+```
+
+If that comes up empty you can still run everything in
+[Debugging](#debugging) on gVisor, but not the OpenShell sandbox itself.
+
+Then:
+
+```sh
+sudo apt-get install -y build-essential protobuf-compiler pkg-config \
+                       libssl-dev jq gettext-base          # envsubst
+# docker, go, rust, kubectl, kind
+curl -fsSL https://sh.rustup.rs | sh -s -- -y
+# go >= 1.23, kubectl, kind from their upstream installers
+```
+
+`ko` does **not** need installing separately — Substrate vendors it and every
+build must go through its wrapper, `./hack/run-tool.sh ko ...`. A globally
+installed `ko` is not what the install scripts use.
+
+### 1. Patch Substrate and bring up a cluster
+
+```sh
+git clone https://github.com/dims/substrate && cd substrate
+git checkout lean-integration          # the six commits, see docs/upstream-branches.md
+export GOFLAGS=-buildvcs=false
+./hack/create-kind-cluster.sh
+./hack/install-ate-kind.sh --deploy-ate-system
+```
+
+On a **fresh** cluster the node is labelled with the build version
+automatically, so no retargeting is needed. That only applies after a rebuild
+(see [Retargeting](#retargeting-after-a-rebuild)).
+
+Without these commits:
 
 - every actor container runs as root regardless of its image's `USER`;
 - no container declaring a non-root `USER` can execute anything at all,
@@ -255,7 +289,33 @@ the binary. No `/tmp`, no `/etc`, nothing.
 
 `harness/manifests/nonroot-probe-template.yaml.tmpl` is a busybox image whose
 only distinguishing feature is `USER 1000:1000`. It reproduces the Substrate
-bugs with no OpenShell parts involved, on either sandbox class.
+bugs with no OpenShell parts involved, and runs on gVisor — no KVM needed.
+
+```sh
+# the busybox binary MUST be static; busybox:latest's is not (see the Dockerfile)
+docker create --name bb busybox:musl && docker cp bb:/bin/busybox ./busybox && docker rm bb
+docker build -t <registry>/nonroot-probe:dev harness/images/nonroot-probe
+docker push <registry>/nonroot-probe:dev
+
+export ATESPACE=ate-probe BUCKET_NAME=ate-snapshots \
+       SANDBOX_CLASS=SANDBOX_CLASS_GVISOR SANDBOX_CONFIG_NAME=gvisor-default \
+       NONROOT_PROBE_IMAGE=<registry>/nonroot-probe@sha256:... \
+       ATEOM_GVISOR_IMAGE=$(cd <substrate> && ./hack/run-tool.sh ko build ./cmd/ateom-gvisor --platform=linux/amd64 | tail -1) \
+       SUBSTRATE_VERSION=$(kubectl get node <node> -o jsonpath='{.metadata.labels.ate\.dev/substrate-version}')
+
+harness/scripts/render.sh harness/manifests/gvisor-pool.yaml.tmpl | kubectl apply -f -
+kubectl-ate create atespace "${ATESPACE}"
+harness/scripts/render.sh harness/manifests/nonroot-probe-template.yaml.tmpl | kubectl-ate create actor-template -f -
+kubectl-ate create actor np-1 --atespace "${ATESPACE}" --template nonroot-probe
+kubectl-ate resume actor -a "${ATESPACE}" np-1      # -> ACTOR_STATE_RUNNING
+```
+
+Two traps this probe walks into, both of which present as confusing errors:
+a dynamically linked busybox in a `FROM scratch` image fails with
+`failed to load /busybox: no such file or directory`, and a bare `sleep`
+(no applet symlinks, no PATH) exits the container silently, so the golden
+snapshot captures only `_pause` and every resume fails with
+`savedMFOwners = [_pause:/]`.
 
 `harness/capability-probe` reports uid/gid, all five capability sets,
 `no_new_privs`, whether `seccomp(SECCOMP_FILTER_FLAG_NEW_LISTENER)` succeeds,

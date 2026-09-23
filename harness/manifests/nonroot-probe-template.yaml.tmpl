@@ -1,6 +1,10 @@
 # Minimal non-root container: a busybox image whose only distinguishing feature
 # is USER 1000:1000. Reproduces the Substrate bugs with no OpenShell parts
 # involved, on either sandbox class. See "Generic non-root repro" in the README.
+#
+# The /busybox prefix is required: a FROM scratch image has no applet symlinks
+# and no PATH, so a bare `sleep` does not resolve, the script ends, and the
+# container dies before the golden snapshot is taken.
 metadata:
   atespace: ${ATESPACE}
   name: nonroot-probe
@@ -16,4 +20,4 @@ snapshotsConfig:
 containers:
   - name: probe
     image: "${NONROOT_PROBE_IMAGE}"
-    args: ["sh", "-c", "echo probe-started; sleep infinity"]
+    args: ["sh", "-c", "echo probe-started; /busybox sleep infinity"]

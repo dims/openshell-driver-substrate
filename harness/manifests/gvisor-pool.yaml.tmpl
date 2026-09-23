@@ -1,0 +1,27 @@
+# gVisor worker pool. The non-root probe runs here. The OpenShell sandbox
+# cannot (no Landlock) -- use openshell-microvm-pool.yaml.tmpl for that.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ATESPACE}
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: gvisor-pool
+  namespace: ${ATESPACE}
+  labels:
+    workload: gvisor-pool
+spec:
+  replicas: 2
+  workerImage: ${ATEOM_GVISOR_IMAGE}
+  template:
+    nodeSelector:
+      ate.dev/substrate-version: "${SUBSTRATE_VERSION}"
+    resources:
+      limits:
+        cpu: "1"
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 1Gi
