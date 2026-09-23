@@ -1,0 +1,62 @@
+metadata:
+  atespace: ${ATESPACE}
+  name: helpdesk
+workerSelector:
+  matchLabels:
+    workload: openshell-microvm
+containers:
+  - name: sandbox
+    image: "${SANDBOX_IMAGE}"
+    command: ["/openshell-sandbox"]
+    args: ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: socket-dir
+        mountPath: "/run/openshell"
+      - name: tmp
+        mountPath: "/tmp"
+      - name: supervisor-ca
+        mountPath: "/run/openshell-supervisor-ca"
+  - name: supervisor
+    image: "${SUPERVISOR_IMAGE}"
+    command: ["/openshell-supervisor"]
+    env:
+      - name: OPENSHELL_ADMITTED_ISOLATION_BACKEND
+        value: "openshell-sandbox"
+    args: ["--role","isolation-backend","--sandbox-id","test-sandbox-1",
+           "--backend-descriptor-file","/.openshell/supervisor/runtime-descriptor.json",
+           "--auth-bundle-file","/.openshell/supervisor/auth.json",
+           "--policy-rules","/.openshell/supervisor/policy.rego",
+           "--policy-data","/.openshell/supervisor/data.yaml",
+           "--log-level","info","--",
+           "python3","/opt/helpdesk/agent.py"]
+    volumeMounts:
+      - name: bootstrap
+        mountPath: "/.openshell"
+      - name: socket-dir
+        mountPath: "/run/openshell"
+resources:
+  limits:
+    - name: cpu
+      quantity: "1"
+    - name: memory
+      quantity: 1Gi
+volumes:
+  - name: bootstrap
+    image:
+      reference: "${BOOTSTRAP_FILES_IMAGE}"
+  - name: socket-dir
+    durableDir: {}
+  - name: tmp
+    durableDir: {}
+  - name: supervisor-ca
+    durableDir: {}
+snapshotsConfig:
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  storageLocation: "gs://${BUCKET_NAME}/${ATESPACE}/"
+sandboxConfig:
+  sandboxClass: SANDBOX_CLASS_MICROVM
+  configName: microvm
