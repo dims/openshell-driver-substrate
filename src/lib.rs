@@ -391,7 +391,7 @@ type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>
 /// Project a Substrate `Actor` into the gateway-facing `DriverSandbox`
 /// shape. Sandbox id and name both map to the actor's resource name --
 /// Substrate has no separate "name" concept and reusing it keeps lookups
-/// symmetric. `spec` is intentionally `None` in observed snapshots: the
+/// symmetric. `spec` is `None`: the
 /// gateway already has the spec it gave us at create time.
 fn actor_to_driver_sandbox(actor: &ateapi::Actor) -> DriverSandbox {
     let meta = actor.metadata.clone().unwrap_or_default();
@@ -821,15 +821,8 @@ impl ComputeDriver for SubstrateComputeDriver {
         let req = request.into_inner();
         let actor_name = require_actor_name(&req.sandbox_id, &req.name)?;
         let mut client = self.control_client().await?;
-        // any_state: true -- delete regardless of RUNNING/SUSPENDED, no
-        // separate best-effort-suspend-first dance needed.
-        //
-        // ponytail: templates are reused by content hash across actors
-        // (see template.rs), so this deliberately does not garbage-collect
-        // the ActorTemplate -- deleting it here could break a sibling
-        // actor sharing the same golden snapshot. Add template GC (e.g. a
-        // reference count, or a periodic sweep) if unused templates
-        // measurably pile up.
+        // any_state deletes a running or a suspended actor alike. The
+        // template stays: other actors may share it.
         let result = client
             .delete_actor(ateapi::DeleteActorRequest {
                 actor: Some(ateapi::ObjectRef {
@@ -962,11 +955,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         &self,
         _request: Request<DeleteWorkspaceRequest>,
     ) -> Result<Response<DeleteWorkspaceResponse>, Status> {
-        // ponytail: no-op. The driver's atespace is shared across every
-        // OpenShell workspace (see SubstrateComputeConfig::atespace), so
-        // deleting it here on one workspace's teardown would break every
-        // other workspace. Wire this up if/when workspaces get their own
-        // atespace.
+        // One atespace serves every workspace, so there is nothing to delete.
         Ok(Response::new(DeleteWorkspaceResponse {}))
     }
 }
