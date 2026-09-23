@@ -14,6 +14,8 @@ gates, consumes its bootstrap, and opens its boundary control listener;
 create → golden snapshot → resume → suspend → resume.
 
 It does **not** run under gVisor and cannot — see [gVisor](#gvisor-does-not-work).
+That makes micro-VM the only option, so the host needs **nested virtualisation**
+(`/dev/kvm`); a cloud VM without it cannot run the sandbox at all.
 
 Getting there needed six commits in Substrate and a one-line kata kernel change.
 None are merged upstream; [`docs/upstream-branches.md`](docs/upstream-branches.md)
@@ -146,6 +148,9 @@ Without these commits:
 - `no_new_privs` is never set, and sysctls never reach the guest.
 
 ### 2. Install the micro-VM backend
+
+Requires `/dev/kvm` on the node (§0). Without nested virt, stop here — the
+sandbox cannot run, and only the gVisor parts in [Debugging](#debugging) apply.
 
 From the Substrate repo:
 
