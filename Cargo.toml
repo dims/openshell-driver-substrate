@@ -21,7 +21,7 @@ path = "src/main.rs"
 # constants; it registers as an out-of-process driver
 # (ComputeDriverServer over a socket), so no gateway code or fork is
 # needed on the OpenShell side.
-openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "3107ff1f828f0d5ea960ad5cda2948309fbec8cf" }
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1.43", features = ["full"] }

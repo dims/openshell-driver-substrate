@@ -509,6 +509,13 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<GetCapabilitiesResponse>, Status> {
         Ok(Response::new(GetCapabilitiesResponse {
+            // Empty marks the driver legacy and the gateway refuses to
+            // activate it.
+            resource_admission_policy: openshell_core::resource_admission::DriverAdmissionConfig {
+                allow_driver_config: false,
+                resource_admission: Default::default(),
+            }
+            .acknowledgement(),
             driver_name: String::from(DRIVER_NAME),
             driver_version: String::from(env!("CARGO_PKG_VERSION")),
             // Substrate sandboxes are policy-baked into their image; the
