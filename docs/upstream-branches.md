@@ -57,7 +57,29 @@ enabling a kernel option that a guest workload needs.
 
 ## NVIDIA/OpenShell
 
-**No changes.** The driver depends on upstream unmodified (`openshell-core`,
+**Branch:** https://github.com/dims/OpenShell/tree/gvisor-backend
+(fork of `NVIDIA/OpenShell`, branched from `df88bedb3`)
+
+`OPENSHELL_ISOLATION_MODE=gvisor` tells the sandbox it runs under an outer
+sandbox that implements neither Landlock nor seccomp user notification. The
+probes for both are skipped, the workload launcher starts without a listener,
+and the DNS relay runs on its own. The qualification reports the absence
+instead of asserting success, so `landlock_allow_deny`, `socket_virtualization`,
+`retained_socket_operation` and `proc_fd_identity` all read false. Egress is
+unmediated in this mode; a caller must supply confinement by other means.
+
+A second commit stops the DNS relay probe dying on a missing
+`/proc/sys/net/ipv4/ip_unprivileged_port_start`. gVisor's procfs has no such
+file, and the bind that follows is the real test.
+
+With both, `openshell-sandbox capability-probe` returns `"qualified": true`
+under `SANDBOX_CLASS_GVISOR` on Substrate.
+
+Default behaviour is unchanged and an unrecognized mode is an error.
+
+### Previously
+
+**No changes were needed for micro-VM.** The driver depends on upstream unmodified (`openshell-core`,
 pinned by rev in `Cargo.toml`), and the sandbox and supervisor binaries in the
 images are stock. Nothing found in this work needs an OpenShell patch to run on
 the micro-VM backend.
