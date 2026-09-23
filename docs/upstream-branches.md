@@ -62,15 +62,21 @@ pinned by rev in `Cargo.toml`), and the sandbox and supervisor binaries in the
 images are stock. Nothing found in this work needs an OpenShell patch to run on
 the micro-VM backend.
 
-The one thing that *would* need upstream is gVisor support, and it is not a
-small patch: `openshell-sandbox` hard-requires Landlock ABI ≥ 3 and gVisor
-implements no Landlock at all. That needs a degraded qualification mode in
-which an outer sandbox is the enforcing boundary — the argument
+gVisor support would need upstream work, but the bulk of it is not OpenShell's.
+`openshell-sandbox` brokers syscalls through a seccomp user notification
+listener, and gVisor does not implement that action at all. No OpenShell change
+substitutes for it. A degraded qualification mode — the argument
 [#1549](https://github.com/NVIDIA/OpenShell/pull/1549) made, which NVIDIA
-closed unmerged. See the README for the history.
+closed unmerged — would clear the Landlock gate and then stop at the seccomp
+one. See the README for the measurements.
 
 ## google/gvisor
 
 **No changes.** gVisor is used stock, from the upstream nightly the Substrate
-`SandboxConfig` pins. It cannot host `openshell-sandbox` (no Landlock), but
-that is a missing feature rather than something a patch here fixes.
+`SandboxConfig` pins.
+
+It cannot host `openshell-sandbox`, and this is where the real gap sits. The
+sentry implements no `SECCOMP_RET_USER_NOTIF` and accepts only
+`SECCOMP_FILTER_FLAG_TSYNC`, so the sandbox's syscall broker cannot be built.
+It also implements no Landlock. Both are missing features, each large enough to
+be its own upstream project; neither is something a patch in this repo fixes.

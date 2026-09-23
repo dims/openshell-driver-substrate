@@ -278,13 +278,17 @@ passed into `openshell_sandbox::run()` — it is not a check that can be skipped
 
 | # | Gate | gVisor | micro-VM |
 |---|---|---|---|
-| 1 | non-root UID **and** GID | needs the Substrate fixes | pass |
-| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` | pass |
-| 3 | `no_new_privs == 1` | needs `4fc5d550` | pass |
-| 4 | same-UID task-memory probe | — | pass |
+| 1 | non-root UID **and** GID | pass, with the Substrate fixes | pass |
+| 2 | all five capability sets empty | pass, with `capabilities.drop: ["ALL"]` | pass |
+| 3 | `no_new_privs == 1` | pass, with `4fc5d550` | pass |
+| 4 | same-UID task-memory probe | pass | pass |
 | 5 | Landlock allow/deny | **fails: no Landlock** | pass (needs a writable `/tmp`) |
-| 6 | seccomp notification | — | pass (needs the kernel rebuild) |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | — | pass (needs `33397540`) |
+| 6 | seccomp notification | **fails: `NEW_LISTENER` → EINVAL** | pass (needs the kernel rebuild) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | not reached | pass (needs `33397540`) |
+
+The gVisor column is measured, not inferred — `harness/capability-probe` under
+`SANDBOX_CLASS_GVISOR` on Substrate. Gates 5 and 6 are two separate missing
+kernel features; see [gVisor does not work](#gvisor-does-not-work).
 
 Gate 5 needs `/tmp` because the Landlock probe builds its test tree under
 `std::env::temp_dir()`, and the sandbox image contains **exactly one file** —
@@ -322,10 +326,36 @@ a dynamically linked busybox in a `FROM scratch` image fails with
 snapshot captures only `_pause` and every resume fails with
 `savedMFOwners = [_pause:/]`.
 
+To reproduce the gVisor column, build the probe and run it on the gVisor pool
+from [Generic non-root repro](#generic-non-root-repro):
+
+```sh
+(cd harness/capability-probe && CGO_ENABLED=0 go build -ldflags="-s -w" -o probe .)
+docker build -t <registry>/harness-probe:dev harness/capability-probe
+docker push <registry>/harness-probe:dev
+
+export ATESPACE=ate-probe BUCKET_NAME=ate-snapshots \
+       SANDBOX_CLASS=SANDBOX_CLASS_GVISOR SANDBOX_CONFIG_NAME=gvisor-default \
+       HARNESS_PROBE_IMAGE=<registry>/harness-probe@sha256:...
+harness/scripts/render.sh harness/manifests/harness-probe-template.yaml.tmpl \
+  | kubectl-ate create actor-template -f -
+kubectl-ate create actor hp-1 --atespace "${ATESPACE}" --template harness-probe
+kubectl-ate resume actor -a "${ATESPACE}" hp-1
+kubectl-ate logs   actor -a "${ATESPACE}" hp-1 | grep PROBE
+```
+
+One worker is consumed per actor. `no free workers available` on resume means
+the pool is full: scale `workerpool/gvisor-pool`, or free an actor with
+`kubectl-ate suspend actor` **then** `delete actor`. Deleting a running actor
+fails with `not in a deletable state`.
+
 `harness/capability-probe` reports uid/gid, all five capability sets,
-`no_new_privs`, whether `seccomp(SECCOMP_FILTER_FLAG_NEW_LISTENER)` succeeds,
-and whether `/proc/<pid>/mem` and `process_vm_readv` work before and after
-`PR_SET_DUMPABLE(0)`.
+`no_new_privs`, whether `/proc/<pid>/mem` and `process_vm_readv` work before and
+after `PR_SET_DUMPABLE(0)`, and whether
+`seccomp(SECCOMP_FILTER_FLAG_NEW_LISTENER)` succeeds. It then repeats the
+seccomp call with the same program and no flags, so a `NEW_LISTENER` failure is
+attributable to the flag rather than to a malformed filter. It runs on any
+sandbox class and needs no OpenShell parts.
 
 ### Retargeting after a rebuild
 
@@ -366,19 +396,69 @@ syscall and look for `ENOSYS`.
 
 ## gVisor does not work
 
+Two independent kernel features are missing. Only one of them could be
+negotiated away.
+
+### Seccomp user notification — the hard blocker
+
+`openshell-sandbox` brokers its workload's syscalls through a seccomp user
+notification listener. gVisor does not implement it. Measured in-sandbox by
+`harness/capability-probe`, same process and same BPF program:
+
+```
+seccomp+NEW_LISTENER: FAIL errno=22 (invalid argument)
+seccomp plain filter [control]: OK (ret=0)
+```
+
+gVisor's source gives the reason directly
+(`pkg/sentry/syscalls/linux/sys_seccomp.go`):
+
+```go
+// The only flag we support now is SECCOMP_FILTER_FLAG_TSYNC.
+if flags&^linux.SECCOMP_FILTER_FLAG_TSYNC != 0 {
+    return nil, linuxerr.EINVAL
+}
+```
+
+`pkg/sentry/kernel/seccomp.go` implements `RET_TRAP`, `RET_ERRNO`, `RET_TRACE`,
+`RET_ALLOW` and `RET_KILL_THREAD`. There is no `SECCOMP_RET_USER_NOTIF`, so the
+gap is the action itself, not a flag or a build tag. `SECCOMP_IOCTL_NOTIF_ADDFD`
+and `_ID_VALID` are not defined anywhere in the tree.
+
+Do not be misled by grepping: `pkg/abi/linux/seccomp.go` defines
+`SECCOMP_FILTER_FLAG_NEW_LISTENER`, `SECCOMP_RET_USER_NOTIF` and the notify
+structs, and `pkg/sentry/platform/systrap/` calls `NEW_LISTENER` for real. That
+is the sentry supervising its own stub processes **on the host**. None of it is
+exported to the guest.
+
+This is a deliberate contract, not an oversight. gVisor's own test suite asserts
+it — `test/syscalls/linux/seccomp.cc`, `SeccompValidatesAllFilterFlags`, runs
+only under gVisor and expects `EINVAL` for `NEW_LISTENER`.
+
+No compatibility knob helps here. The listener is not attestation decoration —
+it is the mechanism the boundary is built on, and
+`crates/openshell-isolation-interface/src/linux/` ships exactly one Linux
+backend, built on `seccomp_notify.rs`. Without the listener there is nothing to
+broker with.
+
+### Landlock — the soft blocker
+
 `openshell-sandbox` requires Landlock ABI ≥ 3. gVisor implements no Landlock at
 all: `runsc help syscalls` lists no Landlock rows and its highest implemented
 syscall number is 441, while the Landlock syscalls are 444–446. The ABI
 constants exist in `pkg/abi/linux/landlock.go`, but nothing in `pkg/sentry/` or
-`runsc/` references them. NVIDIA's own merged PR
-[#1585](https://github.com/NVIDIA/OpenShell/pull/1585) says it plainly: *"On
-kernels without Landlock (e.g. gVisor's sentry returns `ENOSYS` for syscall
-444)"*.
+`runsc/` references them.
 
-This is architectural. No flag, ActorTemplate field, or Substrate change moves
-it.
+This one is negotiable in principle, but not for free. Beyond the startup gate,
+`prepare_capability_free_baseline` (`sandbox/linux/landlock.rs`) installs a
+mandatory ruleset in **every child**, hardcoded `HardRequirement` + `ABI::V3`,
+fatal at every call site. Its job is to hide `/.openshell` from a workload that
+runs under the *same UID* as the supervisor. Drop it and the workload can read
+the supervisor's bootstrap and TLS key. The code says so: *"Never silently
+downgrade this ABI requirement."* An outer sandbox does not cover this, because
+supervisor and workload share one gVisor sandbox and one UID.
 
-Upstream history, for anyone tempted to revive the older attempts:
+### Upstream history
 
 | PR | What it does | State |
 |---|---|---|
@@ -390,9 +470,33 @@ None address the qualification gate. #1548 and #1549 targeted the pre-RFC-0012
 architecture, where `openshell-sandbox` *was* the supervisor and the skippable
 steps were netns and seccomp. RFC-0012 split out the separate boundary binary
 and introduced this gate, which made the stack *less* compatible with an outer
-sandbox, not more. Unblocking gVisor needs a degraded qualification mode where
-the outer sandbox is the enforcing boundary — the argument #1549 made, which
-NVIDIA closed.
+sandbox, not more.
+
+A degraded qualification mode — the argument #1549 made, which NVIDIA closed —
+is necessary but nowhere near sufficient. It would clear the Landlock gate and
+then stop at the seccomp one.
+
+### What unblocking gVisor would actually take
+
+Either side could move, and both are large.
+
+**gVisor side.** Implement `SECCOMP_RET_USER_NOTIF` and the notify ioctls
+(`RECV`, `SEND`, `ADDFD`) for guests. Appetite looks low: gVisor issue
+[#14627](https://github.com/google/gvisor/issues/14627) raised exactly this in
+September 2026 and was closed two days later with a **documentation-only**
+change, re-labelling seccomp as partially supported. No open issue tracks the
+feature. Guest Landlock has its own open issue,
+[#13439](https://github.com/google/gvisor/issues/13439), also unimplemented.
+
+**OpenShell side.** Rewrite the Linux isolation backend onto the interception
+mechanism gVisor *does* implement: `SECCOMP_RET_TRACE` with
+`PTRACE_O_TRACESECCOMP`, brokering each `PTRACE_EVENT_SECCOMP` stop and
+rewriting registers via `PTRACE_SETREGSET`. All of that works under gVisor
+today. The catch is that ptrace has no `SECCOMP_IOCTL_NOTIF_ADDFD` equivalent,
+so a supervisor cannot inject a file descriptor into the workload — which is
+how socket virtualization works. It is also one tracer per tracee, and slower.
+
+Until one of those happens, micro-VM is the supported path and it works.
 
 ## Known gaps
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -146,7 +147,12 @@ func main() {
 	tryVMReadSelf("[nondumpable]")
 	tryVMReadOther("[nondumpable]", 1)
 	trySeccomp(flagNewListener, "seccomp+NEW_LISTENER [nondumpable]")
+	// Control: the same filter with no flags. It isolates a NEW_LISTENER
+	// failure to the flag rather than to a malformed program.
+	trySeccomp(0, "seccomp plain filter [control]")
 
 	fmt.Println("PROBE done")
-	select {}
+	for {
+		time.Sleep(time.Hour)
+	}
 }

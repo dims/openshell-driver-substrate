@@ -1,0 +1,25 @@
+# Runs harness/capability-probe, the standalone Go probe. No OpenShell parts,
+# no credentials, so it works on any sandbox class -- this is what produced the
+# measured gVisor column of the gate table in the README.
+#
+# capabilities.drop: ["ALL"] is required. Gate 2 wants all five capability sets
+# empty, and the probe reports them, so without the drop it measures the wrong
+# thing.
+metadata:
+  atespace: ${ATESPACE}
+  name: harness-probe
+sandboxConfig:
+  sandboxClass: ${SANDBOX_CLASS}
+  configName: ${SANDBOX_CONFIG_NAME}
+snapshotsConfig:
+  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
+  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
+  onResume:
+    fromData: RESUME_SOURCE_COLD_BOOT
+  storageLocation: "gs://${BUCKET_NAME}/${ATESPACE}/"
+containers:
+  - name: harness-probe
+    image: "${HARNESS_PROBE_IMAGE}"
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
