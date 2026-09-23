@@ -21,5 +21,14 @@ process:
   run_as_user: "65532"
   run_as_group: "65532"
 
-# Default deny. Egress hosts get added here.
+# Default deny. To allow a host, name it and the binary that may reach it
+# (the supervisor requires the binary; the path is the resolved executable):
+#
+#   network_policies:
+#     model:
+#       endpoints:
+#         - host: 172.18.0.1
+#           ports: [11434]
+#       binaries:
+#         - path: /usr/local/bin/python3.12
 network_policies: {}

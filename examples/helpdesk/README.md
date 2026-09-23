@@ -92,13 +92,26 @@ it was.
 
 ## Egress
 
+`policy.rego` is OpenShell's default sandbox policy at the pinned rev,
+unmodified (`crates/openshell-supervisor-network/data/sandbox-policy.rego`).
 `data.yaml` sets `network_policies: {}`, so every outbound connection is
 denied; `/egress?url=...` reports `"reached": false` and the sandbox logs a
 `network_broker` denial. To allow a host, add it under `network_policies`
-(the shape is at the top of `policy.rego`).
+with the binary that may reach it; the shape is in `data.yaml`.
 
-`/chat` needs an inference endpoint in `OPENAI_BASE_URL`; none is configured
-here, so it returns 503.
+## A model for `/chat`
+
+The agent reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment.
+The bootstrap carries the workload's environment, so set them when minting
+(root README step 4) and allow the model host in `data.yaml`:
+
+```sh
+BOOTSTRAP_CHILD_ENV="OPENAI_BASE_URL=http://172.18.0.1:11434/v1,HELPDESK_MODEL=qwen2.5:0.5b" \
+  cargo run --manifest-path harness/bootstrap-gen/Cargo.toml -- out/
+```
+
+On a kind cluster `172.18.0.1` is the host; an `ollama serve` bound to
+`0.0.0.0:11434` there answers. Without a model `/chat` returns 503.
 
 ## The supervisor's three requirements
 
