@@ -77,7 +77,7 @@ src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
 docs/                 upstream branch index
-examples/helpdesk/    the workload: a Python agent under OpenShell
+examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats
 harness/
   bootstrap-gen/      mints the Ed25519/JWT/TLS bundle the binaries require
   images/             sandbox image with its bootstrap baked in
@@ -126,6 +126,7 @@ sudo apt-get install -y build-essential protobuf-compiler pkg-config \
                        libssl-dev jq gettext-base
 curl -fsSL https://sh.rustup.rs | sh -s -- -y
 curl -fsSL https://mise.run | sh                           # OpenShell's toolchain (step 3)
+go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest   # steps 7 and 8
 # go >= 1.23, docker, kubectl, kind from their upstream installers
 ```
 
@@ -195,8 +196,9 @@ Templates reference images by digest; a bare tag fails atelet's pull cache.
 
 ### 4. Mint the credentials
 
-The tokens minted here last one hour (below), so do steps 4, 5 and 7 in one
-sitting, after 1 to 3 and 6.
+`examples/helpdesk/build.sh` does steps 4 and 5 for the example; the commands
+below are for the capability probe and the gateway path. The tokens last one
+hour (below), so do steps 4, 5 and 7 in one sitting, after 1 to 3 and 6.
 
 An Ed25519-signed JWT pair and TLS material bound to one session id:
 
@@ -254,9 +256,11 @@ The atespace must exist before any template, or template creation fails with
 
 ### 7. Run the example
 
-[`examples/helpdesk`](examples/helpdesk) builds the two images, creates the
-template and the actor, reaches the agent through atenet-router, and suspends
-and resumes it.
+[`examples/helpdesk`](examples/helpdesk) is two commands. `build.sh` mints
+the credentials and builds the images. `run.sh` plays ten beats: two agents
+from one snapshot, an egress allow-list, a suspend and resume with the memory
+intact, a dead host, a revert, a delete. After each beat it prints what
+Substrate and OpenShell logged, so the mechanics are on screen.
 
 **Actor state is not proof the containers are alive.** A micro-VM snapshot is
 whole-VM memory, so a dead container never surfaces as a restore failure. Read

@@ -1,138 +1,221 @@
 # Helpdesk example
 
-A Python agent running inside a real OpenShell sandbox on a Substrate micro-VM
-actor. It shows the three things the integration is for: OpenShell's isolation
-holds (Landlock, seccomp-mediated egress, default deny), the agent is reachable
-from outside the actor, and the actor's memory survives a suspend and resume —
-the agent's uptime counter and chat history live in process memory and are
-still there afterwards.
+A Python helpdesk agent inside a real OpenShell sandbox, on a Substrate
+micro-VM actor. Two agents are restored from one snapshot. One is suspended,
+resumed, loses its host, and comes back from its last snapshot. The other is
+never touched. After each step, `run.sh` prints what Substrate and OpenShell
+logged for it, so the mechanics are on screen and not taken on faith.
 
-It needs steps 1 to 6 of the [root README](../../README.md): a cluster with
-the patched Substrate, the micro-VM backend, the OpenShell images, minted
-credentials, and a worker pool.
+OpenShell's isolation holds (Landlock, seccomp-mediated egress, an allow-list
+with one host), the agent is reachable from outside the actor, and its memory
+survives a suspend and resume. The chat history is a Python list in process
+memory; the `turns` count in every reply is the evidence.
 
 ## What runs
 
 ```
-actor
+actor  (one micro-VM, one guest network namespace)
 ├─ sandbox     openshell-sandbox + python3 + agent.py   (the workload's filesystem)
 ├─ supervisor  openshell-supervisor                     (policy, OPA, proxy, CA)
 └─ relay       relay.py                                 (plain container; ingress)
 ```
 
-The workload is a child of the sandbox, so `python3` has to be in the sandbox
+The workload is a child of the sandbox, so `python3` lives in the sandbox
 image, not the supervisor's. `openshell-sandbox` is a static musl binary, so
-any base works; `Dockerfile` uses `python:3.12-slim`.
+any base works; `Dockerfile` puts it on `python:3.12-slim`.
+
+## The ten beats
+
+| # | Beat | What you see | Under the covers |
+|---|---|---|---|
+| 1 | Template and golden snapshot | One `ActorTemplate` names the three containers. Substrate boots it once, waits 20 s, and snapshots the whole VM. | The sandbox logs `Boundary control listener ready` (every qualification gate passed), `Landlock ruleset built`, `PROC:LAUNCH python3`. The supervisor logs `Isolation boundary attached`. ateom writes `memory-ranges`, `rootfs-upper.tar`, `durable-dir.tar`, `state.json` to the bucket. |
+| 2 | Two agents from that snapshot | `create actor` and `resume` bring up alice and bob, each on its own worker. | `Actor restored (overlay rootfs) in ~350 ms`. Nothing boots: both are the same frozen process image, so both start at `turns: 0`. Each actor also gets a Substrate `EgressPolicy` for the model host. |
+| 3 | Egress is an allow-list | `https://example.com/` fails name resolution. The model host answers. | The sandbox's network broker denies the `connect(2)` (`syscall=42`) with `EACCES`: the host is not in `data.yaml`. The supervisor's OCSF audit line for the allowed one is `NET:OPEN ALLOWED /usr/local/bin/python3.12 -> 172.18.0.1:11434 [policy:model engine:opa]`. |
+| 4 | alice answers | `/chat` returns the model's reply, `turns: 1`. | `OCSF HTTP:POST ALLOWED POST http://.../v1/chat/completions`. The request went through the supervisor's proxy, which is where a provider credential would be attached. The agent never holds one. |
+| 5 | Suspend alice | `ACTOR_STATE_SUSPENDED`. Her worker shows `0/1` actors. | `Actor checkpointed` with the snapshot's file list. The VM is gone; only the snapshot remains. |
+| 6 | Resume alice | `/status` still says `turns: 1`. The follow-up question is answered from history, `turns: 2`. | `Actor restored ... in ~350 ms`. The history came back inside the memory image. |
+| 7 | bob | `turns: 0`. | Nothing happened to him. |
+| 8 | alice's host dies | Her worker pod is force-deleted. alice goes `ACTOR_STATE_CRASHED` with worker `<none>`; bob stays `RUNNING`. | The syncer sees the pod go and deletes the Worker; ate-api-server logs `Releasing actor from a worker whose pod is gone`. The Deployment replaces the pod and a new Worker registers within seconds. |
+| 9 | Revert and resume | `revert actor` puts alice at `SUSPENDED`, holding her last snapshot. `resume` puts her `RUNNING` on the new worker. `/status` says `turns: 1`. | Restore in ~340 ms. Her last snapshot is beat 5's, so beat 6's turn is gone: a crash loses everything since the last suspend. |
+| 10 | Delete alice | Only bob is listed. The template stays. bob answers. | `delete actor --any-state`. Templates are never garbage-collected. |
+
+## Prerequisites
+
+Steps 1 to 3 and 6 of the [root README](../../README.md): a cluster with the
+patched Substrate, the micro-VM backend, the two OpenShell images in the
+registry, and the worker pool and atespace. Steps 4 and 5, the credentials,
+are done by `build.sh`.
+
+An OpenAI-compatible model endpoint the kind node can reach. On the kind
+host:
+
+```sh
+OLLAMA_HOST=0.0.0.0 ollama serve &
+ollama pull qwen2.5:1.5b
+```
+
+A kind node reaches the host at `172.18.0.1`, the default `MODEL_HOST`.
+`qwen2.5:0.5b` also works but answers the memory question in beat 6 badly.
+
+On PATH: `docker`, `cargo`, `kubectl`, `kubectl-ate` (ahead of any older
+copy), `jq`, `curl`, `grpcurl`, `envsubst`.
 
 ## Build
 
-From this directory, with `out/` the credential directory of root README
-step 4:
-
 ```sh
-cp <openshell>/deploy/docker/.build/prebuilt-binaries/amd64/openshell-sandbox .
-cp ../../out/bootstrap.tar .        # left there by package-credentials.sh
-docker build -t <registry>/helpdesk-sandbox:dev .
-
-mkdir -p files/supervisor
-cp ../../out/runtime-descriptor.json ../../out/auth.json policy.rego data.yaml files/supervisor/
-printf 'FROM scratch\nCOPY supervisor/ /supervisor/\n' > files/Dockerfile
-docker build -t <registry>/openshell-bootstrap-files:dev files
-
-docker push <registry>/helpdesk-sandbox:dev
-docker push <registry>/openshell-bootstrap-files:dev
-export SANDBOX_IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' <registry>/helpdesk-sandbox:dev)
-export BOOTSTRAP_FILES_IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' <registry>/openshell-bootstrap-files:dev)
+REGISTRY=localhost:5001 examples/helpdesk/build.sh
 ```
 
-Templates reference images by digest; a bare tag fails atelet's pull cache.
-`SUPERVISOR_IMAGE` comes from root README step 3.
+This mints a credential set with the model endpoint in the workload's
+environment, bakes it, builds and pushes the two images, and writes their
+digests to `out/helpdesk.env` for `run.sh`:
+
+| Image | Contents |
+|---|---|
+| `helpdesk-sandbox` | `openshell-sandbox` from the stock image, `python:3.12-slim`, `agent.py`, `relay.py`, the baked bootstrap |
+| `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume |
+
+Knobs: `MODEL_HOST` (default `172.18.0.1`), `MODEL_PORT` (`11434`),
+`MODEL_NAME` (`qwen2.5:1.5b`).
+
+The tokens last one hour, OpenShell's maximum for a session token, so run
+`run.sh` within the hour. Running `build.sh` again mints fresh ones; the new
+digests give the template a new name and a new golden snapshot.
 
 ## Run
 
 ```sh
-export ATESPACE=... BUCKET_NAME=...        # as in root README step 6
-../../harness/scripts/render.sh template.yaml.tmpl | kubectl-ate create actor-template -f -
-kubectl-ate create actor hd-1 --atespace "${ATESPACE}" --template helpdesk
-kubectl-ate resume actor -a "${ATESPACE}" hd-1
+examples/helpdesk/run.sh
 ```
 
-Later:
+About 55 seconds with a fresh template, about 25 when the template exists.
+In a second terminal:
 
 ```sh
-kubectl-ate suspend actor -a "${ATESPACE}" hd-1    # -> ACTOR_STATE_SUSPENDED
-kubectl-ate resume  actor -a "${ATESPACE}" hd-1    # -> ACTOR_STATE_RUNNING
+watch -n2 'kubectl-ate get actors -a ate-openshell-microvm; echo; kubectl-ate get workers'
 ```
 
-In the worker pod log, `Isolation boundary attached`, `Landlock ruleset built`
-and `PROC:LAUNCH python3` say the supervisor reached the sandbox and started
-the agent.
+Knobs: `ATESPACE` (default `ate-openshell-microvm`), `BUCKET_NAME`
+(`ate-snapshots`). The template is named `helpdesk-<hash>` from the three
+image digests, so a rerun with the same images reuses it and beat 1 is
+instant. On exit `run.sh` deletes alice and bob and leaves the template.
 
-## Reach the agent
+## Expected output
 
-`network_broker` refuses an `accept(2)` from a non-loopback peer, so the agent
-is not reachable from outside the sandbox on its own. The `relay` container
-accepts on the actor's address and connects to the agent over loopback. It
+Trimmed. The indented lines under each beat are what `run.sh` pulled from the
+worker pods and ate-api-server for that beat.
+
+```
+== 1  Template and golden snapshot  (+3s)
+ATESPACE                NAME                SANDBOX CLASS           GOLDEN TAG                             ERROR   AGE
+ate-openshell-microvm   helpdesk-c22183d2   SANDBOX_CLASS_MICROVM   7233a52e-4698-44da-bd3a-6100962de719           32s
+  golden/sandbox      INFO openshell_sandbox::boundary_server::linux: Boundary control listener ready
+  golden/supervisor   INFO openshell_supervisor: Isolation boundary attached
+  golden/sandbox      OCSF CONFIG:BUILT [INFO] Landlock ruleset built [rules_applied:14 skipped:0]
+  golden/sandbox      OCSF PROC:LAUNCH [INFO] python3(52)
+  ateom               Actor checkpointed  base-id config.json durable-dir.tar memory-ranges rootfs-upper.tar state.json
+
+== 2  Two agents restored from that one snapshot  (+37s)
+ate-openshell-microvm   alice   .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-z28v6   10.244.0.20
+ate-openshell-microvm   bob     .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-4hdkx   10.244.0.23
+  ateom               Actor restored (overlay rootfs) in 341 ms
+  ateom               Actor restored (overlay rootfs) in 361 ms
+
+== 3  Egress is an allow-list: the model host, from python, and nothing else  (+40s)
+{"url": "https://example.com/", "reached": false, "error": "URLError: <urlopen error [Errno -3] Temporary failure in name resolution>"}
+{"url": "http://172.18.0.1:11434/api/tags", "reached": true, "http_status": 200, "bytes": 844}
+  alice/sandbox       WARN openshell_sandbox::network_broker: sandbox network notification denied (tid=56, syscall=42): Permission denied (os error 13)
+  alice/supervisor    OCSF NET:OPEN [INFO] ALLOWED /usr/local/bin/python3.12(0) -> 172.18.0.1:11434 [policy:model engine:opa]
+  alice/supervisor    OCSF HTTP:GET [INFO] ALLOWED GET http://172.18.0.1:11434/api/tags
+
+== 4  alice answers through the supervisor's proxy  (+41s)
+{"reply": "Sure, here's a step-by-step triage checklist ...", "turns": 1}
+  alice/supervisor    OCSF HTTP:POST [INFO] ALLOWED POST http://172.18.0.1:11434/v1/chat/completions
+
+== 5  Suspend alice: a snapshot is written and her worker is free  (+47s)
+4ba0de2b-...   openshell-microvm   WORKER_STATE_ACTIVE   1/1   1/2   1Gi/2Gi   .../openshell-microvm-f7c4cdbcb-4hdkx
+16ad9e0b-...   openshell-microvm   WORKER_STATE_ACTIVE   0/1   0/2   0/2Gi     .../openshell-microvm-f7c4cdbcb-z28v6
+  ateom               Actor checkpointed  base-id config.json durable-dir.tar memory-ranges rootfs-upper.tar state.json
+
+== 6  Resume alice: her memory comes back with the snapshot  (+48s)
+{"turns": 1, "uptime_seconds": 34.1, "model": "qwen2.5:1.5b", "inference_base": "http://172.18.0.1:11434/v1"}
+{"reply": "The user is experiencing a timeout with their database.", "turns": 2}
+  ateom               Actor restored (overlay rootfs) in 349 ms
+
+== 7  bob was never involved  (+51s)
+{"turns": 0, "uptime_seconds": 35.5, "model": "qwen2.5:1.5b", "inference_base": "http://172.18.0.1:11434/v1"}
+
+== 8  alice's host dies: alice crashes, bob does not  (+51s)
+pod "openshell-microvm-f7c4cdbcb-z28v6" force deleted from ate-openshell-microvm namespace
+ate-openshell-microvm   alice   .../helpdesk-c22183d2   ACTOR_STATE_CRASHED   <none>
+ate-openshell-microvm   bob     .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-4hdkx   10.244.0.23
+  ateapi              Releasing actor from a worker whose pod is gone  alice
+
+== 9  Revert alice to her last snapshot; she resumes on the new worker  (+52s)
+ate-openshell-microvm   alice   .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-ls48x   10.244.0.24
+ate-openshell-microvm   bob     .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-4hdkx   10.244.0.23
+{"turns": 1, "uptime_seconds": 38.2, "model": "qwen2.5:1.5b", "inference_base": "http://172.18.0.1:11434/v1"}
+  ateom               Actor restored (overlay rootfs) in 337 ms
+
+== 10 Delete alice; bob and the template stay  (+54s)
+ate-openshell-microvm   bob     .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-4hdkx   10.244.0.23
+{"reply": "A helpdesk triage agent coordinates and executes tasks ...", "turns": 1}
+```
+
+`uptime_seconds` counts from the golden actor's boot, because `booted` was
+set before the snapshot and every actor inherits it. `turns` is the evidence
+of memory, not uptime.
+
+## What's in this folder
+
+| File | Purpose |
+|---|---|
+| `build.sh` | Mints the credentials, builds and pushes the two images, writes `out/helpdesk.env`. |
+| `run.sh` | The ten beats. Prints the matching Substrate and OpenShell log lines after each. |
+| `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
+| `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
+| `Dockerfile` | The sandbox image: `openshell-sandbox` from the stock image, python, the agent, the baked bootstrap. |
+| `policy.rego` | OpenShell's shipped `sandbox-policy.rego` at the pinned rev, unmodified. |
+| `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. |
+| `template.yaml.tmpl` | The `ActorTemplate`: three containers, four volumes, micro-VM class, snapshots on pause and commit. |
+
+## How the pieces fit
+
+**Ingress needs a loopback peer.** The sandbox's network broker refuses an
+`accept(2)` from a non-loopback address, so atenet-router alone gets a 502.
+The relay is a plain container in the same actor: it accepts on the actor's
+address and connects to the agent over loopback, which the broker allows. It
 stands in for the gateway's loopback service endpoint, which needs the gateway
-path.
-
-Substrate reaches a non-default actor port with an HTTP `CONNECT` tunnel
-through atenet-router's tunnel listener (service port 8081):
+path. `run.sh` reaches it with an HTTP `CONNECT` through atenet-router's
+tunnel listener, service port 8081:
 
 ```sh
 kubectl port-forward -n ate-system svc/atenet-router 8001:8081 &
-curl -p -x http://127.0.0.1:8001 \
-  --proxy-header "ate-target-actor: ${ATESPACE}/hd-1" \
-  http://hd-1:8081/status
+curl -p -x http://127.0.0.1:8001 --proxy-header "ate-target-actor: ${ATESPACE}/alice" http://alice:8081/status
 ```
 
-`/status` returns `{"turns": N, "uptime_seconds": S, ...}`. Suspend and
-resume the actor and call it again: `uptime_seconds` keeps counting from where
-it was.
-
-## Egress
-
-`policy.rego` is OpenShell's default sandbox policy at the pinned rev,
-unmodified (`crates/openshell-supervisor-network/data/sandbox-policy.rego`).
-`data.yaml` sets `network_policies: {}`, so every outbound connection is
-denied; `/egress?url=...` reports `"reached": false` and the sandbox logs a
-`network_broker` denial. To allow a host, add it under `network_policies`
-with the binary that may reach it; the shape is in `data.yaml`.
-
-## A model for `/chat`
-
-The agent reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment.
-The bootstrap carries the workload's environment, so set them when minting
-(root README step 4) and allow the model host in `data.yaml`:
+**Two egress layers, in order.** OpenShell decides first: the shipped
+`policy.rego`'s `egress_authorization` rule allows a connection only if
+`data.yaml` names the host, the port, and the binary making it. A policy
+without that rule denies everything. Then Substrate's atenet-egress answers
+403 until the actor has an `EgressPolicy`; `kubectl-ate` has no verb for it,
+so `run.sh` creates one per actor over gRPC:
 
 ```sh
-BOOTSTRAP_CHILD_ENV="OPENAI_BASE_URL=http://172.18.0.1:11434/v1,HELPDESK_MODEL=qwen2.5:0.5b" \
-  cargo run --manifest-path harness/bootstrap-gen/Cargo.toml -- out/
-```
-
-On a kind cluster `172.18.0.1` is the host; an `ollama serve` bound to
-`0.0.0.0:11434` there answers. Without a model `/chat` returns 503.
-
-Substrate has its own egress control and denies every destination until the
-actor has an `EgressPolicy` (atenet-egress answers 403; the agent sees
-`RemoteDisconnected`). `kubectl-ate` has no verb for it, so use the API:
-
-```sh
-TOKEN=$(cat creds/token)     # root README step 8
-grpcurl -cacert creds/ctb.crt -authority api.ate-system.svc \
-  -H "authorization: Bearer ${TOKEN}" \
-  -import-path <substrate>/pkg/proto/ateapipb -proto ateapi.proto \
-  -d '{"actor":{"atespace":"'"${ATESPACE}"'","name":"hd-1"},
+grpcurl -cacert ca.crt -authority api.ate-system.svc -H "authorization: Bearer ${TOKEN}" \
+  -import-path proto -proto ateapi.proto \
+  -d '{"actor":{"atespace":"'"${ATESPACE}"'","name":"alice"},
        "egress_policy":{"metadata":{"atespace":"'"${ATESPACE}"'","name":"default"},
                         "rules":[{"cidrs":{"cidrs":["172.18.0.1/32"]}}]}}' \
   127.0.0.1:8443 ateapi.Control/CreateActorEgressPolicy
 ```
 
-Then `/chat` returns the model's reply and a `turns` count that keeps
-growing across a suspend and resume: the history is process memory and comes
-back with the snapshot.
+**The model endpoint rides the bootstrap.** `build.sh` passes
+`OPENAI_BASE_URL` and `HELPDESK_MODEL` to `bootstrap-gen` as
+`BOOTSTRAP_CHILD_ENV`; the sandbox puts them in the workload's environment.
+Nothing per sandbox is in there, so one snapshot serves every actor.
 
-## The supervisor's three requirements
+**The supervisor's three requirements.**
 
 | Missing | Error in the golden warm-up log |
 |---|---|
@@ -142,3 +225,27 @@ back with the snapshot.
 
 The CA directory is where the supervisor installs the TLS-interception CA the
 workload trusts. A durable-dir volume works because those are `0777`.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Beat 1 never gets a golden tag; the worker log says `boundary unavailable ... timed out while waiting for remote boundary boot` about 90 s in | The tokens are older than an hour. Nothing says "expired". | `build.sh` again, then `run.sh`. |
+| `/chat` returns 502 `RemoteDisconnected` | No Substrate `EgressPolicy`: atenet-egress answered 403. | `run.sh` creates one per actor; by hand, the `grpcurl` above. |
+| `/chat` returns 503 `no inference endpoint injected` | The image was built without the model environment. | `build.sh` with `MODEL_*` set. |
+| `/egress` to the model host says `reached: false` | The host is not in `data.yaml`, or the binary path is not `/usr/local/bin/python3.12`. | `data.yaml.tmpl`, then `build.sh`. |
+| `create actor-template` fails with `FailedPrecondition ... persistence` | The atespace does not exist. | Root README step 6. |
+| `delete actor-template` says `Aborted: another operation is in progress` | Its golden warm-up is running. | Retry after it tags. |
+| Beat 8: alice stays `RUNNING` on a `DRAINING` worker | The pod was deleted without `--force`. The pool's grace period is an hour and ateom waits for the guest workloads. | `kubectl delete pod --grace-period=0 --force`, as `run.sh` does. |
+| `kubectl-ate logs actor` prints nothing | Restored actors log through the worker pod. | `kubectl logs -n ${ATESPACE} <worker-pod>`, which is what `run.sh` filters. |
+
+## Cleanup
+
+`run.sh` deletes alice and bob on exit. Templates stay:
+
+```sh
+kubectl-ate get actor-template -a ate-openshell-microvm
+kubectl-ate delete actor-template -a ate-openshell-microvm helpdesk-<hash>
+```
+
+The pool and atespace are the root README's.
