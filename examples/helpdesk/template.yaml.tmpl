@@ -37,6 +37,13 @@ containers:
         mountPath: "/.openshell"
       - name: socket-dir
         mountPath: "/run/openshell"
+  # Not part of the sandbox. See relay.py.
+  - name: relay
+    image: "${SANDBOX_IMAGE}"
+    command: ["python3", "/opt/helpdesk/relay.py"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
 resources:
   limits:
     - name: cpu
