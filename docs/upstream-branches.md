@@ -5,8 +5,8 @@ only copies.
 
 ## agent-substrate/substrate
 
-**Branch:** https://github.com/dims/substrate/tree/lean-integration
-(fork of `agent-substrate/substrate`, branched from `92a84388`)
+**Branch:** https://github.com/dims/substrate/tree/lean-integration at
+`0ff8b818` (fork of `agent-substrate/substrate`, branched from `92a84388`)
 
 Eight commits, and one that only tightens comments. Every one was found by
 running a real non-root workload; none is specific to OpenShell. Before them, every actor

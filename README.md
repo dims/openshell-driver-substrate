@@ -103,11 +103,18 @@ Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
 
 ### 0. Prerequisites
 
-A Linux host with **`/dev/kvm`**:
+A Linux host with **`/dev/kvm`** (nested virtualisation if the host is itself
+a VM):
 
 ```sh
 ls /dev/kvm && grep -oE 'vmx|svm' /proc/cpuinfo | head -1
 ```
+
+Each micro-VM worker takes 2 GiB; the pool below makes two. 16 GB of RAM is
+the floor, 32 GB is comfortable, and the builds and images want about 50 GB
+of free disk. Everything cloned or pulled is public; no credentials are needed.
+A first run is dominated by building OpenShell from source: budget half a day,
+not two hours.
 
 Then:
 
@@ -126,7 +133,7 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ```sh
 git clone https://github.com/dims/substrate && cd substrate
-git checkout lean-integration          # the eight commits, see docs/upstream-branches.md
+git checkout 0ff8b818                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 ./hack/install-ate-kind.sh --deploy-ate-system
@@ -333,6 +340,15 @@ the sandbox.
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file — the
 binary.
+
+### Two transient conditions
+
+`kubectl-ate delete actor-template` returns `Aborted: another operation is in
+progress` while that template's golden warm-up runs. Retry after it finishes.
+
+The warm-up snapshots at a fixed 20 seconds after the actor starts, whether or
+not the containers are ready. A supervisor that has not attached by then is
+captured in that state and stays that way in every restore.
 
 ### Where the output is
 
