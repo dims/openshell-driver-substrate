@@ -1,8 +1,5 @@
-/target
+target/
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store
-
-# kubectl-osh (Go) build artifacts
-cmd/kubectl-osh/kubectl-osh
-cmd/kubectl-osh/kubectl-osh-linux
+__pycache__/

@@ -16,8 +16,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy

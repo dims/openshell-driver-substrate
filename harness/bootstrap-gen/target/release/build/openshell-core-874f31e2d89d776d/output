@@ -1,7 +1,0 @@
-cargo:rerun-if-changed=../../.git/HEAD
-cargo:rerun-if-changed=../../.git/logs/HEAD
-cargo:rerun-if-changed=../../.git/refs/tags
-cargo:rerun-if-changed=../../.git/packed-refs
-cargo:rustc-env=OPENSHELL_GIT_VERSION=0.0.1-dev.1484+gd3480d2a7
-cargo:rerun-if-changed=../../proto
-cargo:rustc-env=OPENSHELL_DESCRIPTOR_PATH=/Users/dsrinivas/go/src/github.com/dims/openshell-driver-substrate/harness/bootstrap-gen/target/release/build/openshell-core-874f31e2d89d776d/out/openshell_descriptor.bin
