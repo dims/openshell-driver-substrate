@@ -478,25 +478,99 @@ then stop at the seccomp one.
 
 ### What unblocking gVisor would actually take
 
-Either side could move, and both are large.
+Porting the *native Linux backend* to gVisor is the wrong framing. That backend
+is built on two kernel features gVisor deliberately does not offer. The
+tractable direction is to implement OpenShell's isolation contract on gVisor's
+own primitives, which is a supported extension point rather than a fork:
+`openshell-isolation-interface/src/contract.rs` defines
+`trait IsolationBackend`, a `BackendRegistry` that holds backends behind `dyn`,
+and `tests/backend_conformance.rs` proves "one driver runs both unchanged".
 
-**gVisor side.** Implement `SECCOMP_RET_USER_NOTIF` and the notify ioctls
-(`RECV`, `SEND`, `ADDFD`) for guests. Appetite looks low: gVisor issue
-[#14627](https://github.com/google/gvisor/issues/14627) raised exactly this in
-September 2026 and was closed two days later with a **documentation-only**
-change, re-labelling seccomp as partially supported. No open issue tracks the
-feature. Guest Landlock has its own open issue,
-[#13439](https://github.com/google/gvisor/issues/13439), also unimplemented.
+The contract already anticipates this case. `OuterFenceGuarantee` documents that
+"the enforcement owner **may be a compute driver or a delegated isolation
+backend**", and `EnforcedProperty { enforced, mechanism }` records *which*
+mechanism establishes a property. `"landlock-v7"` is one possible value of a
+free-form string; `validate()` requires only that a mechanism be named. The
+`landlock_abi >= 3` check lives inside `NativeLinuxSandboxAuditEvidence` — the
+native backend's own evidence schema, not the common runtime.
 
-**OpenShell side.** Rewrite the Linux isolation backend onto the interception
-mechanism gVisor *does* implement: `SECCOMP_RET_TRACE` with
-`PTRACE_O_TRACESECCOMP`, brokering each `PTRACE_EVENT_SECCOMP` stop and
-rewriting registers via `PTRACE_SETREGSET`. All of that works under gVisor
-today. The catch is that ptrace has no `SECCOMP_IOCTL_NOTIF_ADDFD` equivalent,
-so a supervisor cannot inject a file descriptor into the workload — which is
-how socket virtualization works. It is also one tracer per tracee, and slower.
+A gVisor backend would map the same properties onto different mechanisms:
+
+| Property | Native Linux backend | gVisor equivalent |
+|---|---|---|
+| filesystem confinement | Landlock ABI ≥ 3 | sentry-enforced OCI mounts, read-only and masked paths |
+| syscall mediation | seccomp user notification | `seccheck` sink, or `SECCOMP_RET_TRACE` + `PTRACE_O_TRACESECCOMP` |
+| socket virtualization | `SECCOMP_IOCTL_NOTIF_ADDFD` | iptables `nat` `REDIRECT` (**measured working**, below) |
+| same-UID self-protection | Landlock baseline hiding `/.openshell` | supervisor runs outside the sandbox; nothing to hide |
+
+The last row is the useful one. The Landlock baseline exists only because
+supervisor and workload share a UID inside one sandbox. Move the boundary
+outside the gVisor sandbox and the requirement disappears instead of being
+downgraded — which is the objection that sank #1549.
+
+**`seccheck` is gVisor's syscall mediation hook.** `pkg/sentry/seccheck` fires
+synchronous checkpoints and its `Sink` interface is error-returning: *"if the
+method ... returns a non-nil error ... it causes the checked operation to fail
+immediately"*. That already works — `task_exec.go:225`, `task_clone.go:413` and
+`sys_mmap.go:418` all honor it, and `sys_mmap.go` returns the sink error
+straight out as the syscall's errno. The four generic syscall points
+(`task_syscall.go:109,126,181,201`) call `SentToSinks` and discard the result,
+so making them deny is a small change. The shipped `remote` sink is write-only
+(`sinks/remote/remote.go`), so a verdict-returning sink would be new work.
+
+**Implementing guest seccomp user notification in gVisor** is the other option
+and is bounded: the ABI structs (`SeccompNotif`, `SeccompNotifResp`,
+`SeccompNotifSizes`) already exist in `pkg/abi/linux/seccomp.go` for the
+sentry's host-side use. Roughly 900–1300 lines of Go plus tests. The hard part
+is not the listener FD; it is that `evaluateSyscallFilters` discards which
+filter produced an action and the per-syscall action cache stores only the
+action, so `USER_NOTIF` has nowhere to route. Appetite upstream looks low:
+issue [#14627](https://github.com/google/gvisor/issues/14627) raised exactly
+this in September 2026 and was closed two days later with a documentation-only
+change. Guest Landlock is [#13439](https://github.com/google/gvisor/issues/13439),
+open and unimplemented.
 
 Until one of those happens, micro-VM is the supported path and it works.
+
+### Socket virtualization without ADDFD — measured working
+
+`harness/redirect-probe` proves the transparent-proxy primitives work inside a
+gVisor Substrate actor, so the `ADDFD` gap does not block socket
+virtualization. Measured on `SANDBOX_CLASS_GVISOR`:
+
+```
+REDIR CapEff: 0000000020003420
+REDIR IPT_SO_GET_INFO filter: OK
+REDIR IPT_SO_GET_INFO nat: OK
+REDIR install nat REDIRECT (iptables-legacy): OK
+REDIR connect to unrouted target: OK
+REDIR accept redirected conn: OK
+```
+
+A connection to `203.0.113.7:9999`, an address nothing listens on and nothing
+routes to, is bent to a local listener and accepted. Three things are needed,
+and each fails in a way that names the wrong cause:
+
+1. **`runsc --net-raw`.** iptables issues its xtables `getsockopt` over an
+   `AF_INET`/`SOCK_RAW` socket. Without the flag runsc strips `CAP_NET_RAW`
+   from the container (`runsc/config/flags.go:162`), the socket fails `EPERM`,
+   and iptables reports `Table does not exist (do you need to insmod?)` —
+   `iptc_strerror`'s text for `ENOPROTOOPT`. Substrate does not pass this flag,
+   so **no gVisor actor can use iptables at all today**. It must be on every
+   `runsc` invocation, not just `create`.
+2. **`CAP_NET_ADMIN`** on the container, via `securityContext.capabilities.add`.
+   `IPT_SO_GET_INFO` checks for it (`netstack.go:1822`).
+3. **The legacy iptables backend.** gVisor implements the legacy xtables
+   setsockopt interface, not nftables netlink, so `iptables-nft` fails with
+   `Failed to initialize nft: Protocol not supported`. Debian still ships
+   `iptables-legacy`; Alpine 3.21 does not ship it at all.
+
+One gap remains: `SO_ORIGINAL_DST` returns `ENOTCONN`. gVisor implements the
+option (`netstack.go:1799`) but resolves it through conntrack, and an
+`OUTPUT`-chain redirect leaves no tracked connection
+(`conntrack.go:939-941`). That matters only for a protocol-agnostic proxy;
+OpenShell's supervisor proxies HTTP, which carries its own destination in the
+request line or `CONNECT`.
 
 ## Known gaps
 
