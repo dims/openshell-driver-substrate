@@ -13,3 +13,6 @@ not the driver itself. See the root README for the walkthrough.
 
 Build the probe with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o probe .`
 before `docker build`; the image is `FROM scratch`.
+
+`scripts/render.sh` needs `envsubst` (gettext). It ships with most Linux
+distros; on macOS it comes from `brew install gettext`.

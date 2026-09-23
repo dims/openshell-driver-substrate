@@ -1,6 +1,6 @@
-# Minimal non-root container. Reproduces the Substrate bugs in README §"What
-# broke" without any OpenShell parts: a busybox image whose only distinguishing
-# feature is USER 1000:1000. Works on either sandbox class.
+# Minimal non-root container: a busybox image whose only distinguishing feature
+# is USER 1000:1000. Reproduces the Substrate bugs with no OpenShell parts
+# involved, on either sandbox class. See "Generic non-root repro" in the README.
 metadata:
   atespace: ${ATESPACE}
   name: nonroot-probe
