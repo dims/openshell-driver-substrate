@@ -113,6 +113,25 @@ BOOTSTRAP_CHILD_ENV="OPENAI_BASE_URL=http://172.18.0.1:11434/v1,HELPDESK_MODEL=q
 On a kind cluster `172.18.0.1` is the host; an `ollama serve` bound to
 `0.0.0.0:11434` there answers. Without a model `/chat` returns 503.
 
+Substrate has its own egress control and denies every destination until the
+actor has an `EgressPolicy` (atenet-egress answers 403; the agent sees
+`RemoteDisconnected`). `kubectl-ate` has no verb for it, so use the API:
+
+```sh
+TOKEN=$(cat creds/token)     # root README step 8
+grpcurl -cacert creds/ctb.crt -authority api.ate-system.svc \
+  -H "authorization: Bearer ${TOKEN}" \
+  -import-path <substrate>/pkg/proto/ateapipb -proto ateapi.proto \
+  -d '{"actor":{"atespace":"'"${ATESPACE}"'","name":"hd-1"},
+       "egress_policy":{"metadata":{"atespace":"'"${ATESPACE}"'","name":"default"},
+                        "rules":[{"cidrs":{"cidrs":["172.18.0.1/32"]}}]}}' \
+  127.0.0.1:8443 ateapi.Control/CreateActorEgressPolicy
+```
+
+Then `/chat` returns the model's reply and a `turns` count that keeps
+growing across a suspend and resume: the history is process memory and comes
+back with the snapshot.
+
 ## The supervisor's three requirements
 
 | Missing | Error in the golden warm-up log |

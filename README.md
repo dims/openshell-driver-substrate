@@ -396,6 +396,8 @@ harness/scripts/retarget-substrate-version.sh <node> <version> [ateom-image]
   waits for a worker with an empty status; `create_sandbox` fails after 180 s
   with `deadline exceeded`.
 - **Templates are never garbage-collected.**
+- **The driver creates no `EgressPolicy`.** Substrate denies an actor's egress
+  until one exists, so a gateway-created sandbox cannot reach anything.
 - **A gateway can create a sandbox, but not bring it to `Ready`.** The
   synthesized template is one container, with no supervisor and no
   credentials, so no supervisor session can be established. The gateway holds
