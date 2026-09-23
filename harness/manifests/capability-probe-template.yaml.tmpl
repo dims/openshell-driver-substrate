@@ -8,7 +8,7 @@ workerSelector:
     workload: openshell-microvm
 containers:
   - name: capprobe
-    image: "${SANDBOX_IMAGE}"
+    image: "${SANDBOX_BAKED_IMAGE}"
     command: ["/openshell-sandbox"]
     args: ["capability-probe"]
     securityContext:

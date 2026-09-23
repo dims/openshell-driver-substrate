@@ -13,5 +13,4 @@ openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7
 openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
 openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
 serde_json = "1"
-uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }

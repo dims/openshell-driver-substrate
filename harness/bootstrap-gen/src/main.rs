@@ -42,6 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &signing_key_pem,
         "test-key-1",
         gateway_id,
+        // OpenShell caps a session token at one hour (MAX_SESSION_TOKEN_TTL).
+        // A gateway refreshes it; this harness has nothing to refresh from.
         Duration::from_secs(3600),
         Arc::new(SystemJwtClock),
     )?;
@@ -92,10 +94,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // TCP on loopback, not a unix socket on a shared volume. Containers of one
     // actor share the guest's network namespace, so loopback reaches across
-    // them; a socket on a durable-dir volume does not.
+    // them. A unix socket does not: the peer sees the socket file on the
+    // durable dir, but connect(2) returns ECONNREFUSED because the listening
+    // socket is not shared with it.
+    //
+    // Binding loopback rather than 0.0.0.0 keeps the listener off the actor's
+    // routable address, which substrate's ingress can otherwise reach.
     let control_port: u16 = 17777;
-    let bind_address = std::net::SocketAddr::from(([0, 0, 0, 0], control_port));
-    let dial_address = std::net::SocketAddr::from(([127, 0, 0, 1], control_port));
+    let bind_address = std::net::SocketAddr::from(([127, 0, 0, 1], control_port));
+    let dial_address = bind_address;
 
     let boundary_config = BoundaryConfig {
         boundary_id: sandbox_id_str.to_string(),

@@ -8,3 +8,5 @@ FROM ${SANDBOX_IMAGE}
 ADD bootstrap.tar /
 USER 65532:65532
 ENTRYPOINT ["/openshell-sandbox"]
+# The gateway sends no command, so the image must name its own bootstrap.
+CMD ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
