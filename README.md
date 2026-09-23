@@ -113,8 +113,11 @@ ls /dev/kvm && grep -oE 'vmx|svm' /proc/cpuinfo | head -1
 Each micro-VM worker takes 2 GiB; the pool below makes two. 16 GB of RAM is
 the floor, 32 GB is comfortable, and the builds and images want about 50 GB
 of free disk. Everything cloned or pulled is public; no credentials are needed.
-A first run is dominated by building OpenShell from source: budget half a day,
-not two hours.
+From nothing cached, the whole walkthrough takes about ten minutes on 16 cores
+with a fast connection; the two OpenShell release builds are the long pole at
+about a minute and a half each. `mise` may hit GitHub's anonymous API rate
+limit while installing OpenShell's toolchain; `export GITHUB_TOKEN=...` avoids
+it.
 
 Then:
 
@@ -137,7 +140,7 @@ git checkout 0ff8b818                  # lean-integration; see docs/upstream-bra
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 ./hack/install-ate-kind.sh --deploy-ate-system
-make build-atectl                      # bin/kubectl-ate; put it on PATH
+make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
 `create-kind-cluster.sh` also starts a local image registry at
