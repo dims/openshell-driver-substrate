@@ -266,6 +266,49 @@ dead container never surfaces as a restore failure — an actor reaches
 `ACTOR_STATE_RUNNING` with a dead container inside it. Always check container
 output.
 
+### 9. Drive it from a gateway
+
+A stock, unforked `openshell-gateway` dispatches to this driver over a Unix
+socket. Any driver name that is not one of its built-ins resolves to an
+external driver, so no OpenShell change is needed.
+
+```sh
+kubectl port-forward -n ate-system svc/api 8443:443 &
+kubectl create token ate-client -n ate-system \
+  --audience api.ate-system.svc --duration=24h > creds/token
+kubectl get clustertrustbundle servicedns.podcert.ate.dev:identity:primary-bundle \
+  -o jsonpath='{.spec.trustBundle}' > creds/ctb.crt
+
+openshell-driver-substrate --bind-socket /tmp/substrate.sock \
+  --api-endpoint 127.0.0.1:8443 \
+  --api-tls-ca creds/ctb.crt --api-tls-server-name api.ate-system.svc \
+  --api-bearer-token-path creds/token \
+  --atespace "${ATESPACE}" --snapshots-location "gs://${BUCKET_NAME}/${ATESPACE}/" &
+
+openshell-gateway --compute-driver substrate \
+  --compute-driver-socket /tmp/substrate.sock --disable-tls
+```
+
+`ate-api-server` needs TLS 1.3, the `servicedns` trust bundle, server name
+`api.ate-system.svc`, and a bearer token whose audience is that same name. It
+does not require a client certificate.
+
+Create a sandbox with `grpcurl` (the gateway serves no reflection, so pass the
+proto):
+
+```sh
+grpcurl -plaintext -import-path <openshell>/proto -proto openshell.proto -d '{
+  "workspace_scope": {"workspace": "default"},
+  "name": "alice",
+  "spec": {"log_level": "info",
+           "template": {"image": "<sandbox-baked-image>"},
+           "policy": {"version": 1}}
+}' 127.0.0.1:17670 openshell.v1.OpenShell/CreateSandbox
+```
+
+The driver synthesizes a `SANDBOX_CLASS_MICROVM` ActorTemplate, waits for its
+golden snapshot, then creates and resumes an actor named by the sandbox id.
+
 ---
 
 ## Debugging
