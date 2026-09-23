@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,7 +123,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         resource_claim_files: BTreeMap::new(),
         workload_identity: workload_identity.clone(),
         outer_fence: outer_fence.clone(),
-        child_env: HashMap::new(),
+        // BOOTSTRAP_CHILD_ENV="A=1,B=2" reaches the workload's environment.
+        child_env: std::env::var("BOOTSTRAP_CHILD_ENV")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
     };
 
     let runtime_descriptor = SandboxRuntimeDescriptor {

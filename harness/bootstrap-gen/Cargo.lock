@@ -224,7 +224,6 @@ dependencies = [
  "openshell-sandbox-backend",
  "serde",
  "serde_json",
- "uuid",
 ]
 
 [[package]]
