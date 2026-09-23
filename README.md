@@ -109,8 +109,10 @@ Then:
 
 ```sh
 sudo apt-get install -y build-essential protobuf-compiler pkg-config \
-                       libssl-dev jq gettext-base          # envsubst
+                       libssl-dev jq gettext-base \
+                       libelf-dev flex bison bc dwarves    # guest kernel (step 3)
 curl -fsSL https://sh.rustup.rs | sh -s -- -y
+curl -fsSL https://mise.run | sh                           # OpenShell's toolchain (step 4)
 # go >= 1.23, docker, kubectl, kind from their upstream installers
 ```
 
@@ -145,11 +147,15 @@ Without these commits:
 From the Substrate repo:
 
 ```sh
-ARCH=amd64 hack/install-microvm-deps.sh --install
+ARCH=amd64 ATE_INSTALL_KIND=true hack/install-microvm-deps.sh --install
 ```
 
 This downloads the kata asset set, stages it to the cluster object store, and
 applies the cluster-wide `microvm` SandboxConfig.
+
+`ATE_INSTALL_KIND=true` is what picks the in-cluster rustfs bucket. Without it
+the script takes the GKE path and fails on `gcloud: command not found`, after
+it has already assembled the assets.
 
 ### 3. Rebuild the guest kernel
 
@@ -163,12 +169,15 @@ harness/scripts/stage-guest-kernel.sh <built-vmlinux> <path-to-substrate-repo>
 
 ### 4. Build the OpenShell images
 
-From an OpenShell checkout, stage the binaries first — `cargo-zigbuild` is
-required, not optional, because a plain native build links
+From an OpenShell checkout, stage the binaries first. The staging script runs
+every cargo invocation through `mise x`, so `mise install` has to have run in
+that checkout; it pins the Rust, zig and `cargo-zigbuild` versions the build
+expects. zigbuild is required, not optional, because a plain native build links
 `openshell-supervisor` against `libgcc_s.so.1`, which the distroless base does
 not ship:
 
 ```sh
+mise trust && mise install
 PREBUILT_ARCH=amd64 tasks/scripts/stage-prebuilt-binaries.sh sandbox
 PREBUILT_ARCH=amd64 tasks/scripts/stage-prebuilt-binaries.sh supervisor
 docker build -f deploy/docker/Dockerfile.sandbox    -t <registry>/openshell-sandbox:dev .
@@ -207,7 +216,19 @@ The two halves are delivered differently, and this is not arbitrary:
   ownership, `--chown` has no effect, so the tree has to be world-writable for
   the unlink to succeed — modes are preserved even though ownership is not.
 
-Both of these are workarounds for the ownership gap in
+`harness/scripts/package-credentials.sh` does both and prints the two image
+references the template needs:
+
+```sh
+harness/scripts/package-credentials.sh out/ <registry>/openshell-sandbox:dev <registry>
+```
+
+The workload runs in the sandbox container's filesystem, so the script bakes a
+**static** busybox in beside the bootstrap. A dynamic one fails with
+`no such file or directory` against the distroless base. Override the source
+with `BUSYBOX=/path/to/busybox`.
+
+Both halves are workarounds for the ownership gap in
 [Known gaps](#known-gaps); fix that and they go away.
 
 ### 7. Create the pool and template
@@ -215,7 +236,10 @@ Both of these are workarounds for the ownership gap in
 ```sh
 export ATESPACE=ate-openshell-microvm BUCKET_NAME=ate-snapshots
 export SUBSTRATE_VERSION=$(git -C <substrate> describe --always --dirty)
-export ATEOM_MICROVM_IMAGE=... SANDBOX_BAKED_IMAGE=... SUPERVISOR_IMAGE=... BOOTSTRAP_FILES_IMAGE=...
+export KO_DOCKER_REPO=<registry>       # ko writes nothing without it, and fails silently
+export ATEOM_MICROVM_IMAGE=$(cd <substrate> && ./hack/run-tool.sh ko build ./cmd/ateom-microvm --platform=linux/amd64 | tail -1)
+# from step 6, plus the supervisor image from step 4
+export SANDBOX_BAKED_IMAGE=... SUPERVISOR_IMAGE=... BOOTSTRAP_FILES_IMAGE=...
 
 harness/scripts/render.sh harness/manifests/openshell-microvm-pool.yaml.tmpl | kubectl apply -f -
 kubectl-ate create atespace "${ATESPACE}"
@@ -278,6 +302,20 @@ passed into `openshell_sandbox::run()` — it is not a check that can be skipped
 Gate 5 needs `/tmp` because the Landlock probe builds its test tree under
 `std::env::temp_dir()`, and the sandbox image contains **exactly one file** —
 the binary. No `/tmp`, no `/etc`, nothing.
+
+### Where the output is
+
+`kubectl-ate logs actor` returns nothing once an actor has been restored from a
+snapshot: the container's stdout is the descriptor captured in the image and no
+longer reaches the log pipe. The worker pod forwards actor logs, so read those
+instead:
+
+```sh
+kubectl logs -n "${ATESPACE}" <worker-pod> | grep -i openshell
+```
+
+`Boundary control listener ready` is the line that says the sandbox cleared
+every gate, consumed its bootstrap, and is serving.
 
 ### Retargeting after a rebuild
 
