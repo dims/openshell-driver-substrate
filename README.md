@@ -9,9 +9,16 @@ snapshotted and resumed instead of cold-started.
 
 The real, unpatched OpenShell runs on Substrate's **micro-VM** sandbox class.
 `openshell-sandbox` passes all seven of its runtime-qualification gates,
-consumes its bootstrap, and opens its boundary control listener;
-`openshell-supervisor` supervises it. The two-container actor completes
-create → golden snapshot → resume → suspend → resume.
+consumes its bootstrap, and opens its boundary control listener. The
+two-container actor completes create → golden snapshot → resume → suspend →
+resume, and a stock `openshell-gateway` drives the whole lifecycle through this
+driver.
+
+**The workload does not run yet.** `openshell-supervisor` starts and logs
+`Starting sandbox supervision`, but never attaches to the boundary, so it never
+starts the agent. Nothing listens on the actor's ports: a request through
+atenet-router returns 502 on both the default port and a CONNECT-tunnelled one.
+That is the next thing to fix.
 
 Micro-VM needs real virtualisation, so the host needs **nested virt**
 (`/dev/kvm`). A cloud VM without it cannot run the sandbox.
