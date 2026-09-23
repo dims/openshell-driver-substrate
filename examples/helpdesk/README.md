@@ -26,13 +26,16 @@ any base works; `Dockerfile` uses `python:3.12-slim`.
 
 ## Build
 
+From this directory, with `out/` the credential directory of root README
+step 4:
+
 ```sh
 cp <openshell>/deploy/docker/.build/prebuilt-binaries/amd64/openshell-sandbox .
-cp out/bootstrap.tar .        # from harness/scripts/package-credentials.sh
+cp ../../out/bootstrap.tar .        # left there by package-credentials.sh
 docker build -t <registry>/helpdesk-sandbox:dev .
 
 mkdir -p files/supervisor
-cp out/runtime-descriptor.json out/auth.json policy.rego data.yaml files/supervisor/
+cp ../../out/runtime-descriptor.json ../../out/auth.json policy.rego data.yaml files/supervisor/
 printf 'FROM scratch\nCOPY supervisor/ /supervisor/\n' > files/Dockerfile
 docker build -t <registry>/openshell-bootstrap-files:dev files
 

@@ -133,6 +133,9 @@ export GOFLAGS=-buildvcs=false
 make build-atectl                      # bin/kubectl-ate; put it on PATH
 ```
 
+`create-kind-cluster.sh` also starts a local image registry at
+`localhost:5001`; that is `<registry>` in every step below.
+
 On a **fresh** cluster the node is labelled with the build version
 automatically. Retargeting only applies after a rebuild
 (see [Retargeting](#retargeting-after-a-rebuild)).
@@ -188,6 +191,7 @@ sitting, after 1 to 3 and 6.
 An Ed25519-signed JWT pair and TLS material bound to one session id:
 
 ```sh
+mkdir -p out
 openssl genpkey -algorithm ed25519 -out out/signing.key.pem
 openssl pkey -in out/signing.key.pem -pubout -out out/signing.pub.pem
 cargo run --manifest-path harness/bootstrap-gen/Cargo.toml -- out/
