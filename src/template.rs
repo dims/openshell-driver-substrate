@@ -3,34 +3,73 @@
 
 //! `ActorTemplate` synthesis.
 //!
-//! Substrate's `ActorTemplate` is a plain `ateapi.Control` gRPC resource (see
-//! `CreateActorTemplate`/`GetActorTemplate` in `proto/ateapi.proto`) — there is
-//! no CRD and no Kubernetes client involved. A template is derived once per
-//! distinct (image, command) pair and reused by content-derived name, so
-//! repeat `create_sandbox` calls for the same workload skip straight to
-//! `CreateActor` instead of rebuilding a golden snapshot.
+//! Substrate's `ActorTemplate` is a plain `ateapi.Control` gRPC resource: no
+//! CRD and no Kubernetes client. A template is derived from the sandbox spec
+//! and the driver config, and named by a hash of its own encoding, so repeat
+//! `create_sandbox` calls for the same workload reuse the golden snapshot and
+//! any change to what the template contains gets a new one.
+//!
+//! Nothing that varies per sandbox goes into a template. A snapshot freezes
+//! process memory, so an environment variable set here comes back identical
+//! in every actor restored from it. The sandbox id and the gateway-minted
+//! sandbox token are per sandbox and are left out for that reason.
 
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use openshell_core::proto::compute::v1::DriverSandbox;
+use prost::Message;
+use sha2::{Digest, Sha256};
 use tonic::Status;
 
 use crate::{ControlClient, SubstrateComputeConfig, ateapi};
 
 const READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Deterministic, DNS-1123-safe template name derived from the parts of the
-/// sandbox spec that affect the golden snapshot (image + command). Same
-/// inputs -> same name -> `CreateActorTemplate` returns `AlreadyExists` and
-/// the caller reuses the existing golden snapshot instead of rebuilding one.
+/// Everything the golden snapshot depends on.
+struct Inputs {
+    image: String,
+    command: Vec<String>,
+    env: BTreeMap<String, String>,
+}
+
+fn inputs_for(sandbox: &DriverSandbox, config: &SubstrateComputeConfig) -> Inputs {
+    let spec = sandbox.spec.as_ref();
+    let template_spec = spec.and_then(|s| s.template.as_ref());
+
+    // spec.environment, then spec.template.environment over it, then the
+    // gateway endpoint over both so a caller cannot redirect it.
+    let mut env = BTreeMap::new();
+    if let Some(s) = spec {
+        env.extend(s.environment.clone());
+    }
+    if let Some(t) = template_spec {
+        env.extend(t.environment.clone());
+    }
+    if !config.gateway_endpoint.is_empty() {
+        env.insert(
+            openshell_core::sandbox_env::ENDPOINT.to_string(),
+            config.gateway_endpoint.clone(),
+        );
+    }
+
+    Inputs {
+        image: template_spec.map(|t| t.image.clone()).unwrap_or_default(),
+        command: spec.map(|s| s.command.clone()).unwrap_or_default(),
+        env,
+    }
+}
+
+/// Deterministic, DNS-1123-safe template name: SHA-256 of the template's
+/// own encoding with its metadata blanked. prost encodes a given struct the
+/// same way every time, so the name is stable across toolchains.
 #[must_use]
-pub fn template_name_for(image: &str, command: &[String]) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    image.hash(&mut hasher);
-    command.hash(&mut hasher);
-    format!("oshl-{:016x}", hasher.finish())
+pub fn name_for(sandbox: &DriverSandbox, config: &SubstrateComputeConfig) -> String {
+    let mut template = synthesize("", "", sandbox, config);
+    template.metadata = None;
+    let digest = Sha256::digest(template.encode_to_vec());
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("oshl-{hex}")
 }
 
 /// Build an `ActorTemplate` from the sandbox spec and driver config. Pure:
@@ -42,48 +81,9 @@ pub fn synthesize(
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
 ) -> ateapi::ActorTemplate {
-    let template_spec = sandbox.spec.as_ref().and_then(|s| s.template.as_ref());
-    let image = template_spec.map(|t| t.image.clone()).unwrap_or_default();
-    let command = sandbox
-        .spec
-        .as_ref()
-        .map(|s| s.command.clone())
-        .unwrap_or_default();
-
-    // Merge spec.environment + spec.template.environment (template wins on
-    // conflict), then layer driver-injected identity vars on top so the
-    // caller's environment cannot override them.
-    let mut env_map: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(spec) = sandbox.spec.as_ref() {
-        env_map.extend(spec.environment.clone());
-    }
-    if let Some(t) = template_spec {
-        env_map.extend(t.environment.clone());
-    }
-    env_map.insert(
-        openshell_core::sandbox_env::SANDBOX_ID.to_string(),
-        sandbox.id.clone(),
-    );
-    if !config.gateway_endpoint.is_empty() {
-        env_map.insert(
-            openshell_core::sandbox_env::ENDPOINT.to_string(),
-            config.gateway_endpoint.clone(),
-        );
-    }
-    if let Some(spec) = sandbox.spec.as_ref()
-        && !spec.sandbox_token.is_empty()
-    {
-        // ponytail: OPENSHELL_SANDBOX_TOKEN is openshell-core's test-harness
-        // env-var path (see sandbox_env.rs), not the production
-        // SANDBOX_TOKEN_FILE bind-mount path. Good enough while proving the
-        // driver contract; move to a mounted file if a real deployment
-        // needs it.
-        env_map.insert(
-            openshell_core::sandbox_env::SANDBOX_TOKEN.to_string(),
-            spec.sandbox_token.clone(),
-        );
-    }
-    let env: Vec<ateapi::EnvVar> = env_map
+    let inputs = inputs_for(sandbox, config);
+    let env = inputs
+        .env
         .into_iter()
         .map(|(name, value)| ateapi::EnvVar { name, value })
         .collect();
@@ -97,16 +97,32 @@ pub fn synthesize(
         worker_selector: None,
         containers: vec![ateapi::Container {
             name: "sandbox".to_string(),
-            image,
-            command,
+            image: inputs.image,
+            command: inputs.command,
             args: vec![],
             env,
             readyz: None,
-            volume_mounts: vec![],
-            security_context: None,
+            // The Landlock probe writes under /tmp, and the stock sandbox
+            // image has no /tmp.
+            volume_mounts: vec![ateapi::VolumeMount {
+                name: "tmp".to_string(),
+                mount_path: "/tmp".to_string(),
+            }],
+            // openshell-sandbox refuses to run with any capability in its
+            // bounding set; substrate grants a few by default.
+            security_context: Some(ateapi::SecurityContext {
+                capabilities: Some(ateapi::Capabilities {
+                    drop: vec!["ALL".to_string()],
+                    ..Default::default()
+                }),
+            }),
             resources: None,
         }],
-        volumes: vec![],
+        volumes: vec![ateapi::Volume {
+            name: "tmp".to_string(),
+            durable_dir: Some(ateapi::DurableDirVolumeSource {}),
+            ..Default::default()
+        }],
         snapshots_config: Some(ateapi::SnapshotsConfig {
             on_pause: ateapi::SnapshotContentScope::Full as i32,
             on_commit: ateapi::SnapshotContentScope::Full as i32,
@@ -164,8 +180,8 @@ pub async fn ensure_ready(
         .await;
     match create {
         Ok(_) => {}
-        // Reuse: same content hash means the same image + command, so the
-        // existing golden snapshot is valid for this create too.
+        // Same name means the same inputs, so the existing golden snapshot
+        // is valid for this sandbox too.
         Err(status) if status.code() == tonic::Code::AlreadyExists => {}
         Err(status) => {
             return Err(TemplateError::Rpc {
@@ -218,48 +234,138 @@ pub async fn ensure_ready(
 
 #[cfg(test)]
 mod tests {
+    use openshell_core::proto::compute::v1::{DriverSandboxSpec, DriverSandboxTemplate};
+
     use super::*;
 
-    #[test]
-    fn template_name_is_deterministic_and_dns_safe() {
-        let a = template_name_for("img@sha256:abc", &["/bin/foo".to_string()]);
-        let b = template_name_for("img@sha256:abc", &["/bin/foo".to_string()]);
-        let c = template_name_for("img@sha256:def", &["/bin/foo".to_string()]);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        assert!(
-            a.chars()
-                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-        );
-    }
-
-    #[test]
-    fn synthesize_injects_sandbox_id_and_endpoint() {
-        let sandbox = DriverSandbox {
-            id: "actor-1".to_string(),
-            spec: Some(openshell_core::proto::compute::v1::DriverSandboxSpec {
-                template: Some(openshell_core::proto::compute::v1::DriverSandboxTemplate {
-                    image: "img@sha256:abc".to_string(),
+    fn sandbox(image: &str, command: &[&str], env: &[(&str, &str)]) -> DriverSandbox {
+        DriverSandbox {
+            id: "sb-1".to_string(),
+            spec: Some(DriverSandboxSpec {
+                command: command.iter().map(|s| s.to_string()).collect(),
+                sandbox_token: "gateway-minted-jwt".to_string(),
+                environment: env
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                template: Some(DriverSandboxTemplate {
+                    image: image.to_string(),
                     ..Default::default()
                 }),
                 ..Default::default()
             }),
             ..Default::default()
+        }
+    }
+
+    // Pinned: any change to what a template contains renames every existing
+    // template and orphans its golden snapshot, so it must be a visible,
+    // deliberate change.
+    #[test]
+    fn name_is_stable_and_dns_safe() {
+        let config = SubstrateComputeConfig::default();
+        let name = name_for(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config);
+        assert_eq!(name, "oshl-c6270ac92d8e942c");
+        assert!(
+            name.chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        );
+    }
+
+    #[test]
+    fn name_covers_everything_the_snapshot_depends_on() {
+        let config = SubstrateComputeConfig::default();
+        let base = name_for(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config);
+        assert_ne!(
+            base,
+            name_for(&sandbox("img@sha256:def", &["/bin/foo"], &[]), &config)
+        );
+        assert_ne!(
+            base,
+            name_for(&sandbox("img@sha256:abc", &["/bin/bar"], &[]), &config)
+        );
+        assert_ne!(
+            base,
+            name_for(
+                &sandbox("img@sha256:abc", &["/bin/foo"], &[("A", "1")]),
+                &config
+            )
+        );
+        // Environment order does not matter; the endpoint does.
+        assert_eq!(
+            name_for(
+                &sandbox("i@sha256:a", &[], &[("A", "1"), ("B", "2")]),
+                &config
+            ),
+            name_for(
+                &sandbox("i@sha256:a", &[], &[("B", "2"), ("A", "1")]),
+                &config
+            )
+        );
+        let with_endpoint = SubstrateComputeConfig {
+            gateway_endpoint: "gateway:443".to_string(),
+            ..SubstrateComputeConfig::default()
         };
+        assert_ne!(
+            base,
+            name_for(
+                &sandbox("img@sha256:abc", &["/bin/foo"], &[]),
+                &with_endpoint
+            )
+        );
+        let other_config = SubstrateComputeConfig {
+            sandbox_config_name: "microvm-2".to_string(),
+            ..SubstrateComputeConfig::default()
+        };
+        assert_ne!(
+            base,
+            name_for(
+                &sandbox("img@sha256:abc", &["/bin/foo"], &[]),
+                &other_config
+            )
+        );
+    }
+
+    // Two sandboxes with the same inputs share one template and one
+    // snapshot, so nothing that identifies one sandbox may be in it.
+    #[test]
+    fn synthesize_bakes_no_per_sandbox_identity() {
         let config = SubstrateComputeConfig {
             gateway_endpoint: "gateway:443".to_string(),
             ..SubstrateComputeConfig::default()
         };
-        let tmpl = synthesize("oshl-abc123", "ws", &sandbox, &config);
+        let sb = sandbox("img@sha256:abc", &["/bin/foo"], &[("CALLER", "x")]);
+        let tmpl = synthesize("oshl-abc123", "ws", &sb, &config);
         let env = &tmpl.containers[0].env;
-        assert!(
-            env.iter()
-                .any(|e| e.name == openshell_core::sandbox_env::SANDBOX_ID && e.value == "actor-1")
+        let get = |k: &str| env.iter().find(|e| e.name == k).map(|e| e.value.as_str());
+
+        assert_eq!(
+            get(openshell_core::sandbox_env::ENDPOINT),
+            Some("gateway:443")
         );
+        assert_eq!(get("CALLER"), Some("x"));
+        assert_eq!(get(openshell_core::sandbox_env::SANDBOX_ID), None);
         assert!(
-            env.iter().any(
-                |e| e.name == openshell_core::sandbox_env::ENDPOINT && e.value == "gateway:443"
-            )
+            env.iter().all(|e| e.value != "gateway-minted-jwt"),
+            "the sandbox token must not be in the template"
+        );
+        assert_eq!(
+            tmpl.sandbox_config.as_ref().map(|s| s.sandbox_class),
+            Some(ateapi::SandboxClass::Microvm as i32)
+        );
+        let drops = tmpl.containers[0]
+            .security_context
+            .as_ref()
+            .and_then(|s| s.capabilities.as_ref())
+            .map(|c| c.drop.clone())
+            .unwrap_or_default();
+        assert_eq!(drops, ["ALL"], "the sandbox must start capability-free");
+        assert!(
+            tmpl.containers[0]
+                .volume_mounts
+                .iter()
+                .any(|m| m.mount_path == "/tmp"),
+            "the Landlock probe needs a writable /tmp"
         );
     }
 }

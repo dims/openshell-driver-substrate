@@ -13,6 +13,7 @@
 //! wiring it in is gateway configuration, not a source change.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,6 +76,16 @@ const WATCH_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Bounded channel capacity for the watch stream.
 const WATCH_CHANNEL_BUFFER: usize = 64;
 
+/// `ListActors` page size. ate-api-server caps a page at 1000 and treats 0
+/// as that cap, so this is the largest page it serves.
+const LIST_PAGE_SIZE: i32 = 1000;
+
+/// `Ready` reasons the gateway treats as transient. Any reason not on its
+/// allowlist (`is_terminal_failure_reason` in openshell-server) turns a
+/// `Ready=False` condition into a sticky `Error`.
+const REASON_RUNNING: &str = "ContainerRunning";
+const REASON_STARTING: &str = "ContainerStarting";
+
 /// Generated tonic client for Substrate's `ateapi.Control` service. The
 /// proto lives at `proto/ateapi.proto` (vendored from
 /// `agent-substrate/substrate`); `build.rs` compiles it at build time.
@@ -133,7 +144,7 @@ pub struct SubstrateComputeConfig {
     /// certificate. Derived from `api_endpoint`'s host when unset.
     pub api_tls_server_name: Option<String>,
     /// Path to a bearer token file (e.g. a projected Kubernetes
-    /// ServiceAccount token) re-read on every channel build, so rotated
+    /// ServiceAccount token), read each time a client is built, so rotated
     /// tokens are picked up without a driver restart. Unset disables
     /// bearer auth.
     pub api_bearer_token_path: Option<std::path::PathBuf>,
@@ -412,43 +423,113 @@ fn actor_to_driver_status(actor: &ateapi::Actor) -> DriverSandboxStatus {
         instance_id,
         agent_fd: String::new(),
         sandbox_fd: String::new(),
-        conditions: vec![actor_state_to_condition(state)],
+        conditions: actor_state_conditions(state),
         deleting: state == ateapi::ActorState::Deleting,
         resolved_identity: None,
         fence_evidence: None,
     }
 }
 
-/// Translate Substrate's `ActorState` into the driver-condition shape the
-/// gateway derives `SandboxPhase` from. Uses type `Ready` so the gateway's
-/// existing "Ready=True" phase derivation works without changes.
-fn actor_state_to_condition(state: ateapi::ActorState) -> DriverCondition {
+fn condition(r#type: &str, status: &str, reason: &str, message: &str) -> DriverCondition {
+    DriverCondition {
+        r#type: r#type.to_string(),
+        status: status.to_string(),
+        reason: reason.to_string(),
+        message: message.to_string(),
+        transition_time: None,
+    }
+}
+
+/// Conditions the gateway derives `SandboxPhase` from. `Ready=True` is
+/// Ready. `Suspended=True` without `Ready=True` is Stopped. `Ready=False`
+/// is a sticky Error unless its reason is on the gateway's transient
+/// allowlist, so in-flight states carry a transient reason or no `Ready`
+/// condition at all. `Bootstrapping=True` lets a Stopped sandbox start
+/// again. A crashed actor is a deliberate Error: it needs `RevertActor`.
+fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
     use ateapi::ActorState::{
         Crashed, Deleting, Paused, Pausing, Resuming, Reverting, Running, Suspended, Suspending,
         Unspecified,
     };
-    let (status, reason, message) = match state {
-        Running => ("True", "Running", "actor restored and running"),
-        Resuming => ("False", "Resuming", "actor is being restored from snapshot"),
-        Suspending => ("False", "Suspending", "actor is being checkpointed"),
-        Suspended => ("False", "Suspended", "actor is checkpointed; resume to run"),
-        Pausing => ("False", "Pausing", "actor is being paused"),
-        Paused => ("False", "Paused", "actor is paused; resume to run"),
-        Crashed => ("False", "Crashed", "actor crashed"),
-        Deleting => ("False", "Deleting", "actor is being deleted"),
-        Reverting => (
+    use openshell_core::driver_utils::{CONDITION_EXITED, CONDITION_STOPPED};
+    match state {
+        Running => vec![condition(
+            "Ready",
+            "True",
+            REASON_RUNNING,
+            "actor is running",
+        )],
+        Resuming => vec![
+            condition(
+                "Bootstrapping",
+                "True",
+                "Resuming",
+                "actor is being restored",
+            ),
+            condition("Ready", "False", REASON_STARTING, "actor is being restored"),
+        ],
+        Reverting => vec![
+            condition(
+                "Bootstrapping",
+                "True",
+                "Reverting",
+                "actor is reverting to its snapshot",
+            ),
+            condition(
+                "Ready",
+                "False",
+                REASON_STARTING,
+                "actor is reverting to its snapshot",
+            ),
+        ],
+        Suspending => vec![condition(
+            "Suspended",
             "False",
-            "Reverting",
-            "actor is reverting to its last snapshot",
-        ),
-        Unspecified => ("Unknown", "Unspecified", "actor status not reported"),
-    };
-    DriverCondition {
-        r#type: String::from("Ready"),
-        status: String::from(status),
-        reason: String::from(reason),
-        message: String::from(message),
-        transition_time: None,
+            "Suspending",
+            "actor is being checkpointed",
+        )],
+        Pausing => vec![condition(
+            "Suspended",
+            "False",
+            "Pausing",
+            "actor is being paused",
+        )],
+        Suspended => vec![
+            condition(
+                "Suspended",
+                "True",
+                "Suspended",
+                "actor is checkpointed; start it to resume",
+            ),
+            condition("Ready", "False", CONDITION_STOPPED, "actor is checkpointed"),
+        ],
+        Paused => vec![
+            condition(
+                "Suspended",
+                "True",
+                "Paused",
+                "actor is paused; start it to resume",
+            ),
+            condition("Ready", "False", CONDITION_STOPPED, "actor is paused"),
+        ],
+        Crashed => vec![condition(
+            "Ready",
+            "False",
+            CONDITION_EXITED,
+            "actor crashed; it needs RevertActor before it can start",
+        )],
+        Deleting => vec![condition(
+            "Ready",
+            "False",
+            CONDITION_STOPPED,
+            "actor is being deleted",
+        )],
+        Unspecified => vec![condition(
+            "Ready",
+            "Unknown",
+            "Unspecified",
+            "actor state not reported",
+        )],
     }
 }
 
@@ -489,6 +570,54 @@ fn validate_substrate_sandbox(sandbox: &DriverSandbox) -> Result<(), Status> {
         ));
     }
     Ok(())
+}
+
+/// True when the watch stream's receiver went away during the poll interval.
+async fn sleep_or_closed<T>(tx: &mpsc::Sender<T>) -> bool {
+    tokio::select! {
+        () = tx.closed() => true,
+        () = tokio::time::sleep(WATCH_POLL_INTERVAL) => false,
+    }
+}
+
+type ListPage<'a> =
+    Pin<Box<dyn Future<Output = Result<ateapi::ListActorsResponse, Status>> + Send + 'a>>;
+
+/// The one `ateapi.Control` call the page walk needs, so the walk can be
+/// tested without a server.
+trait ListActors {
+    fn list_actors_page(&mut self, req: ateapi::ListActorsRequest) -> ListPage<'_>;
+}
+
+impl ListActors for ControlClient {
+    fn list_actors_page(&mut self, req: ateapi::ListActorsRequest) -> ListPage<'_> {
+        Box::pin(async move { self.list_actors(req).await.map(Response::into_inner) })
+    }
+}
+
+/// Every actor in one atespace. `ListActors` pages at the server's cap and
+/// may return an empty page with a continuation token, so it is walked to
+/// the end.
+async fn list_atespace_actors(
+    client: &mut impl ListActors,
+    atespace: &str,
+) -> Result<Vec<ateapi::Actor>, Status> {
+    let mut actors = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let resp = client
+            .list_actors_page(ateapi::ListActorsRequest {
+                atespace: atespace.to_string(),
+                page_size: LIST_PAGE_SIZE,
+                page_token: page_token.clone(),
+            })
+            .await?;
+        actors.extend(resp.actors);
+        if resp.next_page_token.is_empty() {
+            return Ok(actors);
+        }
+        page_token = resp.next_page_token;
+    }
 }
 
 #[tonic::async_trait]
@@ -582,17 +711,8 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let mut client = self.control_client().await?;
-        let resp = client
-            .list_actors(ateapi::ListActorsRequest::default())
-            .await?;
-        let ns = self.config.atespace.as_str();
-        let sandboxes = resp
-            .into_inner()
-            .actors
-            .iter()
-            .filter(|a| a.metadata.as_ref().is_some_and(|m| m.atespace == ns))
-            .map(actor_to_driver_sandbox)
-            .collect();
+        let actors = list_atespace_actors(&mut client, &self.config.atespace).await?;
+        let sandboxes = actors.iter().map(actor_to_driver_sandbox).collect();
         Ok(Response::new(ListSandboxesResponse { sandboxes }))
     }
 
@@ -608,14 +728,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         let actor_name = require_actor_name(&sandbox.id, &sandbox.name)?;
         let atespace = self.config.atespace.clone();
 
-        let template_spec = sandbox.spec.as_ref().and_then(|s| s.template.as_ref());
-        let image = template_spec.map(|t| t.image.clone()).unwrap_or_default();
-        let command = sandbox
-            .spec
-            .as_ref()
-            .map(|s| s.command.clone())
-            .unwrap_or_default();
-        let template_name = template::template_name_for(&image, &command);
+        let template_name = template::name_for(&sandbox, &self.config);
 
         let mut client = self.control_client().await?;
         template::ensure_ready(
@@ -628,7 +741,9 @@ impl ComputeDriver for SubstrateComputeDriver {
         .await
         .map_err(SubstrateDriverError::from)?;
 
-        client
+        // A retried create finds its actor already there. Resuming it is
+        // still the right next step.
+        match client
             .create_actor(ateapi::CreateActorRequest {
                 actor: Some(ateapi::Actor {
                     metadata: Some(ateapi::ResourceMetadata {
@@ -643,7 +758,12 @@ impl ComputeDriver for SubstrateComputeDriver {
                     ..Default::default()
                 }),
             })
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+            Err(status) => return Err(status),
+        }
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(ateapi::ObjectRef {
@@ -736,62 +856,61 @@ impl ComputeDriver for SubstrateComputeDriver {
         let (tx, rx) = mpsc::channel(WATCH_CHANNEL_BUFFER);
         let driver = self.clone();
         tokio::spawn(async move {
+            let atespace = driver.config.atespace.clone();
+            let mut client: Option<ControlClient> = None;
             let mut prior: HashMap<String, DriverSandbox> = HashMap::new();
             let mut bootstrapped = false;
             loop {
-                let mut client = match driver.control_client().await {
-                    Ok(c) => c,
-                    Err(err) => {
-                        let _ = tx.send(Err(Status::from(err))).await;
-                        return;
-                    }
+                if tx.is_closed() {
+                    return;
+                }
+                // Dialed once, and again after a failed poll. A rebuilt client
+                // also picks up a rotated bearer token.
+                let c = match client.as_mut() {
+                    Some(c) => c,
+                    None => match driver.control_client().await {
+                        Ok(c) => client.insert(c),
+                        Err(err) => {
+                            let _ = tx.send(Err(Status::from(err))).await;
+                            return;
+                        }
+                    },
                 };
-                let resp = match client
-                    .list_actors(ateapi::ListActorsRequest::default())
-                    .await
-                {
-                    Ok(r) => r,
+                let actors = match list_atespace_actors(c, &atespace).await {
+                    Ok(actors) => actors,
                     Err(status) => {
-                        tracing::warn!(
-                            ?status,
-                            "Substrate driver: ListActors poll failed; retrying"
-                        );
-                        tokio::time::sleep(WATCH_POLL_INTERVAL).await;
+                        tracing::warn!(?status, "ListActors poll failed; retrying");
+                        client = None;
+                        if sleep_or_closed(&tx).await {
+                            return;
+                        }
                         continue;
                     }
                 };
-                let ns = driver.config.atespace.as_str();
-                let mut current: HashMap<String, DriverSandbox> = resp
-                    .into_inner()
-                    .actors
-                    .into_iter()
-                    .filter(|a| a.metadata.as_ref().is_some_and(|m| m.atespace == ns))
+                let current: HashMap<String, DriverSandbox> = actors
+                    .iter()
                     .map(|a| {
-                        let sandbox = actor_to_driver_sandbox(&a);
+                        let sandbox = actor_to_driver_sandbox(a);
                         (sandbox.id.clone(), sandbox)
                     })
                     .collect();
 
                 if bootstrapped {
-                    for id in prior.keys() {
-                        if !current.contains_key(id) {
-                            let evt = WatchSandboxesEvent {
-                                payload: Some(watch_sandboxes_event::Payload::Deleted(
-                                    WatchSandboxesDeletedEvent {
-                                        sandbox_id: id.clone(),
-                                    },
-                                )),
-                            };
-                            if tx.send(Ok(evt)).await.is_err() {
-                                return;
-                            }
+                    for id in prior.keys().filter(|id| !current.contains_key(*id)) {
+                        let evt = WatchSandboxesEvent {
+                            payload: Some(watch_sandboxes_event::Payload::Deleted(
+                                WatchSandboxesDeletedEvent {
+                                    sandbox_id: id.clone(),
+                                },
+                            )),
+                        };
+                        if tx.send(Ok(evt)).await.is_err() {
+                            return;
                         }
                     }
                 }
-
                 for (id, sandbox) in &current {
-                    let changed = prior.get(id) != Some(sandbox);
-                    if changed {
+                    if prior.get(id) != Some(sandbox) {
                         let evt = WatchSandboxesEvent {
                             payload: Some(watch_sandboxes_event::Payload::Sandbox(
                                 WatchSandboxesSandboxEvent {
@@ -804,10 +923,11 @@ impl ComputeDriver for SubstrateComputeDriver {
                         }
                     }
                 }
-
-                std::mem::swap(&mut prior, &mut current);
+                prior = current;
                 bootstrapped = true;
-                tokio::time::sleep(WATCH_POLL_INTERVAL).await;
+                if sleep_or_closed(&tx).await {
+                    return;
+                }
             }
         });
 
@@ -946,10 +1066,142 @@ mod tests {
         assert!(require_actor_name("", "").is_err());
     }
 
+    // The gateway derives SandboxPhase from these (openshell-server
+    // compute/mod.rs: derive_phase, is_terminal_failure_reason).
     #[test]
-    fn actor_state_running_maps_to_ready_true() {
-        let cond = actor_state_to_condition(ateapi::ActorState::Running);
-        assert_eq!(cond.r#type, "Ready");
-        assert_eq!(cond.status, "True");
+    fn actor_state_conditions_follow_the_gateway_phase_rules() {
+        use ateapi::ActorState::{
+            Crashed, Deleting, Paused, Pausing, Resuming, Reverting, Running, Suspended,
+            Suspending, Unspecified,
+        };
+        use openshell_core::driver_utils::{CONDITION_EXITED, CONDITION_STOPPED};
+        // is_terminal_failure_reason's allowlist, lower-cased as it compares.
+        const TRANSIENT: [&str; 8] = [
+            "reconcilererror",
+            "dependenciesnotready",
+            "supervisornotconnected",
+            "starting",
+            "containerstarting",
+            "containercreated",
+            "healthcheckstarting",
+            "inspectfailed",
+        ];
+
+        let states: Vec<ateapi::ActorState> = (0..)
+            .map_while(|i| ateapi::ActorState::try_from(i).ok())
+            .collect();
+        assert_eq!(
+            states.len(),
+            10,
+            "a new ActorState needs a row in the match below"
+        );
+
+        for state in states {
+            let conds = actor_state_conditions(state);
+            let has = |t: &str, s: &str| conds.iter().any(|c| c.r#type == t && c.status == s);
+            for c in conds
+                .iter()
+                .filter(|c| c.r#type == "Ready" && c.status == "False")
+            {
+                let transient = TRANSIENT.contains(&c.reason.to_ascii_lowercase().as_str());
+                let meant_as_error = c.reason == CONDITION_EXITED || c.reason == CONDITION_STOPPED;
+                assert!(
+                    transient || meant_as_error,
+                    "{state:?}: Ready=False/{} would be a sticky Error",
+                    c.reason
+                );
+            }
+            match state {
+                Running => assert!(has("Ready", "True")),
+                Suspended | Paused => {
+                    assert!(
+                        has("Suspended", "True") && !has("Ready", "True"),
+                        "{state:?}"
+                    );
+                }
+                Resuming | Reverting => {
+                    assert!(
+                        has("Bootstrapping", "True") && !has("Suspended", "True"),
+                        "{state:?}"
+                    );
+                }
+                Crashed => assert!(
+                    conds
+                        .iter()
+                        .any(|c| c.r#type == "Ready" && c.reason == CONDITION_EXITED)
+                ),
+                Suspending | Pausing | Deleting | Unspecified => {
+                    assert!(
+                        !has("Ready", "True") && !has("Suspended", "True"),
+                        "{state:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn actor(name: &str) -> ateapi::Actor {
+        ateapi::Actor {
+            metadata: Some(ateapi::ResourceMetadata {
+                name: name.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    struct Pages {
+        pages: std::collections::VecDeque<ateapi::ListActorsResponse>,
+        seen: Vec<(String, i32, String)>,
+    }
+
+    impl ListActors for Pages {
+        fn list_actors_page(&mut self, req: ateapi::ListActorsRequest) -> ListPage<'_> {
+            self.seen
+                .push((req.atespace, req.page_size, req.page_token));
+            let page = self
+                .pages
+                .pop_front()
+                .expect("more pages requested than exist");
+            Box::pin(async move { Ok(page) })
+        }
+    }
+
+    #[tokio::test]
+    async fn list_atespace_actors_walks_every_page_and_scopes_the_atespace() {
+        let mut pages = Pages {
+            pages: vec![
+                ateapi::ListActorsResponse {
+                    actors: vec![actor("a")],
+                    next_page_token: "p2".to_string(),
+                },
+                // An empty page with a continuation token is legal.
+                ateapi::ListActorsResponse {
+                    actors: vec![],
+                    next_page_token: "p3".to_string(),
+                },
+                ateapi::ListActorsResponse {
+                    actors: vec![actor("b")],
+                    next_page_token: String::new(),
+                },
+            ]
+            .into(),
+            seen: Vec::new(),
+        };
+        let actors = list_atespace_actors(&mut pages, "ws").await.unwrap();
+
+        let names: Vec<&str> = actors
+            .iter()
+            .map(|a| a.metadata.as_ref().unwrap().name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(
+            pages.seen,
+            [
+                ("ws".to_string(), LIST_PAGE_SIZE, String::new()),
+                ("ws".to_string(), LIST_PAGE_SIZE, "p2".to_string()),
+                ("ws".to_string(), LIST_PAGE_SIZE, "p3".to_string()),
+            ]
+        );
     }
 }
