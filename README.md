@@ -97,6 +97,11 @@ cargo clippy --all-targets -- -D warnings
 Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
 `ate-api-server` and is ignored by default.
 
+Bumping the OpenShell pin in `Cargo.toml` is not a one-line change:
+`harness/bootstrap-gen` builds `BoundaryConfig` and `SandboxRuntimeDescriptor`
+by hand, and those types and `proto/openshell.proto` move between releases.
+Budget bootstrap-gen work with every bump.
+
 ---
 
 ## Reproducing a working run
@@ -126,9 +131,21 @@ sudo apt-get install -y build-essential protobuf-compiler pkg-config \
                        libssl-dev jq gettext-base
 curl -fsSL https://sh.rustup.rs | sh -s -- -y
 curl -fsSL https://mise.run | sh                           # OpenShell's toolchain (step 3)
+export GITHUB_TOKEN=...                                    # mise: 60 anonymous API calls/hour otherwise
 go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest   # steps 7 and 8
 # go >= 1.23, docker, kubectl, kind from their upstream installers
 ```
+
+Use a current `kind`; an old one fails against the node image with `unknown
+containerd config version: 4`.
+
+A host with a managed firewall can leave the kind node with no egress at all.
+On a BCM-provisioned host, nftables `cm_filter` has a forward policy of DROP
+and `cmd` re-applies it, so disabling the firewall does not hold; the fix is to
+add the kind bridge to the template's `@nat_ifaces` set, and the input chain
+needs an allowance for anything on the host the node must reach, such as the
+model endpoint in step 7. The symptom is an install that looks like a slow
+registry for twenty minutes. The pre-flight in step 1 catches it.
 
 `ko` does **not** need installing separately — Substrate vendors it and every
 build must go through its wrapper, `./hack/run-tool.sh ko ...`.
@@ -140,12 +157,19 @@ git clone https://github.com/dims/substrate && cd substrate
 git checkout 0ff8b818                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
+docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
+  http://detectportal.firefox.com/success.txt && echo egress ok   # from the kind bridge
 ./hack/install-ate-kind.sh --deploy-ate-system
+kubectl -n ate-system wait --for=condition=Available deploy --all --timeout=10m
+kubectl -n ate-system rollout status ds --timeout=10m
+kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
 `create-kind-cluster.sh` also starts a local image registry at
-`localhost:5001`; that is `<registry>` in every step below.
+`localhost:5001`; that is `<registry>` in every step below. The installer's
+own readiness wait is 60 s per workload and it exits 0 when that wait times
+out, so gate on the three `kubectl` waits, not on its exit code.
 
 On a **fresh** cluster the node is labelled with the build version
 automatically. Retargeting only applies after a rebuild
@@ -193,6 +217,8 @@ export SUPERVISOR_IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' <re
 ```
 
 Templates reference images by digest; a bare tag fails atelet's pull cache.
+Always push: a template needs the registry's digest, and `kind load
+docker-image` does not produce one.
 
 ### 4. Mint the credentials
 

@@ -54,8 +54,14 @@ OLLAMA_HOST=0.0.0.0 ollama serve &
 ollama pull qwen2.5:1.5b
 ```
 
-A kind node reaches the host at `172.18.0.1`, the default `MODEL_HOST`.
-`qwen2.5:0.5b` also works but answers the memory question in beat 6 badly.
+A kind node reaches the host at `172.18.0.1`, the default `MODEL_HOST`, if
+the host lets it: on a firewalled host the input chain needs an allowance for
+the model port from the kind bridge. `qwen2.5:0.5b` also works but answers the
+memory question in beat 6 badly.
+
+Two free workers. alice and bob each take one, and the pool in root README
+step 6 has two, so no other actor may be running; `run.sh` checks and
+refuses otherwise. Suspend or delete the others, or raise the pool's replicas.
 
 On PATH: `docker`, `cargo`, `kubectl`, `kubectl-ate` (ahead of any older
 copy), `jq`, `curl`, `grpcurl`, `envsubst`.
@@ -79,8 +85,12 @@ Knobs: `MODEL_HOST` (default `172.18.0.1`), `MODEL_PORT` (`11434`),
 `MODEL_NAME` (`qwen2.5:1.5b`).
 
 The tokens last one hour, OpenShell's maximum for a session token, so run
-`run.sh` within the hour. Running `build.sh` again mints fresh ones; the new
-digests give the template a new name and a new golden snapshot.
+`run.sh` within the hour. `build.sh` reuses the credentials in `out/` while
+they are under 30 minutes old and the model settings are unchanged, so a
+rebuild within that window keeps the same digests and the same template.
+Otherwise it mints again, and the new digests give the template a new name and
+a new golden snapshot in object storage. Templates are never garbage-collected;
+see [Cleanup](#cleanup).
 
 ## Run
 
@@ -98,7 +108,8 @@ watch -n2 'kubectl-ate get actors -a ate-openshell-microvm; echo; kubectl-ate ge
 Knobs: `ATESPACE` (default `ate-openshell-microvm`), `BUCKET_NAME`
 (`ate-snapshots`). The template is named `helpdesk-<hash>` from the three
 image digests, so a rerun with the same images reuses it and beat 1 is
-instant. On exit `run.sh` deletes alice and bob and leaves the template.
+instant. On success `run.sh` deletes alice and bob and leaves the template. On
+failure it keeps both for inspection and prints the delete command.
 
 ## Expected output
 
@@ -161,6 +172,11 @@ ate-openshell-microvm   bob     .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   ..
 ate-openshell-microvm   bob     .../helpdesk-c22183d2   ACTOR_STATE_RUNNING   .../openshell-microvm-f7c4cdbcb-4hdkx   10.244.0.23
 {"reply": "A helpdesk triage agent coordinates and executes tasks ...", "turns": 1}
 ```
+
+Beat 9 says `turns: 1` where beat 6 said `turns: 2`. That is the point of
+the beat, not a bug: a restore is the last snapshot, and alice's last snapshot
+is beat 5's suspend. The turn she took after it died with her host. It is the
+one place the difference between a snapshot and a live process is visible.
 
 `uptime_seconds` counts from the golden actor's boot, because `booted` was
 set before the snapshot and every actor inherits it. `turns` is the evidence
@@ -241,7 +257,8 @@ workload trusts. A durable-dir volume works because those are `0777`.
 
 ## Cleanup
 
-`run.sh` deletes alice and bob on exit. Templates stay:
+`run.sh` deletes alice and bob when it succeeds. Templates stay, and each
+one holds a golden snapshot in the bucket:
 
 ```sh
 kubectl-ate get actor-template -a ate-openshell-microvm

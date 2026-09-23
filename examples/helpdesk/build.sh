@@ -18,14 +18,21 @@ OUT=${REPO}/out
 CTX=${OUT}/helpdesk
 mkdir -p "${OUT}" "${CTX}/files/supervisor"
 
-# Credentials (root README steps 4 and 5).
-[[ -f "${OUT}/signing.key.pem" ]] || {
-  openssl genpkey -algorithm ed25519 -out "${OUT}/signing.key.pem"
-  openssl pkey -in "${OUT}/signing.key.pem" -pubout -out "${OUT}/signing.pub.pem"
-}
-BOOTSTRAP_CHILD_ENV="OPENAI_BASE_URL=http://${MODEL_HOST}:${MODEL_PORT}/v1,HELPDESK_MODEL=${MODEL_NAME}" \
-  cargo run -q --manifest-path "${REPO}/harness/bootstrap-gen/Cargo.toml" -- "${OUT}"
-"${REPO}/harness/scripts/package-credentials.sh" "${OUT}" "${REGISTRY}/openshell-sandbox:dev" "${REGISTRY}" >/dev/null
+# Credentials (root README steps 4 and 5). Reused while under 30 minutes old
+# and minted for the same model settings; a mint means a new template.
+CHILD_ENV="OPENAI_BASE_URL=http://${MODEL_HOST}:${MODEL_PORT}/v1,HELPDESK_MODEL=${MODEL_NAME}"
+if [[ -n $(find "${OUT}/bootstrap.json" -mmin -30 2>/dev/null) ]] &&
+   grep -qxF "CHILD_ENV=${CHILD_ENV}" "${OUT}/helpdesk.env" 2>/dev/null; then
+  echo "reusing the credentials in ${OUT}"
+else
+  [[ -f "${OUT}/signing.key.pem" ]] || {
+    openssl genpkey -algorithm ed25519 -out "${OUT}/signing.key.pem"
+    openssl pkey -in "${OUT}/signing.key.pem" -pubout -out "${OUT}/signing.pub.pem"
+  }
+  BOOTSTRAP_CHILD_ENV="${CHILD_ENV}" \
+    cargo run -q --manifest-path "${REPO}/harness/bootstrap-gen/Cargo.toml" -- "${OUT}"
+  "${REPO}/harness/scripts/package-credentials.sh" "${OUT}" "${REGISTRY}/openshell-sandbox:dev" "${REGISTRY}" >/dev/null
+fi
 
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
 cp "${HERE}"/{Dockerfile,agent.py,relay.py} "${OUT}/bootstrap.tar" "${CTX}/"
@@ -48,5 +55,6 @@ SUPERVISOR_IMAGE=$(digest "${REGISTRY}/openshell-supervisor:dev")
 BOOTSTRAP_FILES_IMAGE=$(digest "${REGISTRY}/openshell-bootstrap-files:dev")
 MODEL_HOST=${MODEL_HOST}
 MODEL_PORT=${MODEL_PORT}
+CHILD_ENV=${CHILD_ENV}
 ENV
 cat "${OUT}/helpdesk.env"

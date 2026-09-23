@@ -49,10 +49,23 @@ under() {  # pattern [namespace selector source]: matching log lines since the b
       else empty end' 2>/dev/null | grep -E "$1" | cut -c1-220 | awk '!seen[$0]++' || true
 }
 
+free=$(kubectl-ate get workers -o json |
+  jq '[.workers[] | select(.status.state == "WORKER_STATE_ACTIVE" and (.status.allocated.actors // 0) == 0)] | length')
+(( free >= 2 )) || { echo "need two free workers, have ${free}: suspend or delete other actors, or raise the pool's replicas" >&2; exit 1; }
+
+cleanup() {
+  local rc=$?
+  if (( rc == 0 )); then
+    for a in alice bob; do kubectl-ate delete actor -a "${ATESPACE}" --any-state "$a" >/dev/null 2>&1 || true; done
+  else
+    printf "\nkept alice and bob for inspection: kubectl-ate delete actor -a %s --any-state <name>\n" "${ATESPACE}" >&2
+  fi
+  kill $(jobs -p) 2>/dev/null; rm -rf "${WORK}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 kubectl port-forward -n ate-system svc/atenet-router 8001:8081 >/dev/null 2>&1 &
 kubectl port-forward -n ate-system svc/api 8443:443 >/dev/null 2>&1 &
-trap 'for a in alice bob; do kubectl-ate delete actor -a "${ATESPACE}" --any-state "$a" >/dev/null 2>&1 || true; done
-      kill $(jobs -p) 2>/dev/null; rm -rf "${WORK}"' EXIT
 kubectl create token ate-client -n ate-system --audience api.ate-system.svc --duration=1h > "${WORK}/token"
 kubectl get clustertrustbundle servicedns.podcert.ate.dev:identity:primary-bundle \
   -o jsonpath='{.spec.trustBundle}' > "${WORK}/ca.crt"
