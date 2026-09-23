@@ -13,9 +13,16 @@ gates, consumes its bootstrap, and opens its boundary control listener;
 `openshell-supervisor` supervises it. The two-container actor completes
 create → golden snapshot → resume → suspend → resume.
 
-It does **not** run under gVisor and cannot — see [gVisor](#gvisor-does-not-work).
-That makes micro-VM the only option, so the host needs **nested virtualisation**
-(`/dev/kvm`); a cloud VM without it cannot run the sandbox at all.
+It does **not** run under gVisor, because OpenShell's native Linux backend is
+built on two kernel features gVisor does not implement — see
+[gVisor](#gvisor-does-not-work). That makes micro-VM the only option today, so
+the host needs **nested virtualisation** (`/dev/kvm`); a cloud VM without it
+cannot run the sandbox at all.
+
+A gVisor path does exist, but it means writing a second isolation backend
+against gVisor's own primitives rather than porting the Linux one. Two of its
+four legs are measured working on a real cluster. See
+[What unblocking gVisor would actually take](#what-unblocking-gvisor-would-actually-take).
 
 Getting there needed six commits in Substrate and a one-line kata kernel change.
 None are merged upstream; [`docs/upstream-branches.md`](docs/upstream-branches.md)
@@ -77,6 +84,8 @@ docs/                 upstream branch index
 harness/
   bootstrap-gen/      mints the Ed25519/JWT/TLS bundle the binaries require
   capability-probe/   Go probe for uid, caps, seccomp, Landlock, task memory
+  redirect-probe/     proves iptables nat REDIRECT works inside a gVisor actor
+  seccheck-server/    consumes gVisor's remote trace sink from outside a sandbox
   images/             derived sandbox image, and the non-root probe image
   manifests/          ActorTemplate / WorkerPool templates (gVisor and micro-VM)
   scripts/            guest-kernel build + staging, version retargeting
@@ -496,27 +505,43 @@ native backend's own evidence schema, not the common runtime.
 
 A gVisor backend would map the same properties onto different mechanisms:
 
-| Property | Native Linux backend | gVisor equivalent |
-|---|---|---|
-| filesystem confinement | Landlock ABI ≥ 3 | sentry-enforced OCI mounts, read-only and masked paths |
-| syscall mediation | seccomp user notification | `seccheck` sink, or `SECCOMP_RET_TRACE` + `PTRACE_O_TRACESECCOMP` |
-| socket virtualization | `SECCOMP_IOCTL_NOTIF_ADDFD` | iptables `nat` `REDIRECT` (**measured working**, below) |
-| same-UID self-protection | Landlock baseline hiding `/.openshell` | supervisor runs outside the sandbox; nothing to hide |
+| Property | Native Linux backend | gVisor equivalent | Status |
+|---|---|---|---|
+| filesystem confinement | Landlock ABI ≥ 3 | sentry-enforced OCI mounts, read-only and masked paths | not tested |
+| syscall observation | seccomp user notification | `seccheck` remote sink | **measured working** |
+| syscall denial | seccomp user notification | `seccheck` sink error | source-verified; needs a sentry change |
+| socket virtualization | `SECCOMP_IOCTL_NOTIF_ADDFD` | iptables `nat` `REDIRECT` | **measured working** |
+| same-UID self-protection | Landlock baseline hiding `/.openshell` | supervisor runs outside the sandbox; nothing to hide | design |
 
 The last row is the useful one. The Landlock baseline exists only because
 supervisor and workload share a UID inside one sandbox. Move the boundary
 outside the gVisor sandbox and the requirement disappears instead of being
 downgraded — which is the objection that sank #1549.
 
-**`seccheck` is gVisor's syscall mediation hook.** `pkg/sentry/seccheck` fires
-synchronous checkpoints and its `Sink` interface is error-returning: *"if the
-method ... returns a non-nil error ... it causes the checked operation to fail
-immediately"*. That already works — `task_exec.go:225`, `task_clone.go:413` and
-`sys_mmap.go:418` all honor it, and `sys_mmap.go` returns the sink error
-straight out as the syscall's errno. The four generic syscall points
-(`task_syscall.go:109,126,181,201`) call `SentToSinks` and discard the result,
-so making them deny is a small change. The shipped `remote` sink is write-only
-(`sinks/remote/remote.go`), so a verdict-returning sink would be new work.
+**`seccheck` is gVisor's syscall mediation hook, and it works here — measured.**
+`pkg/sentry/seccheck` fires synchronous checkpoints and its `Sink` interface is
+error-returning: *"if the method ... returns a non-nil error ... it causes the
+checked operation to fail immediately"*. That already works —
+`task_exec.go:225`, `task_clone.go:413` and `sys_mmap.go:418` all honor it, and
+`sys_mmap.go` returns the sink error straight out as the syscall's errno. The
+four generic syscall points (`task_syscall.go:109,126,181,201`) call
+`SentToSinks` and discard the result, so making them deny is a small change.
+
+The observation half needs no gVisor change at all. `harness/seccheck-server`
+attached to a live actor and watched its syscalls from outside the sandbox:
+
+```
+Trace session "Default" created.      SECCHECK handshake: OK
+  Sink: "remote", dropped: 6          SECCHECK points type=2 count=9
+                                      SECCHECK points type=6 count=9
+```
+
+`type=2` is `MESSAGE_SENTRY_CLONE` and `type=6` is `MESSAGE_SYSCALL_RAW`: one
+fork and one `nanosleep` per iteration of the actor's `while true; do sleep 1;
+done`, over about twelve seconds. The shipped `remote` sink is write-only
+(`sinks/remote/remote.go`), so a verdict-returning sink is still new work — but
+the checkpoints fire, the transport works, and an out-of-sandbox supervisor can
+already see everything the workload does.
 
 **Implementing guest seccomp user notification in gVisor** is the other option
 and is bounded: the ABI structs (`SeccompNotif`, `SeccompNotifResp`,

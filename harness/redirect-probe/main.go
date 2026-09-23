@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -174,7 +175,11 @@ func main() {
 }
 
 // hold keeps the container alive so the actor can be snapshotted and the logs
-// read; a container that exits takes its actor down with it.
+// read; a container that exits takes its actor down with it. A bare select{}
+// does not work: the Go runtime spots that every goroutine is asleep and aborts
+// with "all goroutines are asleep - deadlock!".
 func hold() {
-	select {}
+	for {
+		time.Sleep(time.Hour)
+	}
 }

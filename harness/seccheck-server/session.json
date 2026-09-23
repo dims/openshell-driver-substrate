@@ -1,0 +1,18 @@
+{
+  "trace_session": {
+    "name": "Default",
+    "points": [
+      {"name": "container/start", "context_fields": ["container_id", "process_name"]},
+      {"name": "sentry/clone"},
+      {"name": "syscall/sysno/35/enter", "context_fields": ["process_name"]},
+      {"name": "syscall/sysno/202/enter", "context_fields": ["process_name"]},
+      {"name": "syscall/sysno/1/enter", "context_fields": ["process_name"]},
+      {"name": "syscall/sysno/281/enter", "context_fields": ["process_name"]},
+      {"name": "syscall/openat/enter", "context_fields": ["process_name"]}
+    ],
+    "ignore_missing": true,
+    "sinks": [
+      {"name": "remote", "config": {"endpoint": "/var/lib/ateom-gvisor/trace.sock"}}
+    ]
+  }
+}
