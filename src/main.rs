@@ -27,12 +27,8 @@ struct Args {
     #[arg(long, env = "SUBSTRATE_ATESPACE", default_value = "default")]
     atespace: String,
 
-    /// Cluster-provisioned SandboxConfig object name (gVisor binaries).
-    #[arg(
-        long,
-        env = "SUBSTRATE_SANDBOX_CONFIG",
-        default_value = "gvisor-default"
-    )]
+    /// Cluster-provisioned SandboxConfig object name (micro-VM assets).
+    #[arg(long, env = "SUBSTRATE_SANDBOX_CONFIG", default_value = "microvm")]
     sandbox_config_name: String,
 
     /// Object-storage prefix for synthesized ActorTemplates' snapshots.

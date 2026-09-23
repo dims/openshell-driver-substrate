@@ -108,7 +108,7 @@ pub struct SubstrateComputeConfig {
     /// atespace can't be resolved for those calls anyway.
     pub atespace: String,
     /// Name of the cluster-provisioned `SandboxConfig` object supplying
-    /// the gVisor binaries every synthesized `ActorTemplate` references.
+    /// the micro-VM assets every synthesized `ActorTemplate` references.
     /// Operators provision this once per cluster; the driver never
     /// creates it.
     pub sandbox_config_name: String,
@@ -144,7 +144,7 @@ impl Default for SubstrateComputeConfig {
         Self {
             api_endpoint: String::from("127.0.0.1:8080"),
             atespace: String::from("default"),
-            sandbox_config_name: String::from("gvisor-default"),
+            sandbox_config_name: String::from("microvm"),
             snapshots_location: String::from("gs://openshell-ate-snapshots/"),
             template_ready_timeout_secs: 180,
             gateway_endpoint: String::new(),

@@ -1,6 +1,6 @@
 # Upstream changes
 
-Nothing here is merged upstream yet. Until PRs exist, these branches are the
+Nothing here is merged upstream. Until PRs exist, these branches are the
 only copies.
 
 ## agent-substrate/substrate
@@ -16,7 +16,7 @@ could run at all, on either sandbox class.
 | Commit | Change |
 |---|---|
 | `cf699047` | `atelet`: honor a container image's own `USER` when building its OCI spec. `ocispec.Options` gains `UID`/`GID`, resolved by `resolveUser`. Numeric `uid[:gid]` only; a named user is a hard error, not a silent fall-back to root. `TestResolveUser`. |
-| `cbb8405e` | `atelet`: keep the pause container root regardless of its image's `USER`. Fallout of the above — `registry.k8s.io/pause:3.10.2` declares `USER 65535:65535` and gVisor's sandbox init cannot boot under it. |
+| `cbb8405e` | `atelet`: keep the pause container root regardless of its image's `USER`. Fallout of the above — `registry.k8s.io/pause:3.10.2` declares `USER 65535:65535` and the sandbox init cannot boot under it. |
 | `73fe6062` | `imagecache`: make the merged rootfs root searchable by non-root containers. `rootfs`/`upper` were `0700`, so a non-root process could not search its own `/`. `TestSetupBundleRootfs_RootIsSearchableByNonRoot`. |
 | `4fc5d550` | `ocispec`: set `no_new_privileges` on actor containers. |
 | `f63c6ec0` | `atelet`: make durable-dir volumes writable by non-root containers (`0777`, as Kubernetes gives an emptyDir). |
@@ -28,9 +28,8 @@ Two of these change behaviour for existing workloads and should be called out
 in any PR:
 
 - `4fc5d550` is unconditional and there is no `SecurityContext` field to opt
-  out. Under gVisor it is a no-op (runsc already runs with `--allow-suid`
-  disabled); on micro-VM the kata agent enforces it, so a workload relying on
-  setuid inside its sandbox would change behaviour.
+  out. The kata agent enforces it, so a workload relying on setuid inside its
+  sandbox would change behaviour.
 - `f63c6ec0` makes durable-dir volumes world-writable. That is what Kubernetes
   does for an emptyDir, and the volume is per-actor inside a sandbox, but it is
   a deliberate choice worth stating.
@@ -59,18 +58,4 @@ enabling a kernel option that a guest workload needs.
 
 **No changes.** The driver depends on upstream unmodified (`openshell-core`,
 pinned by rev in `Cargo.toml`), and the sandbox and supervisor binaries in the
-images are stock. Nothing found in this work needs an OpenShell patch to run on
-the micro-VM backend.
-
-The one thing that *would* need upstream is gVisor support, and it is not a
-small patch: `openshell-sandbox` hard-requires Landlock ABI ≥ 3 and gVisor
-implements no Landlock at all. That needs a degraded qualification mode in
-which an outer sandbox is the enforcing boundary — the argument
-[#1549](https://github.com/NVIDIA/OpenShell/pull/1549) made, which NVIDIA
-closed unmerged. See the README for the history.
-
-## google/gvisor
-
-**No changes.** gVisor is used stock, from the upstream nightly the Substrate
-`SandboxConfig` pins. It cannot host `openshell-sandbox` (no Landlock), but
-that is a missing feature rather than something a patch here fixes.
+images are stock.

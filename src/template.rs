@@ -116,7 +116,7 @@ pub fn synthesize(
             storage_location: config.snapshots_location.clone(),
         }),
         sandbox_config: Some(ateapi::SandboxConfig {
-            sandbox_class: ateapi::SandboxClass::Gvisor as i32,
+            sandbox_class: ateapi::SandboxClass::Microvm as i32,
             config_name: config.sandbox_config_name.clone(),
         }),
         resources: None,

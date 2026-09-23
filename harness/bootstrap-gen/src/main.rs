@@ -75,7 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let evidence = SubstrateOuterFenceEvidence {
         generation: generation_str,
-        backend: "gvisor",
+        backend: "microvm",
     };
     let encoded = serde_json::to_vec(&evidence)?;
     let outer_fence = OuterFenceGuarantees::from_enforcement_evidence(

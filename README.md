@@ -7,18 +7,17 @@ harness needed to reproduce a working end-to-end run.
 OpenShell's per-request sandbox becomes a Substrate actor, so it can be
 snapshotted and resumed instead of cold-started.
 
-**Status:** the real, unpatched OpenShell runs on Substrate's **micro-VM**
-backend. `openshell-sandbox` passes all seven of its runtime-qualification
-gates, consumes its bootstrap, and opens its boundary control listener;
+The real, unpatched OpenShell runs on Substrate's **micro-VM** sandbox class.
+`openshell-sandbox` passes all seven of its runtime-qualification gates,
+consumes its bootstrap, and opens its boundary control listener;
 `openshell-supervisor` supervises it. The two-container actor completes
 create → golden snapshot → resume → suspend → resume.
 
-It does **not** run under gVisor and cannot — see [gVisor](#gvisor-does-not-work).
-That makes micro-VM the only option, so the host needs **nested virtualisation**
-(`/dev/kvm`); a cloud VM without it cannot run the sandbox at all.
+Micro-VM needs real virtualisation, so the host needs **nested virt**
+(`/dev/kvm`). A cloud VM without it cannot run the sandbox.
 
-Getting there needed six commits in Substrate and a one-line kata kernel change.
-None are merged upstream; [`docs/upstream-branches.md`](docs/upstream-branches.md)
+Six commits in Substrate and a one-line kata kernel change are required and
+none are merged upstream. [`docs/upstream-branches.md`](docs/upstream-branches.md)
 is the index of where they live.
 
 ---
@@ -56,7 +55,8 @@ Substrate's actor lifecycle:
 
 One `ActorTemplate` is reused for every actor with the same image and command —
 its name is a content hash of those two fields — so only the first
-`create_sandbox` for a workload pays for a golden-snapshot build.
+`create_sandbox` for a workload pays for a golden-snapshot build. Synthesized
+templates are `SANDBOX_CLASS_MICROVM` and name the `microvm` SandboxConfig.
 
 The driver registers out of process over a Unix socket, exactly as OpenShell's
 in-tree `openshell-driver-podman` / `-docker` / `-kubernetes` / `-vm` binaries
@@ -76,9 +76,8 @@ tests/live.rs         full lifecycle against a real cluster
 docs/                 upstream branch index
 harness/
   bootstrap-gen/      mints the Ed25519/JWT/TLS bundle the binaries require
-  capability-probe/   Go probe for uid, caps, seccomp, Landlock, task memory
-  images/             derived sandbox image, and the non-root probe image
-  manifests/          ActorTemplate / WorkerPool templates (gVisor and micro-VM)
+  images/             derived sandbox image with its bootstrap baked in
+  manifests/          ActorTemplate / WorkerPool templates
   scripts/            guest-kernel build + staging, version retargeting
 ```
 
@@ -100,25 +99,19 @@ reachable `ate-api-server` and is ignored by default.
 
 ### 0. Prerequisites
 
-A Linux host with **`/dev/kvm`**. The micro-VM backend is the only sandbox
-class the OpenShell sandbox runs on, and it needs real virtualisation — a cloud
-VM without nested virt will not do. Check before anything else:
+A Linux host with **`/dev/kvm`**. Check before anything else:
 
 ```sh
 ls /dev/kvm && grep -oE 'vmx|svm' /proc/cpuinfo | head -1
 ```
-
-If that comes up empty you can still run everything in
-[Debugging](#debugging) on gVisor, but not the OpenShell sandbox itself.
 
 Then:
 
 ```sh
 sudo apt-get install -y build-essential protobuf-compiler pkg-config \
                        libssl-dev jq gettext-base          # envsubst
-# docker, go, rust, kubectl, kind
 curl -fsSL https://sh.rustup.rs | sh -s -- -y
-# go >= 1.23, kubectl, kind from their upstream installers
+# go >= 1.23, docker, kubectl, kind from their upstream installers
 ```
 
 `ko` does **not** need installing separately — Substrate vendors it and every
@@ -136,7 +129,7 @@ export GOFLAGS=-buildvcs=false
 ```
 
 On a **fresh** cluster the node is labelled with the build version
-automatically, so no retargeting is needed. That only applies after a rebuild
+automatically. Retargeting only applies after a rebuild
 (see [Retargeting](#retargeting-after-a-rebuild)).
 
 Without these commits:
@@ -148,9 +141,6 @@ Without these commits:
 - `no_new_privs` is never set, and sysctls never reach the guest.
 
 ### 2. Install the micro-VM backend
-
-Requires `/dev/kvm` on the node (§0). Without nested virt, stop here — the
-sandbox cannot run, and only the gVisor parts in [Debugging](#debugging) apply.
 
 From the Substrate repo:
 
@@ -247,9 +237,8 @@ kubectl-ate resume  actor -a "${ATESPACE}" osh-1     # -> ACTOR_STATE_RUNNING
 ```
 
 **Actor state is not proof the containers are alive.** The golden-snapshot
-warmup does not verify it. Under gVisor a dead sub-container surfaces later as
-an inconsistent-checkpoint restore failure; under micro-VM it does not surface
-at all, because the snapshot is whole-VM memory — an actor reaches
+warmup does not verify it, and a micro-VM snapshot is whole-VM memory, so a
+dead container never surfaces as a restore failure — an actor reaches
 `ACTOR_STATE_RUNNING` with a dead container inside it. Always check container
 output.
 
@@ -276,56 +265,19 @@ A passing run reports `"qualified":true` with `landlock_abi: 7`,
 `run_boundary` calls `qualify_runtime()` unconditionally, and the result is
 passed into `openshell_sandbox::run()` — it is not a check that can be skipped.
 
-| # | Gate | gVisor | micro-VM |
-|---|---|---|---|
-| 1 | non-root UID **and** GID | needs the Substrate fixes | pass |
-| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` | pass |
-| 3 | `no_new_privs == 1` | needs `4fc5d550` | pass |
-| 4 | same-UID task-memory probe | — | pass |
-| 5 | Landlock allow/deny | **fails: no Landlock** | pass (needs a writable `/tmp`) |
-| 6 | seccomp notification | — | pass (needs the kernel rebuild) |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | — | pass (needs `33397540`) |
+| # | Gate | What it needs |
+|---|---|---|
+| 1 | non-root UID **and** GID | `cf699047`, and an image that declares `USER` |
+| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
+| 3 | `no_new_privs == 1` | `4fc5d550` |
+| 4 | same-UID task-memory probe | the kernel rebuild |
+| 5 | Landlock allow/deny | a writable `/tmp` |
+| 6 | seccomp notification | the kernel rebuild |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | `33397540` |
 
 Gate 5 needs `/tmp` because the Landlock probe builds its test tree under
 `std::env::temp_dir()`, and the sandbox image contains **exactly one file** —
 the binary. No `/tmp`, no `/etc`, nothing.
-
-### Generic non-root repro
-
-`harness/manifests/nonroot-probe-template.yaml.tmpl` is a busybox image whose
-only distinguishing feature is `USER 1000:1000`. It reproduces the Substrate
-bugs with no OpenShell parts involved, and runs on gVisor — no KVM needed.
-
-```sh
-# the busybox binary MUST be static; busybox:latest's is not (see the Dockerfile)
-docker create --name bb busybox:musl && docker cp bb:/bin/busybox ./busybox && docker rm bb
-docker build -t <registry>/nonroot-probe:dev harness/images/nonroot-probe
-docker push <registry>/nonroot-probe:dev
-
-export ATESPACE=ate-probe BUCKET_NAME=ate-snapshots \
-       SANDBOX_CLASS=SANDBOX_CLASS_GVISOR SANDBOX_CONFIG_NAME=gvisor-default \
-       NONROOT_PROBE_IMAGE=<registry>/nonroot-probe@sha256:... \
-       ATEOM_GVISOR_IMAGE=$(cd <substrate> && ./hack/run-tool.sh ko build ./cmd/ateom-gvisor --platform=linux/amd64 | tail -1) \
-       SUBSTRATE_VERSION=$(kubectl get node <node> -o jsonpath='{.metadata.labels.ate\.dev/substrate-version}')
-
-harness/scripts/render.sh harness/manifests/gvisor-pool.yaml.tmpl | kubectl apply -f -
-kubectl-ate create atespace "${ATESPACE}"
-harness/scripts/render.sh harness/manifests/nonroot-probe-template.yaml.tmpl | kubectl-ate create actor-template -f -
-kubectl-ate create actor np-1 --atespace "${ATESPACE}" --template nonroot-probe
-kubectl-ate resume actor -a "${ATESPACE}" np-1      # -> ACTOR_STATE_RUNNING
-```
-
-Two traps this probe walks into, both of which present as confusing errors:
-a dynamically linked busybox in a `FROM scratch` image fails with
-`failed to load /busybox: no such file or directory`, and a bare `sleep`
-(no applet symlinks, no PATH) exits the container silently, so the golden
-snapshot captures only `_pause` and every resume fails with
-`savedMFOwners = [_pause:/]`.
-
-`harness/capability-probe` reports uid/gid, all five capability sets,
-`no_new_privs`, whether `seccomp(SECCOMP_FILTER_FLAG_NEW_LISTENER)` succeeds,
-and whether `/proc/<pid>/mem` and `process_vm_readv` work before and after
-`PR_SET_DUMPABLE(0)`.
 
 ### Retargeting after a rebuild
 
@@ -364,36 +316,6 @@ option off, the syscall table still emits `__x64_sys_process_vm_readv` as a
 weak alias to `sys_ni_syscall`, so the symbol is present either way. Call the
 syscall and look for `ENOSYS`.
 
-## gVisor does not work
-
-`openshell-sandbox` requires Landlock ABI ≥ 3. gVisor implements no Landlock at
-all: `runsc help syscalls` lists no Landlock rows and its highest implemented
-syscall number is 441, while the Landlock syscalls are 444–446. The ABI
-constants exist in `pkg/abi/linux/landlock.go`, but nothing in `pkg/sentry/` or
-`runsc/` references them. NVIDIA's own merged PR
-[#1585](https://github.com/NVIDIA/OpenShell/pull/1585) says it plainly: *"On
-kernels without Landlock (e.g. gVisor's sentry returns `ENOSYS` for syscall
-444)"*.
-
-This is architectural. No flag, ActorTemplate field, or Substrate change moves
-it.
-
-Upstream history, for anyone tempted to revive the older attempts:
-
-| PR | What it does | State |
-|---|---|---|
-| [#1585](https://github.com/NVIDIA/OpenShell/pull/1585) | Probe Landlock before build, skip on unsupported kernels — logging only | merged |
-| [#1549](https://github.com/NVIDIA/OpenShell/pull/1549) | `--skip-bootstrap` for netns / supervisor-seccomp / workload-seccomp | closed unmerged |
-| [#1548](https://github.com/NVIDIA/OpenShell/pull/1548) | Same idea via an env var | closed unmerged |
-
-None address the qualification gate. #1548 and #1549 targeted the pre-RFC-0012
-architecture, where `openshell-sandbox` *was* the supervisor and the skippable
-steps were netns and seccomp. RFC-0012 split out the separate boundary binary
-and introduced this gate, which made the stack *less* compatible with an outer
-sandbox, not more. Unblocking gVisor needs a degraded qualification mode where
-the outer sandbox is the enforcing boundary — the argument #1549 made, which
-NVIDIA closed.
-
 ## Known gaps
 
 - **Image file ownership is discarded.** Substrate's `unpackLayer` never chowns
@@ -406,6 +328,8 @@ NVIDIA closed.
   packaging workarounds in step 6.
 - **`no_new_privileges` is unconditional**, with no `SecurityContext` field to
   opt out of it.
+- **`SecurityContext` has no `runAsUser`.** A container's identity comes from
+  its image's `Config.User` and nowhere else, so two identities need two images.
 - **`Linux.Seccomp`, `Process.ApparmorProfile` and `SelinuxLabel` are still not
   forwarded** to the kata agent. `Linux.Sysctl` now is, but only Substrate sets
   it — an ActorTemplate cannot.
@@ -417,11 +341,6 @@ NVIDIA closed.
   Every run so far calls the driver's methods directly or applies templates by
   hand. The `--compute-driver-socket` wiring is confirmed to exist and match the
   driver's shape, but has not been exercised end to end.
-
-## History
-
-The previous contents of `main` — an earlier proof of concept built against
-APIs that have since changed — are preserved on the `old-main` branch.
 
 ## License
 
