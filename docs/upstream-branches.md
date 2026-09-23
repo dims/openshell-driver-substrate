@@ -77,28 +77,23 @@ under `SANDBOX_CLASS_GVISOR` on Substrate.
 
 Default behaviour is unchanged and an unrecognized mode is an error.
 
-### Previously
-
-**No changes were needed for micro-VM.** The driver depends on upstream unmodified (`openshell-core`,
-pinned by rev in `Cargo.toml`), and the sandbox and supervisor binaries in the
-images are stock. Nothing found in this work needs an OpenShell patch to run on
-the micro-VM backend.
-
-gVisor support would need upstream work, but the bulk of it is not OpenShell's.
-`openshell-sandbox` brokers syscalls through a seccomp user notification
-listener, and gVisor does not implement that action at all. No OpenShell change
-substitutes for it. A degraded qualification mode — the argument
-[#1549](https://github.com/NVIDIA/OpenShell/pull/1549) made, which NVIDIA
-closed unmerged — would clear the Landlock gate and then stop at the seccomp
-one. See the README for the measurements.
+**Micro-VM needs none of this.** There the binaries are stock and
+`openshell-core` is a plain git dependency pinned by rev.
 
 ## google/gvisor
 
 **No changes.** gVisor is used stock, from the upstream nightly the Substrate
 `SandboxConfig` pins.
 
-It cannot host `openshell-sandbox`, and this is where the real gap sits. The
-sentry implements no `SECCOMP_RET_USER_NOTIF` and accepts only
-`SECCOMP_FILTER_FLAG_TSYNC`, so the sandbox's syscall broker cannot be built.
-It also implements no Landlock. Both are missing features, each large enough to
-be its own upstream project; neither is something a patch in this repo fixes.
+The sentry implements no `SECCOMP_RET_USER_NOTIF`, accepts only
+`SECCOMP_FILTER_FLAG_TSYNC`, and implements no Landlock. That is why the
+sandbox needs its own gVisor mode rather than the native-Linux one: neither
+mechanism can be built there, so the egress broker has to be replaced rather
+than ported.
+
+Two smaller gVisor gaps found on the way, neither blocking:
+
+- `SO_ORIGINAL_DST` returns `ENOTCONN` for a dual-stack listener, because
+  `tcp/endpoint.go:2300` passes the socket's protocol to conntrack rather than
+  the connection's. Listening on `tcp4` avoids it; the fix is four lines.
+- procfs has no `net/ipv4/ip_unprivileged_port_start`.
