@@ -145,44 +145,48 @@ func main() {
 		hold()
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		c, err := ln.AcceptTCP()
-		if !step("accept redirected conn", err) {
-			return
-		}
-		defer c.Close()
-		dst, err := originalDst(c)
+	// Loop rather than run once. The golden snapshot captures the container
+	// after its first pass, so a one-shot probe prints nothing on restore.
+	for round := 0; ; round++ {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c, err := ln.AcceptTCP()
+			if err != nil {
+				fmt.Printf("REDIR #%d accept: FAIL %v\n", round, err)
+				return
+			}
+			defer c.Close()
+			dst, err := originalDst(c)
+			if err != nil {
+				fmt.Printf("REDIR #%d SO_ORIGINAL_DST: FAIL %v\n", round, err)
+				return
+			}
+			want := fmt.Sprintf("%s:%d", targetIP, targetPort)
+			if dst != want {
+				fmt.Printf("REDIR #%d SO_ORIGINAL_DST: WRONG got=%s want=%s\n", round, dst, want)
+				return
+			}
+			fmt.Printf("REDIR #%d redirected+recovered: OK got=%s\n", round, dst)
+		}()
+
+		c, err := net.Dial("tcp", fmt.Sprintf("%s:%d", targetIP, targetPort))
 		if err != nil {
-			fmt.Printf("REDIR SO_ORIGINAL_DST: FAIL %v\n", err)
-			return
+			fmt.Printf("REDIR #%d connect: FAIL %v\n", round, err)
 		}
-		want := fmt.Sprintf("%s:%d", targetIP, targetPort)
-		if dst != want {
-			fmt.Printf("REDIR SO_ORIGINAL_DST: WRONG got=%s want=%s\n", dst, want)
-			return
+		// Hold the client open until the server has read SO_ORIGINAL_DST.
+		<-done
+		if err == nil {
+			c.Close()
 		}
-		fmt.Printf("REDIR SO_ORIGINAL_DST: OK got=%s\n", dst)
-	}()
-
-	c, err := net.Dial("tcp", fmt.Sprintf("%s:%d", targetIP, targetPort))
-	ok := step("connect to unrouted target", err)
-	// Hold the client open until the server has read SO_ORIGINAL_DST. Closing
-	// first tears the endpoint down and the option reads back ENOTCONN.
-	<-done
-	if ok {
-		c.Close()
+		time.Sleep(20 * time.Second)
 	}
-
-	fmt.Println("REDIR done")
-	hold()
 }
 
-// hold keeps the container alive so the actor can be snapshotted and the logs
-// read; a container that exits takes its actor down with it. A bare select{}
-// does not work: the Go runtime spots that every goroutine is asleep and aborts
-// with "all goroutines are asleep - deadlock!".
+// hold keeps the container alive after a setup failure, so the actor can still
+// be snapshotted and the logs read; a container that exits takes its actor down
+// with it. A bare select{} does not work: the Go runtime spots that every
+// goroutine is asleep and aborts with "all goroutines are asleep - deadlock!".
 func hold() {
 	for {
 		time.Sleep(time.Hour)

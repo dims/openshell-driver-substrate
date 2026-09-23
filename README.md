@@ -568,9 +568,12 @@ REDIR CapEff: 0000000020003420
 REDIR IPT_SO_GET_INFO filter: OK
 REDIR IPT_SO_GET_INFO nat: OK
 REDIR install nat REDIRECT (iptables-legacy): OK
-REDIR connect to unrouted target: OK
-REDIR accept redirected conn: OK
+REDIR #0 redirected+recovered: OK got=203.0.113.7:9999
+REDIR #1 redirected+recovered: OK got=203.0.113.7:9999
 ```
+
+The probe loops, because the golden snapshot captures the container after its
+first pass and a one-shot probe prints nothing on restore.
 
 A connection to `203.0.113.7:9999`, an address nothing listens on and nothing
 routes to, is bent to a local listener and accepted. Three things are needed,
