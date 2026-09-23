@@ -1,0 +1,1 @@
+/Users/dsrinivas/go/src/github.com/dims/openshell-driver-substrate/harness/bootstrap-gen/target/release/bootstrap-gen: /Users/dsrinivas/go/src/github.com/dims/openshell-driver-substrate/harness/bootstrap-gen/src/main.rs

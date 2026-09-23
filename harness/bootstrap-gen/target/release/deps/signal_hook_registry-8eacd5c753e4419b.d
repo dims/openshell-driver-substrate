@@ -1,0 +1,9 @@
+/Users/dsrinivas/go/src/github.com/dims/openshell-driver-substrate/harness/bootstrap-gen/target/release/deps/signal_hook_registry-8eacd5c753e4419b.d: /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/Users/dsrinivas/go/src/github.com/dims/openshell-driver-substrate/harness/bootstrap-gen/target/release/deps/libsignal_hook_registry-8eacd5c753e4419b.rlib: /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/Users/dsrinivas/go/src/github.com/dims/openshell-driver-substrate/harness/bootstrap-gen/target/release/deps/libsignal_hook_registry-8eacd5c753e4419b.rmeta: /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs /Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs
+
+/Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/lib.rs:
+/Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/half_lock.rs:
+/Users/dsrinivas/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/signal-hook-registry-1.4.8/src/vec_map.rs:

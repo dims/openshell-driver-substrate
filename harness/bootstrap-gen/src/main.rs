@@ -90,7 +90,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     outer_fence.validate(generation_str)?;
 
-    let socket_path = PathBuf::from("/run/openshell/control.sock");
+    // TCP on loopback, not a unix socket on a shared volume. Containers of one
+    // actor share the guest's network namespace, so loopback reaches across
+    // them; a socket on a durable-dir volume does not.
+    let control_port: u16 = 17777;
+    let bind_address = std::net::SocketAddr::from(([0, 0, 0, 0], control_port));
+    let dial_address = std::net::SocketAddr::from(([127, 0, 0, 1], control_port));
 
     let boundary_config = BoundaryConfig {
         boundary_id: sandbox_id_str.to_string(),
@@ -100,8 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_epoch: CredentialEpoch::new(1)?,
         gateway_id: gateway_id.to_string(),
         verification_keys: vec![verification_key_gw],
-        listener: BoundaryListener::Unix {
-            socket_path: socket_path.clone(),
+        listener: BoundaryListener::TlsTcp {
+            address: bind_address,
             tls: SandboxTlsServerConfig {
                 certificate_chain_path: PathBuf::from("/.openshell/channel/sandbox/server.crt"),
                 private_key_path: PathBuf::from("/.openshell/channel/sandbox/server.key"),
@@ -119,7 +124,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generation: generation_str.to_string(),
         session_id,
         workload_identity,
-        transport: SandboxTransport::Unix { socket_path },
+        transport: SandboxTransport::Tcp {
+            authority: tls.server_name.clone(),
+            addresses: vec![dial_address],
+        },
         tls: SandboxTlsClientConfig {
             server_name: tls.server_name.clone(),
             trust_anchor_pem: tls.trust_anchor_pem.clone(),
