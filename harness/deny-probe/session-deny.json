@@ -1,0 +1,12 @@
+{
+  "trace_session": {
+    "name": "Default",
+    "points": [
+      {"name": "syscall/sysno/63/enter"}
+    ],
+    "ignore_missing": true,
+    "sinks": [
+      {"name": "deny", "config": {"sysno": 63}}
+    ]
+  }
+}

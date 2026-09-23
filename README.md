@@ -510,7 +510,7 @@ A gVisor backend would map the same properties onto different mechanisms:
 | filesystem confinement | Landlock ABI ≥ 3 | sentry-enforced OCI mounts, read-only and masked paths | not tested |
 | syscall observation | seccomp user notification | `seccheck` remote sink | **measured working** |
 | syscall denial | seccomp user notification | `seccheck` sink error | source-verified; needs a sentry change |
-| socket virtualization | `SECCOMP_IOCTL_NOTIF_ADDFD` | iptables `nat` `REDIRECT` | **measured working** |
+| socket virtualization | `SECCOMP_IOCTL_NOTIF_ADDFD` | iptables `nat` `REDIRECT` + `SO_ORIGINAL_DST` | **measured working** |
 | same-UID self-protection | Landlock baseline hiding `/.openshell` | supervisor runs outside the sandbox; nothing to hide | design |
 
 The last row is the useful one. The Landlock baseline exists only because
@@ -590,12 +590,37 @@ and each fails in a way that names the wrong cause:
    `Failed to initialize nft: Protocol not supported`. Debian still ships
    `iptables-legacy`; Alpine 3.21 does not ship it at all.
 
-One gap remains: `SO_ORIGINAL_DST` returns `ENOTCONN`. gVisor implements the
-option (`netstack.go:1799`) but resolves it through conntrack, and an
-`OUTPUT`-chain redirect leaves no tracked connection
-(`conntrack.go:939-941`). That matters only for a protocol-agnostic proxy;
-OpenShell's supervisor proxies HTTP, which carries its own destination in the
-request line or `CONNECT`.
+### The `SO_ORIGINAL_DST` trap: listen on `tcp4`
+
+A proxy that needs the pre-redirect destination must create its listener as
+**AF_INET**. In Go that means `net.Listen("tcp4", ...)`, not `"tcp"`.
+
+With a dual-stack listener, `getsockopt(SOL_IP, SO_ORIGINAL_DST)` returns
+`ENOTCONN` on gVisor. This is a gVisor bug, not a limit of the approach.
+`tcp/endpoint.go:2300` passes `e.NetProto` — the protocol the *socket* was
+created with — into the conntrack lookup:
+
+```go
+addr, port, err := ipt.OriginalDst(e.TransportEndpointInfo.ID, e.NetProto, ProtocolNumber)
+```
+
+A wildcard `net.Listen("tcp", ...)` gives an AF_INET6 dual-stack socket, so an
+accepted IPv4 connection carries `NetProto = IPv6` alongside 4-byte IPv4
+addresses (`accept.go:195-211`). `netProto` is hashed into the conntrack bucket
+index (`conntrack.go:796-810`), so the lookup searches the wrong bucket and
+misses. `effectiveNetProtos` already holds the right value and is ignored.
+
+Verified against netstack directly: an AF_INET listener resolves
+`203.0.113.7:9999` correctly; only the dual-stack case fails. The fix upstream
+is four lines, using `e.effectiveNetProtos[0]`, which `accept.go:211` sets to
+exactly one entry. It appears unreported — gVisor's own `NATOutOriginalDst`
+never pairs an AF_INET6 socket with an IPv4 connection
+(`test/iptables/nat.go:601-605`), so CI does not cover it.
+
+Three things that look like alternatives and are not: PREROUTING never sees
+sandbox-originated traffic (`ipv4.go:962` skips it for local packets), TPROXY
+is not implemented, and `IP_TRANSPARENT` returns success while doing nothing
+(`netstack.go:2972-3009`).
 
 ## Known gaps
 

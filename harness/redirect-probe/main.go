@@ -11,6 +11,8 @@
 // The probe installs the rule, connects to an address nothing is listening on,
 // and reports what the accepting side sees. A successful run proves both halves
 // work in the sentry's netstack.
+//
+// The listener must be AF_INET; see "The SO_ORIGINAL_DST trap" in the README.
 package main
 
 import (
@@ -115,7 +117,10 @@ func main() {
 		}
 	}
 
-	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4zero, Port: proxyPort})
+	// "tcp4", not "tcp". A wildcard "tcp" listen gives a dual-stack AF_INET6
+	// socket, and gVisor then looks conntrack up with the socket's protocol
+	// rather than the connection's, so SO_ORIGINAL_DST returns ENOTCONN.
+	ln, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4zero, Port: proxyPort})
 	if !step("listen proxy", err) {
 		hold()
 	}
