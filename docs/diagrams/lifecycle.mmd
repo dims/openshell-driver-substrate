@@ -1,0 +1,32 @@
+stateDiagram-v2
+  direction LR
+  [*] --> SUSPENDED: CreateActor, holds the golden snapshot
+  SUSPENDED --> RESUMING: ResumeActor (create_sandbox, start_sandbox)
+  RESUMING --> RUNNING: RestoreWorkload done
+  RUNNING --> SUSPENDING: SuspendActor (stop_sandbox)
+  SUSPENDING --> SUSPENDED: CheckpointWorkload done, worker freed
+  RUNNING --> CRASHED: worker pod gone, syncer releases the actor
+  CRASHED --> REVERTING: RevertActor (kubectl-ate revert)
+  REVERTING --> SUSPENDED: back at the last external snapshot
+  RUNNING --> DELETING: DeleteActor any_state (delete_sandbox)
+  SUSPENDED --> DELETING: DeleteActor
+  CRASHED --> DELETING: DeleteActor
+  DELETING --> [*]
+
+  note right of RUNNING
+    gateway phase Ready
+    Ready=True, reason ContainerRunning
+  end note
+  note right of SUSPENDED
+    gateway phase Stopped
+    Suspended=True and Ready=False (ContainerStopped)
+  end note
+  note left of RESUMING
+    gateway phase Provisioning
+    Bootstrapping=True and Ready=False (ContainerStarting)
+  end note
+  note right of CRASHED
+    gateway phase Error
+    Ready=False (ContainerExited)
+    resume is refused, revert or delete
+  end note

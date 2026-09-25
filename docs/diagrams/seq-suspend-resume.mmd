@@ -1,0 +1,26 @@
+sequenceDiagram
+  autonumber
+  participant OP as kubectl-ate or gateway
+  participant API as ate-api-server
+  participant AT as atelet
+  participant AM as ateom-microvm
+  participant S as object store
+
+  OP->>API: SuspendActor(alice)
+  Note over OP,API: RUNNING → SUSPENDING
+  API->>AT: Checkpoint
+  AT->>AM: CheckpointWorkload
+  AM->>AM: pause the VM, dump guest memory, tar rootfs upper and durable dirs
+  AM->>S: base-id, config.json, memory-ranges, rootfs-upper.tar, durable-dir.tar, state.json
+  AM->>AM: tear the VM down · "Actor checkpointed"
+  AT->>AT: resetActorDirs (needs CAP_DAC_OVERRIDE for files uid 65532 created)
+  API->>API: SUSPENDED · worker assignment cleared, worker shows 0/1
+  Note over OP,S: nothing runs, the snapshot is the only copy
+  OP->>API: ResumeActor(alice)
+  API->>API: SUSPENDED → RESUMING · pick a free Worker, maybe another pod
+  API->>AT: Restore
+  AT->>AM: RestoreWorkload
+  AM->>S: fetch the snapshot
+  AM->>AM: cloud-hypervisor restore, virtiofs lowers, tap · "Actor restored in ≈ 350 ms"
+  API->>API: RUNNING
+  Note over OP,S: process memory is back: turns and booted as they were

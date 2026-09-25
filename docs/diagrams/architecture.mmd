@@ -1,0 +1,71 @@
+flowchart TB
+  classDef stock fill:#ecfdf5,stroke:#059669,color:#064e3b
+  classDef ours fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px
+  classDef sub fill:#fff7ed,stroke:#ea580c,color:#7c2d12
+  classDef guest fill:#fdf4ff,stroke:#a21caf,color:#701a75
+  classDef store fill:#f1f5f9,stroke:#475569,color:#0f172a
+  classDef edge fill:#f0fdf4,stroke:#16a34a,color:#14532d
+
+  cli["openshell CLI, grpcurl, curl"]
+  kate["kubectl-ate"]
+
+  subgraph openshell["NVIDIA OpenShell (stock)"]
+    gw["openshell-gateway<br/>--compute-driver substrate<br/>--compute-driver-socket"]
+  end
+
+  subgraph repo["this repository"]
+    driver["openshell-driver-substrate<br/>ComputeDriver gRPC server on a Unix socket<br/>a sandbox is an Actor, a workload is one ActorTemplate<br/>named by the hash of its own contents"]
+  end
+
+  subgraph substrate["Substrate control plane"]
+    direction LR
+    ctl["ate-controller<br/>WorkerPool → Deployment of worker pods<br/>syncer: pod ↔ Worker, drain,<br/>release the actors of a dead pod"]
+    api["ate-api-server<br/>ateapi.Control, gRPC over TLS 1.3 + bearer token<br/>ActorTemplate, Actor, Worker, EgressPolicy, Tag<br/>workflows: resume, suspend, revert, delete"]
+    pg[("postgres")]
+    recon["template reconciler<br/>golden actor: boot, wait 20 s,<br/>checkpoint, tag"]
+    ctl --> api
+    api --- pg
+    api --> recon
+  end
+
+  router["atenet router, ingress<br/>CONNECT tunnel on :8081<br/>ate-target-actor: atespace/name"]
+
+  atelet["atelet, DaemonSet, one per node, versioned<br/>pulls images by digest, builds OCI specs, durable dirs<br/>AteomHerder: Run, Checkpoint, Restore"]
+
+  subgraph pod["worker pod"]
+    ateom["ateom-microvm<br/>cloud-hypervisor, virtiofsd, kata-agent"]
+  end
+
+  subgraph vm["micro-VM"]
+    direction LR
+    relay["relay container, plain<br/>0.0.0.0:8081 → 127.0.0.1:8080"]
+    sbx["sandbox container<br/>openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay"]
+    sup["supervisor container<br/>openshell-supervisor, isolation-backend role<br/>OPA policy, egress proxy, TLS CA, OCSF audit"]
+    relay -- "loopback" --> sbx
+    sbx <-- "boundary, TLS on 127.0.0.1:17777" --> sup
+  end
+
+  store[("object store, rustfs in kind, GCS on GKE<br/>golden and per-actor snapshots")]
+  egress["atenet egress<br/>terminates the actor's CONNECT<br/>allows the actor's EgressPolicy only"]
+  model["model endpoint, ollama on the host<br/>the one allow-listed destination"]
+
+  cli --> gw
+  gw -- "compute_driver.proto" --> driver
+  driver -- "CreateActorTemplate, CreateActor, ResumeActor,<br/>SuspendActor, DeleteActor, GetActor, ListActors" --> api
+  kate -- "ateapi.Control" --> api
+  api -- "Restore, Checkpoint" --> atelet
+  ctl -. "creates, replaces" .-> pod
+  atelet -- "RunWorkload, RestoreWorkload, CheckpointWorkload" --> ateom
+  ateom -- "restore ≈ 350 ms" --> sbx
+  ateom <-- "snapshot files" --> store
+  cli -- "CONNECT through a port-forward" --> router
+  router --> relay
+  sup -- "allowed connections, atunnel" --> egress
+  egress --> model
+
+  class gw stock
+  class driver ours
+  class api,pg,recon,ctl,atelet,ateom sub
+  class router,egress edge
+  class sbx,sup,relay guest
+  class store,model store

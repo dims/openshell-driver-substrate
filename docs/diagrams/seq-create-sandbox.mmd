@@ -1,0 +1,44 @@
+sequenceDiagram
+  autonumber
+  participant GW as openshell-gateway
+  participant D as openshell-driver-substrate
+  participant API as ate-api-server
+  participant R as template reconciler
+  participant W as atelet → ateom-microvm
+  participant S as object store
+
+  GW->>D: ValidateSandboxCreate(sandbox)
+  D-->>GW: ok, or FailedPrecondition when the image has no @sha256 digest
+  GW->>D: CreateSandbox(sandbox)
+  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, command, env,<br/>gateway endpoint, sandbox config
+  D->>API: CreateActorTemplate(name, spec)
+  alt template is new
+    API->>R: reconcile
+    R->>API: create golden actor, ResumeActor
+    API->>W: Restore from cold boot
+    W->>W: boot the micro-VM, start the containers
+    Note over R,W: sandbox clears its 7 gates, supervisor attaches,<br/>workload launched
+    R->>R: wait 20 s (goldenSnapshotWarmup)
+    R->>API: SuspendActor
+    API->>W: Checkpoint
+    W->>S: memory-ranges, rootfs-upper.tar, durable-dir.tar, state.json
+    R->>API: tag the snapshot in atespace ate-golden
+  else template exists
+    API-->>D: AlreadyExists, same name means same inputs
+  end
+  loop every 2 s, up to template_ready_timeout_secs (180)
+    D->>API: GetActorTemplate(name)
+    API-->>D: status.goldenSnapshotStatus
+  end
+  D->>API: CreateActor(name = sandbox id, template)
+  Note over D,API: actor starts SUSPENDED,<br/>holding the golden snapshot
+  D->>API: ResumeActor
+  API->>API: pick a free Worker
+  API->>W: Restore
+  W->>S: fetch snapshot
+  W-->>API: RUNNING (≈ 350 ms)
+  D-->>GW: CreateSandboxResponse
+  loop watch_sandboxes: ListActors every 2 s, diffed
+    D-->>GW: DriverSandbox with conditions
+    Note over GW,D: derive_phase: Ready=True → Ready, Suspended=True → Stopped,<br/>Ready=False with a transient reason → Provisioning
+  end

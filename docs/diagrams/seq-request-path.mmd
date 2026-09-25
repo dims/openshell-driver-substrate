@@ -1,0 +1,32 @@
+sequenceDiagram
+  autonumber
+  participant C as curl
+  participant RT as atenet router
+  participant RL as relay
+  participant WL as agent.py<br/>in the sandbox
+  participant SB as sandbox broker<br/>seccomp notify
+  participant SU as supervisor<br/>OPA + proxy
+  participant EG as atenet egress
+  participant M as model
+
+  C->>RT: CONNECT alice:8081, proxy-header ate-target-actor: atespace/alice
+  RT->>RL: TCP to the actor's address :8081
+  Note over RT,WL: the broker refuses accept(2) from a non-loopback peer,<br/>so the relay connects to the agent over 127.0.0.1
+  RL->>WL: POST /chat
+  WL->>SB: connect(2) to 172.18.0.1:11434 · intercepted
+  SB->>SU: who, where: /usr/local/bin/python3.12 → host:port
+  alt not in data.yaml network_policies
+    SU-->>SB: deny
+    SB-->>WL: EACCES · "network_broker: denied (syscall=42)"
+  else allowed for this binary, host and port
+    SU-->>SB: allow · OCSF NET:OPEN ALLOWED [policy:model engine:opa]
+    SU->>EG: HTTP CONNECT 172.18.0.1:11434 (atunnel)
+    alt no EgressPolicy on the actor
+      EG-->>SU: 403 · the agent sees RemoteDisconnected
+    else EgressPolicy allows 172.18.0.1/32
+      EG->>M: TCP tunnel
+      SU->>M: POST /v1/chat/completions · OCSF HTTP:POST ALLOWED
+      M-->>WL: reply
+    end
+  end
+  WL-->>C: {"reply": ..., "turns": n}

@@ -1,0 +1,26 @@
+sequenceDiagram
+  autonumber
+  participant A as ateom-microvm
+  participant K as kata-agent
+  participant SB as sandbox container<br/>openshell-sandbox
+  participant SU as supervisor container<br/>openshell-supervisor
+  participant RL as relay container
+  participant WL as workload<br/>python3 agent.py
+
+  A->>K: create containers from the OCI specs
+  K->>SB: start /openshell-sandbox --bootstrap /.openshell/channel/sandbox/bootstrap.json
+  K->>SU: start openshell-supervisor --role isolation-backend<br/>--backend-descriptor-file, --auth-bundle-file, --policy-rules, --policy-data
+  K->>RL: start python3 relay.py
+  SB->>SB: read bootstrap.json, then unlink it
+  Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp,<br/>seccomp notification, socket virtualization + DNS relay bind
+  SB->>SB: listen TLS on 127.0.0.1:17777 · "Boundary control listener ready"
+  SU->>SU: read runtime-descriptor.json and auth.json (JWT pair, 1 h)
+  SU->>SB: dial the boundary, present the sandbox token
+  SB-->>SU: verified against the embedded key · "Isolation boundary attached"
+  SU->>SU: load policy.rego + data.yaml into OPA
+  SU->>SU: create CA in /run/openshell-supervisor-ca · "Landlock ruleset built"
+  SU->>SB: start_agent(python3 /opt/helpdesk/agent.py, child_env)
+  SB->>WL: fork, apply seccomp + Landlock, exec · "PROC:LAUNCH python3"
+  WL->>WL: listen 0.0.0.0:8080 inside the sandbox
+  RL->>RL: listen 0.0.0.0:8081, forward to 127.0.0.1:8080
+  Note over A,WL: the template reconciler checkpoints this whole VM at 20 s,<br/>and every actor is a restore of it, with booted set before the snapshot

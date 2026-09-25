@@ -1,0 +1,25 @@
+sequenceDiagram
+  autonumber
+  participant OP as operator
+  participant K8S as kube-apiserver
+  participant CTL as ate-controller syncer
+  participant API as ate-api-server
+  participant DEP as worker Deployment
+  participant AM as new ateom-microvm
+
+  OP->>K8S: delete pod --grace-period=0 --force
+  Note over OP,CTL: a plain delete gives 3600 s of grace and ateom waits<br/>for the guest, so the actor stays RUNNING on a DRAINING worker
+  K8S-->>CTL: pod gone
+  CTL->>API: DeleteWorker(worker)
+  API->>API: drain, then release bound actors:<br/>"Releasing actor from a worker whose pod is gone"
+  Note over CTL,API: alice RUNNING → CRASHED, assignment cleared<br/>bob on the other worker is untouched
+  K8S->>DEP: replica count short
+  DEP->>AM: create the replacement pod
+  AM->>CTL: register
+  CTL->>API: new Worker ACTIVE (about a second)
+  OP->>API: RevertActor(alice)
+  API->>API: CRASHED → REVERTING → SUSPENDED, holding the last external snapshot
+  OP->>API: ResumeActor(alice)
+  Note over OP,API: ResourceExhausted if it beats the registration, so retry
+  API->>AM: Restore on the new worker
+  API-->>OP: RUNNING · turns back at the last suspend

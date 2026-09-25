@@ -24,6 +24,10 @@ kernel is stock kata.
 
 ## How it fits together
 
+[`docs/architecture.md`](docs/architecture.md) has the full picture: every
+component, the lifecycle, and sequence diagrams for create, request path,
+suspend and resume, and host death.
+
 ```
 OpenShell CLI / gateway  (stock, unmodified binary)
         |
@@ -76,7 +80,7 @@ synthesis), `main.rs` (the socket server).
 src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
-docs/                 upstream branch index
+docs/                 architecture, with diagrams, and the upstream branch index
 examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats
 harness/
   bootstrap-gen/      mints the Ed25519/JWT/TLS bundle the binaries require
