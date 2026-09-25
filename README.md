@@ -170,8 +170,10 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-`create-kind-cluster.sh` also starts a local image registry at
-`localhost:5001`; that is `<registry>` in every step below. The installer's
+[`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659) is the head of
+`lean-integration`; [`docs/upstream-branches.md`](docs/upstream-branches.md)
+links each commit on it. `create-kind-cluster.sh` also starts a local image
+registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
 own readiness wait is 60 s per workload and it exits 0 when that wait times
 out, so gate on the three `kubectl` waits, not on its exit code.
 
@@ -366,13 +368,13 @@ the sandbox.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | `cf699047`, and an image that declares `USER` |
+| 1 | non-root UID **and** GID | [`cf699047`](https://github.com/dims/substrate/commit/cf699047aa8410eab57841f68e05977418d09405), and an image that declares `USER` |
 | 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | `4fc5d550` |
+| 3 | `no_new_privs == 1` | [`4fc5d550`](https://github.com/dims/substrate/commit/4fc5d55040709d2808a311aa6accaf297a022cff) |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
 | 5 | Landlock allow/deny | a writable `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | `33397540` |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`33397540`](https://github.com/dims/substrate/commit/33397540c9983b52554fff4273b1d8eb3a4f8535) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file — the
