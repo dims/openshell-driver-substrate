@@ -191,6 +191,7 @@ of memory, not uptime.
 | `run.sh` | The ten beats. Prints the matching Substrate and OpenShell log lines after each. |
 | `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
 | `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
+| `docs/why-lean-integration.md` | Why the demo needed Substrate patches, and how the [`lean-zero`](https://github.com/dims/substrate/tree/lean-zero) image gets by without them. |
 | `Dockerfile` | The sandbox image: `openshell-sandbox` from the stock image, python, the agent, the baked bootstrap. |
 | `policy.rego` | OpenShell's shipped `sandbox-policy.rego` at the pinned rev, unmodified. |
 | `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. |
