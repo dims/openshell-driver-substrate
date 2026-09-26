@@ -81,8 +81,12 @@ if kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" >/dev/null 2>&1
   echo "  ${TEMPLATE} exists; reusing its golden snapshot"
 else
   "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | kubectl-ate create actor-template -f - >/dev/null; created=1
-  until kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" -o json |
-        jq -e '.status.goldenSnapshotStatus.goldenTag.name' >/dev/null 2>&1; do sleep 2; done
+  for ((i = 0; ; i++)); do
+    kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" -o json |
+      jq -e '.status.goldenSnapshotStatus.goldenTag.name' >/dev/null 2>&1 && break
+    (( i < 150 )) || { echo "no golden snapshot after 300 s; a worker log that repeats 'Actor checkpointing' means the checkpoint cannot complete" >&2; exit 1; }
+    sleep 2
+  done
 fi
 kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}"
 evidence=$(under 'qualif|Landlock ruleset|listener ready|boundary attached|PROC:LAUNCH|Actor checkpointed'); echo "${evidence}"

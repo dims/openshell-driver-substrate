@@ -83,7 +83,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         history.append({"role": "user", "content": ask})
         try:
             _, raw = fetch(f"{BASE.rstrip('/')}/chat/completions",
-                           {"model": MODEL, "messages": history})
+                           {"model": MODEL, "messages": history}, timeout=80)
             reply = json.loads(raw)["choices"][0]["message"]["content"]
         except Exception as e:  # noqa: BLE001 - surface the failure to the caller
             history.pop()
