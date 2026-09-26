@@ -7,18 +7,15 @@ workerSelector:
 containers:
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
-    command: ["/openshell-sandbox"]
+    command: ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
     args: ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
     securityContext:
-      capabilities:
+      capabilities:  # what sandbox-entry.sh needs as root; it drops them all
         drop: ["ALL"]
+        add: ["SETUID", "SETGID", "SETPCAP", "NET_ADMIN"]
     volumeMounts:
       - name: socket-dir
         mountPath: "/run/openshell"
-      - name: tmp
-        mountPath: "/tmp"
-      - name: supervisor-ca
-        mountPath: "/run/openshell-supervisor-ca"
   - name: supervisor
     image: "${SUPERVISOR_IMAGE}"
     command: ["/openshell-supervisor"]
@@ -57,10 +54,6 @@ volumes:
     image:
       reference: "${BOOTSTRAP_FILES_IMAGE}"
   - name: socket-dir
-    durableDir: {}
-  - name: tmp
-    durableDir: {}
-  - name: supervisor-ca
     durableDir: {}
 snapshotConfig:
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL

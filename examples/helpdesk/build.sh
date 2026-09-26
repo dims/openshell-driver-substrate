@@ -45,7 +45,7 @@ chmod -R a+rwX "${OUT}/bake/.openshell"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -cf "${CTX}/bootstrap.tar" -C "${OUT}/bake" .
 
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
-cp "${HERE}"/{Dockerfile,agent.py,relay.py} "${CTX}/"
+cp "${HERE}"/{Dockerfile,agent.py,relay.py,sandbox-entry.sh} "${CTX}/"
 find "${CTX}" -maxdepth 1 -type f -exec touch -d @0 {} +
 docker build -q --provenance=false --sbom=false --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:dev" \
   -t "${REGISTRY}/helpdesk-sandbox:dev" "${CTX}" >/dev/null

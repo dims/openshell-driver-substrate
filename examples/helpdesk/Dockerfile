@@ -5,7 +5,7 @@ ARG SANDBOX_IMAGE
 FROM ${SANDBOX_IMAGE} AS sandbox
 FROM python:3.12-slim
 COPY --from=sandbox /openshell-sandbox /openshell-sandbox
-COPY agent.py relay.py /opt/helpdesk/
+COPY agent.py relay.py sandbox-entry.sh /opt/helpdesk/
 ADD bootstrap.tar /
 USER 65532:65532
 ENTRYPOINT ["/openshell-sandbox"]
