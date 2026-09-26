@@ -35,7 +35,7 @@ else
 fi
 
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
-cp "${HERE}"/{Dockerfile,agent.py,relay.py} "${OUT}/bootstrap.tar" "${CTX}/"
+cp "${HERE}"/{Dockerfile,agent.py,relay.py,sandbox-entry.sh} "${OUT}/bootstrap.tar" "${CTX}/"
 docker build -q --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:dev" \
   -t "${REGISTRY}/helpdesk-sandbox:dev" "${CTX}" >/dev/null
 docker push -q "${REGISTRY}/helpdesk-sandbox:dev" >/dev/null
