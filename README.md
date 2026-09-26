@@ -21,13 +21,13 @@ gVisor only. They are open as four draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 
-A second variant needs no Substrate patch: on this repo's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch
-the sandbox image drops root itself, with a five-line entry script and four
-start-up capabilities, and pairs with `dims/substrate` [`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)
-([`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), upstream
-main plus [#1923](https://github.com/agent-substrate/substrate/pull/1923)'s pin bump). It passes the same ten beats.
-[`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate should do that work; the PRs
-are the fix.
+A second variant needs no Substrate patch at all: on this repo's
+[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch the sandbox image drops root itself,
+with a five-line entry script and four start-up capabilities, and Substrate is
+plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90), where
+[#1923](https://github.com/agent-substrate/substrate/pull/1923) merged. It passes the same ten beats.
+[`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate should do
+that work; the PRs are the fix.
 
 ---
 
@@ -167,7 +167,7 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ```sh
 git clone https://github.com/dims/substrate && cd substrate
-git checkout d6249cde                  # lean-integration; see docs/upstream-branches.md
+git checkout ae03ebbb                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
@@ -179,7 +179,7 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-[`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972) is the head of
+[`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c) is the head of
 [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration); [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
@@ -378,13 +378,13 @@ the sandbox.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`2b81237b`](https://github.com/dims/substrate/commit/2b81237bc4e58e38c964e8f0834ee8daeabe2d7c), and an image that declares `USER` |
+| 1 | non-root UID **and** GID | [`f706c3c0`](https://github.com/dims/substrate/commit/f706c3c0b39574998c98fbe08f519b96c8461825), and an image that declares `USER` |
 | 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972) |
+| 3 | `no_new_privs == 1` | [`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c) |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
 | 5 | Landlock allow/deny | a writable `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`eaaaa9fb`](https://github.com/dims/substrate/commit/eaaaa9fb56a1ed0c4fd60e125b9f3a6d4e65fd95), [`8427dafb`](https://github.com/dims/substrate/commit/8427dafbcb8d7890d3fae655e2d051dddbe59142) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`85836a7c`](https://github.com/dims/substrate/commit/85836a7c83f961611b65ec316465adb01376f046), [`776d5241`](https://github.com/dims/substrate/commit/776d5241fc519751929e3563e61f566a51b4470d) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file — the
