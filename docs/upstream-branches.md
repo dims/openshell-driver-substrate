@@ -42,8 +42,13 @@ Related, not on the branch:
   agentgateway image still resolves the actor from it, so the agentgateway e2e
   lane fails on main and on every PR above. The lane is not a required check.
   Tracked upstream as [#1922](https://github.com/agent-substrate/substrate/issues/1922).
-  After [#1912](https://github.com/agent-substrate/substrate/pull/1912) merges, the four PR branches get rebased onto main so their runs
-  pick it up.
+  The permanent fix is on the agentgateway side:
+  [agentgateway#3677](https://github.com/agentgateway/agentgateway/pull/3677)
+  (merged 2026-09-26) reads the URI SAN. Once Substrate's pin in
+  `manifests/ate-install/components/agentgateway/kustomization.yaml` moves to
+  an image that carries it, the lane goes green without
+  [#1912](https://github.com/agent-substrate/substrate/pull/1912), and the PR
+  branches above get rebased onto main so their runs pick it up.
 - [#1911](https://github.com/agent-substrate/substrate/issues/1911) proposes
   renaming the node state root `/var/lib/ateom-gvisor` to `/var/lib/ate`. Both
   sandbox classes mount it; the name predates micro-VM. The rename needs a
