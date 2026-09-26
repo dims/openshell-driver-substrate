@@ -44,9 +44,11 @@ Related, not on the branch:
   Tracked upstream as [#1922](https://github.com/agent-substrate/substrate/issues/1922).
   The permanent fix is on the agentgateway side:
   [agentgateway#3677](https://github.com/agentgateway/agentgateway/pull/3677)
-  (merged 2026-09-26) reads the URI SAN. Once Substrate's pin in
-  `manifests/ate-install/components/agentgateway/kustomization.yaml` moves to
-  an image that carries it, the lane goes green without
+  (merged 2026-09-26) reads the URI SAN, and
+  [#1923](https://github.com/agent-substrate/substrate/pull/1923) moves
+  Substrate's pin in
+  `manifests/ate-install/components/agentgateway/kustomization.yaml` to an
+  image that carries it. Once that merges, the lane is green without
   [#1912](https://github.com/agent-substrate/substrate/pull/1912), and the PR
   branches above get rebased onto main so their runs pick it up.
 - [#1911](https://github.com/agent-substrate/substrate/issues/1911) proposes
