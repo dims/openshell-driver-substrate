@@ -17,7 +17,7 @@ and creates sandboxes through it, but cannot bring one to `Ready`; see
 
 Micro-VM needs nested virtualisation (`/dev/kvm`). Six commits in Substrate
 are required, each shown necessary by leaving it out; a seventh matters on
-gVisor only. All are open as five draft PRs and none is merged;
+gVisor only. They are open as four draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 

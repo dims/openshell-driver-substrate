@@ -1,8 +1,8 @@
 # Upstream changes
 
-Six changes are on the branch and a seventh, for gVisor only, is filed
-alongside them: five draft PRs on `agent-substrate/substrate`, none merged.
-State as of 2026-09-26.
+Six changes are on the branch; a seventh, for gVisor only, lives on as the
+first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918). Four draft PRs on
+`agent-substrate/substrate`, none merged. State as of 2026-09-26.
 
 ## agent-substrate/substrate
 
@@ -20,7 +20,8 @@ The head is verified, and so is each commit's necessity: on 2026-09-26
 `/dev/kvm` rebuilt from scratch at [`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972), and a rebuild without
 any one of the six commits fails at beat 1 or 2. The seventh change, the
 rootfs mode, is not needed on micro-VM, whose guest already sees `0755`; it
-stays filed for gVisor. On a second host the same head passes beats 1 to 9
+lives on as the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918), which needs it on
+gVisor. On a second host the same head passes beats 1 to 9
 and then stalls at beat 10: the supervisor logs the connection to the model
 host but never the request, for 80 s. That stall is on the OpenShell side,
 appears with the seven-commit stack too, and is not understood yet.
@@ -31,7 +32,7 @@ container declaring a non-root `USER` could run at all, on either sandbox class.
 
 | Commit | Change | Upstream |
 |---|---|---|
-| not on the branch | `imagecache`: make the merged rootfs root searchable by non-root. `rootfs` and `upper` were `0700`; on gVisor the container's `/` takes that mode, so a non-root process could not search its own root. The micro-VM guest already saw `0755`, so the helpdesk demo does not need it; it is filed for gVisor. `TestSetupBundleRootfs_RootIsSearchableByNonRoot`. | [#1905](https://github.com/agent-substrate/substrate/pull/1905) draft |
+| not on the branch | `imagecache`: make the merged rootfs root searchable by non-root. `rootfs` and `upper` were `0700`; on gVisor the container's `/` takes that mode, so a non-root process could not search its own root. The micro-VM guest already saw `0755`, so the helpdesk demo does not need it. `TestSetupBundleRootfs_RootIsSearchableByNonRoot`. | [#1905](https://github.com/agent-substrate/substrate/pull/1905) closed 2026-09-26; the change is the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918), which needs it on gVisor |
 | [`2b81237b`](https://github.com/dims/substrate/commit/2b81237bc4e58e38c964e8f0834ee8daeabe2d7c) | `atelet`: honor a container image's own `USER`. `ocispec.Options` gains `UID`/`GID`, resolved by `resolveUser` with containerd's rule: numeric `uid[:gid]`, no group means gid 0, `root` is 0, ids are bounded to int32; a named user is an error, not a silent fall-back to root. The pause container follows the same rule. `TestResolveUser`, `TestBuild_ProcessUser`, `TestShapers_PreserveProcessUser`, `TestSpecToAgentPB_ForwardsProcessUser`. | [#1918](https://github.com/agent-substrate/substrate/pull/1918) draft, stacked on [#1905](https://github.com/agent-substrate/substrate/pull/1905)'s commit; not to merge before [#1906](https://github.com/agent-substrate/substrate/pull/1906) and [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
 | [`35298df3`](https://github.com/dims/substrate/commit/35298df30c6633fb1bd40d41ad13de3586e50478) | `atelet`: make durable-dir volumes writable by non-root containers (`0777`, as Kubernetes gives an emptyDir). `TestPrepareDurableDirVolume`. | [#1906](https://github.com/agent-substrate/substrate/pull/1906) draft |
 | [`30e6ecde`](https://github.com/dims/substrate/commit/30e6ecdea70522c72f94fb3282c2d9941a9a3190) | `atelet`: add `CAP_DAC_OVERRIDE` to reset dirs a non-root container wrote. Plain root cannot unlink files from a directory another uid owns, so `resetActorDirs` failed after every checkpoint of such an actor and the suspend never completed. | [#1910](https://github.com/agent-substrate/substrate/pull/1910) draft; its own PR after [#1906](https://github.com/agent-substrate/substrate/pull/1906), the body argues the alternatives, cleanup in ateom first among them |
