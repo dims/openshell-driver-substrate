@@ -52,7 +52,11 @@ Behavior changes for existing workloads, to state in any PR:
 
 - [`7b3d05cf`](https://github.com/dims/substrate/commit/7b3d05cf7354b16c0476ed68aae34b5a3bde5934): an image with a numeric `USER` used to run as root and now
   runs as that user (gid 0 when the image names no group); one with a named
-  `USER` now fails to start.
+  `USER` now fails to start. On gVisor, a snapshot taken before this change
+  from an image with a numeric `USER` does not restore after it, the golden
+  snapshot included: `runsc restore` enforces that `Process.User` matches the
+  checkpoint-time spec. Such templates need a new golden snapshot; micro-VM
+  has no such check.
 - [`e0443e74`](https://github.com/dims/substrate/commit/e0443e74df7db438dadde4dd8c5c20c1bf92c33a): durable dirs are world-writable inside the actor. That is
   what Kubernetes does for an emptyDir, and only that actor's containers can
   reach the directory.
