@@ -47,9 +47,9 @@ At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60
   snapshot never gets its tag. Filed as [#1910](https://github.com/agent-substrate/substrate/pull/1910).
 - On gVisor only, the merged rootfs root is `0700`, so a non-root process
   cannot search `/`. Filed as [#1905](https://github.com/agent-substrate/substrate/pull/1905), now closed; the change
-  rides as the first commit of #1918. The micro-VM guest already sees `0755`.
+  rides as the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918). The micro-VM guest already sees `0755`.
 
-## `lean-integration`: patch Substrate
+## [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration): patch Substrate
 
 Six commits on upstream main, each the version filed in its PR:
 
@@ -80,7 +80,7 @@ The first pass of that experiment reported eight passes out of eight, because
 on a dead sandbox; see the troubleshooting table in the
 [helpdesk README](../README.md).
 
-## `lean-zero`: let the image do it
+## [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero): let the image do it
 
 The sandbox container starts as root, does what Substrate does not, and
 becomes the image's user before `openshell-sandbox` runs. Three template
@@ -142,7 +142,7 @@ capabilities. `setpriv` gives them all up before the sandbox binary runs, and
 the gates verify that, but a Substrate that honors `USER`, sets the sysctl
 and `no_new_privileges` itself, and can clean up after a non-root process
 does not need to trust a script for it. The PRs remain the right answer;
-`lean-zero` is what runs today without them.
+[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) is what runs today without them.
 
 The entry script is specific to this demo's image. Another image needs its
 own, with its own uid and shared directories.
