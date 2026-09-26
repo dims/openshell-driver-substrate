@@ -10,7 +10,7 @@ State as of 2026-09-26.
 [`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972): six commits on `agent-substrate/substrate` main
 [`1d7ca8ce`](https://github.com/agent-substrate/substrate/commit/1d7ca8ced056192a1801d6565251adcaab3eb0c9) plus
 [#1923](https://github.com/agent-substrate/substrate/pull/1923)'s pin bump cherry-picked as [`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), which
-drops on its own when #1923 merges. Previous heads are kept as
+drops on its own when [#1923](https://github.com/agent-substrate/substrate/pull/1923) merges. Previous heads are kept as
 `archive/lean-integration-2026-09-23` ([`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659)),
 `archive/lean-integration-2026-09-25` ([`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab))
 and `archive/lean-integration-2026-09-26` ([`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86)).
