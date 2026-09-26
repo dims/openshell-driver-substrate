@@ -149,9 +149,11 @@ own, with its own uid and shared directories.
 
 ## Still open
 
-On one of the two test hosts, three runs in five stalled once: an actor's
-first request after a restore reached the supervisor, which logged the
-connection to the model host but never the request, and the connection sat
-open for 80 s with no bytes. The other host has not shown it. It appears with
-and without the Substrate patches, so it belongs to the OpenShell side of the
-micro-VM and is not understood yet.
+About one run in three stalls once, on either test host: an actor's first
+request to the model host after a restore reaches the supervisor, which logs
+the connection (`OCSF NET:OPEN`) but never the request (`HTTP:POST`), and
+atenet-egress shows that connection open for 80 s with no bytes either way.
+The next request from the same actor goes through at once. It appears with
+and without the Substrate patches, so it sits between the sandbox and the
+supervisor inside the micro-VM and is not understood yet. `run.sh` fails the
+demo when it happens.
