@@ -3,13 +3,12 @@
 # Needs build.sh's out/helpdesk.env and a cluster from the root README.
 # After each beat, `under` prints what Substrate and OpenShell logged for it.
 set -o errexit -o nounset -o pipefail
-ATESPACE=${ATESPACE:-ate-openshell-microvm}
-BUCKET_NAME=${BUCKET_NAME:-ate-snapshots}
+export ATESPACE=${ATESPACE:-ate-openshell-microvm}
+export BUCKET_NAME=${BUCKET_NAME:-ate-snapshots}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "${HERE}/../.." && pwd)
 set -o allexport; . "${REPO}/out/helpdesk.env"; set +o allexport
-TEMPLATE=helpdesk-$(TEMPLATE=x "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | sha256sum | cut -c1-8)
-export ATESPACE BUCKET_NAME TEMPLATE
+export TEMPLATE=helpdesk-$(TEMPLATE=x "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | sha256sum | cut -c1-8)
 WORK=$(mktemp -d)
 T0=$(date +%s)
 SINCE=
