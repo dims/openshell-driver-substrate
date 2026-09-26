@@ -11,6 +11,11 @@ PRs. None is merged. State as of 2026-09-26.
 `archive/lean-integration-2026-09-23` ([`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659))
 and `archive/lean-integration-2026-09-25` ([`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab)).
 
+The head is verified: on 2026-09-26 `examples/helpdesk/run.sh` passed all ten
+beats on two Linux hosts with `/dev/kvm`, each rebuilt from scratch at
+[`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86)
+(63 s and 52 s after a fresh golden snapshot).
+
 Every commit was found by running a real non-root workload; none is specific
 to OpenShell. Before them, every actor container silently ran as root, and no
 container declaring a non-root `USER` could run at all, on either sandbox class.
