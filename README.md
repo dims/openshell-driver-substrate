@@ -16,7 +16,7 @@ and creates sandboxes through it, but cannot bring one to `Ready`; see
 [Known gaps](#known-gaps).
 
 Micro-VM needs nested virtualisation (`/dev/kvm`). Seven commits in Substrate
-are required; three are open as draft PRs and none is merged;
+are required; they are open as five draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 
@@ -158,7 +158,7 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ```sh
 git clone https://github.com/dims/substrate && cd substrate
-git checkout 8a290199                  # lean-integration; see docs/upstream-branches.md
+git checkout ec91ff65                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
@@ -170,7 +170,7 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-[`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab) is the head of
+[`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86) is the head of
 `lean-integration`; [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
@@ -368,13 +368,13 @@ the sandbox.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`b98f84a0`](https://github.com/dims/substrate/commit/b98f84a020f0d6e38ff949248ee06cdfc0087746), and an image that declares `USER` |
+| 1 | non-root UID **and** GID | [`7b3d05cf`](https://github.com/dims/substrate/commit/7b3d05cf7354b16c0476ed68aae34b5a3bde5934), and an image that declares `USER` |
 | 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab) |
+| 3 | `no_new_privs == 1` | [`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86) |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
 | 5 | Landlock allow/deny | a writable `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`b82e046b`](https://github.com/dims/substrate/commit/b82e046b22147802f0cb75bc44ec9488722fdc74), [`1a944f26`](https://github.com/dims/substrate/commit/1a944f2602ff42ed386775772fbbb4fe3bb22d3d) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`7162086f`](https://github.com/dims/substrate/commit/7162086fce01b5b08cf80ef149d5ff8ac74280d9), [`fa054299`](https://github.com/dims/substrate/commit/fa054299b38d52f39f29d03bf9205f8ffcf62127) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file — the
@@ -427,7 +427,8 @@ harness/scripts/retarget-substrate-version.sh <node> <version> [ateom-image]
 - **`no_new_privileges` is unconditional**, with no `SecurityContext` field to
   opt out.
 - **`SecurityContext` has no `runAsUser`.** A container's identity comes from
-  its image's `Config.User` and nowhere else.
+  its image's `Config.User` and nowhere else, and a named `USER` is rejected
+  rather than looked up in the image's passwd file.
 - **`Linux.Seccomp`, `Process.ApparmorProfile` and `SelinuxLabel` are not
   forwarded** to the kata agent. `Linux.Sysctl` is, but an ActorTemplate cannot
   set it.
