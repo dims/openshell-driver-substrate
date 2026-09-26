@@ -15,8 +15,9 @@ A stock `openshell-gateway` drives the driver over `--compute-driver-socket`
 and creates sandboxes through it, but cannot bring one to `Ready`; see
 [Known gaps](#known-gaps).
 
-Micro-VM needs nested virtualisation (`/dev/kvm`). Seven commits in Substrate
-are required; they are open as five draft PRs and none is merged;
+Micro-VM needs nested virtualisation (`/dev/kvm`). Six commits in Substrate
+are required, each shown necessary by leaving it out; a seventh matters on
+gVisor only. All are open as five draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 
@@ -158,7 +159,7 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ```sh
 git clone https://github.com/dims/substrate && cd substrate
-git checkout ec91ff65                  # lean-integration; see docs/upstream-branches.md
+git checkout d6249cde                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
@@ -170,7 +171,7 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-[`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86) is the head of
+[`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972) is the head of
 `lean-integration`; [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
@@ -181,14 +182,15 @@ On a **fresh** cluster the node is labelled with the build version
 automatically. Retargeting only applies after a rebuild
 (see [Retargeting](#retargeting-after-a-rebuild)).
 
-Without these commits:
+Without any one of these commits the demo fails, and `run.sh` says so at
+beat 1 or 2:
 
-- every actor container runs as root regardless of its image's `USER`;
-- no container declaring a non-root `USER` can execute anything at all,
-  because it cannot search its own root directory;
-- a non-root container cannot write its own durable-dir volume;
-- `no_new_privs` is never set, and sysctls never reach the guest;
-- a suspend of a live OpenShell sandbox never completes.
+- without `USER`, the sandbox runs as root and never clears its gates;
+- without the durable-dir mode, a non-root sandbox cannot write `/tmp`;
+- without `CAP_DAC_OVERRIDE`, the golden snapshot never gets its tag: atelet
+  cannot reset directories the sandbox wrote;
+- without sysctl forwarding, the low-port sysctl, or `no_new_privs`, the
+  sandbox never reports `Boundary control listener ready`.
 
 ### 2. Install the micro-VM backend
 
@@ -368,13 +370,13 @@ the sandbox.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`7b3d05cf`](https://github.com/dims/substrate/commit/7b3d05cf7354b16c0476ed68aae34b5a3bde5934), and an image that declares `USER` |
+| 1 | non-root UID **and** GID | [`2b81237b`](https://github.com/dims/substrate/commit/2b81237bc4e58e38c964e8f0834ee8daeabe2d7c), and an image that declares `USER` |
 | 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86) |
+| 3 | `no_new_privs == 1` | [`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972) |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
 | 5 | Landlock allow/deny | a writable `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`7162086f`](https://github.com/dims/substrate/commit/7162086fce01b5b08cf80ef149d5ff8ac74280d9), [`fa054299`](https://github.com/dims/substrate/commit/fa054299b38d52f39f29d03bf9205f8ffcf62127) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`eaaaa9fb`](https://github.com/dims/substrate/commit/eaaaa9fb56a1ed0c4fd60e125b9f3a6d4e65fd95), [`8427dafb`](https://github.com/dims/substrate/commit/8427dafbcb8d7890d3fae655e2d051dddbe59142) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file — the

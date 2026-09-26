@@ -250,6 +250,7 @@ workload trusts. A durable-dir volume works because those are `0777`.
 | Beat 1 never gets a golden tag; the worker log says `boundary unavailable ... timed out while waiting for remote boundary boot` about 90 s in | The tokens are older than an hour. Nothing says "expired". | `build.sh` again, then `run.sh`. |
 | `/chat` returns 502 `RemoteDisconnected` | No Substrate `EgressPolicy`: atenet-egress answered 403. | `run.sh` creates one per actor; by hand, the `grpcurl` above. |
 | `run.sh` stops at beat 1 with `never logged 'Boundary control listener ready'`, or at beat 2 with `never answered /status` | The sandbox did not clear its qualification gates or never started; the container is dead behind a live actor. | `kubectl logs -n "${ATESPACE}" <worker-pod> \| grep -i openshell` and the gates table in the root README. |
+| `run.sh` stops before beat 1 with `did not answer a chat ... within 120 s` | The model host is down, or the model is not pulled, or a slow disk makes the first load crawl. | `curl http://$MODEL_HOST:$MODEL_PORT/api/tags`; `ollama pull` the model; run again once a chat answers by hand. |
 | `/chat` returns 503 `no inference endpoint injected` | The image was built without the model environment. | `build.sh` with `MODEL_*` set. |
 | `/egress` to the model host says `reached: false` | The host is not in `data.yaml`, or the binary path is not `/usr/local/bin/python3.12`. | `data.yaml.tmpl`, then `build.sh`. |
 | `create actor-template` fails with `FailedPrecondition ... persistence` | The atespace does not exist. | Root README step 6. |
