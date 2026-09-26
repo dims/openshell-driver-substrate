@@ -21,12 +21,12 @@ gVisor only. They are open as four draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 
-A second variant needs no Substrate patch: on this repo's `lean-zero` branch
+A second variant needs no Substrate patch: on this repo's [[`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch
 the sandbox image drops root itself, with a five-line entry script and four
-start-up capabilities, and pairs with `dims/substrate` `lean-zero`
+start-up capabilities, and pairs with `dims/substrate` [`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)
 ([`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), upstream
 main plus [#1923](https://github.com/agent-substrate/substrate/pull/1923)'s pin bump). It passes the same ten beats.
-`main` keeps the stock image because Substrate should do that work; the PRs
+[`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate should do that work; the PRs
 are the fix.
 
 ---
@@ -180,7 +180,7 @@ make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any ol
 ```
 
 [`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972) is the head of
-`lean-integration`; [`docs/upstream-branches.md`](docs/upstream-branches.md)
+[`lean-integration`](https://github.com/dims/substrate/tree/lean-integration); [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
 own readiness wait is 60 s per workload and it exits 0 when that wait times

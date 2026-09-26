@@ -11,9 +11,9 @@ first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918).
 [`1d7ca8ce`](https://github.com/agent-substrate/substrate/commit/1d7ca8ced056192a1801d6565251adcaab3eb0c9) plus
 [#1923](https://github.com/agent-substrate/substrate/pull/1923)'s pin bump cherry-picked as [`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), which
 drops on its own when [#1923](https://github.com/agent-substrate/substrate/pull/1923) merges. Previous heads are kept as
-`archive/lean-integration-2026-09-23` ([`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659)),
-`archive/lean-integration-2026-09-25` ([`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab))
-and `archive/lean-integration-2026-09-26` ([`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86)).
+[`archive/lean-integration-2026-09-23`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-23) ([`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659)),
+[`archive/lean-integration-2026-09-25`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-25) ([`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab))
+and [`archive/lean-integration-2026-09-26`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-26) ([`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86)).
 
 The head is verified, and so is each commit's necessity: on 2026-09-26
 `examples/helpdesk/run.sh` passed all ten beats on a Linux host with
@@ -26,10 +26,10 @@ and then stalls at beat 10: the supervisor logs the connection to the model
 host but never the request, for 80 s. That stall is on the OpenShell side,
 appears with the seven-commit stack too, and is not understood yet.
 
-A second branch, `lean-zero`
+A second branch, [`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)
 ([`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), upstream
 main plus the [#1923](https://github.com/agent-substrate/substrate/pull/1923) pick), carries none of the six. This
-repo's `lean-zero` branch pairs with it: the sandbox image drops root itself,
+repo's [[`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch pairs with it: the sandbox image drops root itself,
 and on 2026-09-26 that passed the ten beats on both hosts with the same
 strict `run.sh`.
 
@@ -54,7 +54,7 @@ older gVisor snapshots unrestorable.
 Related, not on the branch:
 
 - [#1912](https://github.com/agent-substrate/substrate/pull/1912) (draft,
-  `pr/ateom-cert-actor-identity`) puts the ActorIdentity extension back on the
+  [`pr/ateom-cert-actor-identity`](https://github.com/dims/substrate/tree/pr/ateom-cert-actor-identity)) puts the ActorIdentity extension back on the
   ateom-for-actor certificate. Upstream [#1809](https://github.com/agent-substrate/substrate/pull/1809) removed it, and the pinned
   agentgateway image still resolves the actor from it, so the agentgateway e2e
   lane fails on main and on every PR above. The lane is not a required check.
