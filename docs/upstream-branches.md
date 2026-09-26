@@ -41,6 +41,7 @@ Related, not on the branch:
   ateom-for-actor certificate. Upstream [#1809](https://github.com/agent-substrate/substrate/pull/1809) removed it, and the pinned
   agentgateway image still resolves the actor from it, so the agentgateway e2e
   lane fails on main and on every PR above. The lane is not a required check.
+  Tracked upstream as [#1922](https://github.com/agent-substrate/substrate/issues/1922).
   After [#1912](https://github.com/agent-substrate/substrate/pull/1912) merges, the four PR branches get rebased onto main so their runs
   pick it up.
 - [#1911](https://github.com/agent-substrate/substrate/issues/1911) proposes
