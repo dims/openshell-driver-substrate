@@ -124,7 +124,7 @@ pub struct SubstrateComputeConfig {
     /// creates it.
     pub sandbox_config_name: String,
     /// Object-storage location prefix every synthesized `ActorTemplate`
-    /// writes its `snapshotsConfig.storageLocation` to.
+    /// writes its `snapshotConfig.storageLocation` to.
     pub snapshots_location: String,
     /// How long to wait for a synthesized `ActorTemplate` to reach a
     /// golden snapshot before giving up.
@@ -830,6 +830,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                     name: actor_name,
                 }),
                 any_state: true,
+                options: None,
             })
             .await;
         let deleted = match result {

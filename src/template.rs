@@ -101,7 +101,7 @@ pub fn synthesize(
             command: inputs.command,
             args: vec![],
             env,
-            readyz: None,
+            wakeup_probe: None,
             // The Landlock probe writes under /tmp, and the stock sandbox
             // image has no /tmp.
             volume_mounts: vec![ateapi::VolumeMount {
@@ -123,7 +123,7 @@ pub fn synthesize(
             durable_dir: Some(ateapi::DurableDirVolumeSource {}),
             ..Default::default()
         }],
-        snapshots_config: Some(ateapi::SnapshotsConfig {
+        snapshot_config: Some(ateapi::SnapshotConfig {
             on_pause: ateapi::SnapshotContentScope::Full as i32,
             on_commit: ateapi::SnapshotContentScope::Full as i32,
             on_resume: Some(ateapi::OnResumeConfig {

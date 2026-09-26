@@ -14,7 +14,7 @@ sandbox is a restore of that template's golden snapshot into a micro-VM. Inside
 the VM, stock OpenShell binaries run unmodified: `openshell-sandbox` holds the
 workload, `openshell-supervisor` enforces policy and audits, and a small relay
 container makes the workload reachable through Substrate's ingress. Nothing in
-OpenShell, Substrate's guest kernel, or kata is forked; eight Substrate commits
+OpenShell, Substrate's guest kernel, or kata is forked; seven Substrate commits
 are required and listed in [`upstream-branches.md`](upstream-branches.md).
 
 ## The big picture

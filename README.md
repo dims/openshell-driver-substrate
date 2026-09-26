@@ -15,8 +15,8 @@ A stock `openshell-gateway` drives the driver over `--compute-driver-socket`
 and creates sandboxes through it, but cannot bring one to `Ready`; see
 [Known gaps](#known-gaps).
 
-Micro-VM needs nested virtualisation (`/dev/kvm`). Eight commits in Substrate
-are required and none are merged upstream;
+Micro-VM needs nested virtualisation (`/dev/kvm`). Seven commits in Substrate
+are required; three are open as draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 
@@ -158,7 +158,7 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ```sh
 git clone https://github.com/dims/substrate && cd substrate
-git checkout 0ff8b818                  # lean-integration; see docs/upstream-branches.md
+git checkout 8a290199                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
@@ -170,7 +170,7 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-[`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659) is the head of
+[`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab) is the head of
 `lean-integration`; [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
@@ -368,13 +368,13 @@ the sandbox.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`cf699047`](https://github.com/dims/substrate/commit/cf699047aa8410eab57841f68e05977418d09405), and an image that declares `USER` |
+| 1 | non-root UID **and** GID | [`b98f84a0`](https://github.com/dims/substrate/commit/b98f84a020f0d6e38ff949248ee06cdfc0087746), and an image that declares `USER` |
 | 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`4fc5d550`](https://github.com/dims/substrate/commit/4fc5d55040709d2808a311aa6accaf297a022cff) |
+| 3 | `no_new_privs == 1` | [`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab) |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
 | 5 | Landlock allow/deny | a writable `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`33397540`](https://github.com/dims/substrate/commit/33397540c9983b52554fff4273b1d8eb3a4f8535) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`b82e046b`](https://github.com/dims/substrate/commit/b82e046b22147802f0cb75bc44ec9488722fdc74), [`1a944f26`](https://github.com/dims/substrate/commit/1a944f2602ff42ed386775772fbbb4fe3bb22d3d) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file — the
