@@ -29,7 +29,7 @@ appears with the seven-commit stack too, and is not understood yet.
 A second branch, [`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)
 ([`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), upstream
 main plus the [#1923](https://github.com/agent-substrate/substrate/pull/1923) pick), carries none of the six. This
-repo's [[`lean-zero`](https://github.com/dims/substrate/tree/lean-zero)](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch pairs with it: the sandbox image drops root itself,
+repo's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch pairs with it: the sandbox image drops root itself,
 and on 2026-09-26 that passed the ten beats on both hosts with the same
 strict `run.sh`.
 
