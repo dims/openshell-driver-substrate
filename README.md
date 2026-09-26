@@ -21,6 +21,14 @@ gVisor only. They are open as four draft PRs and none is merged;
 [`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
 kernel is stock kata.
 
+A second variant needs no Substrate patch: on this repo's `lean-zero` branch
+the sandbox image drops root itself, with a five-line entry script and four
+start-up capabilities, and pairs with `dims/substrate` `lean-zero`
+([`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), upstream
+main plus [#1923](https://github.com/agent-substrate/substrate/pull/1923)'s pin bump). It passes the same ten beats.
+`main` keeps the stock image because Substrate should do that work; the PRs
+are the fix.
+
 ---
 
 ## How it fits together

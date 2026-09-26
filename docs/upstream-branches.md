@@ -26,6 +26,13 @@ and then stalls at beat 10: the supervisor logs the connection to the model
 host but never the request, for 80 s. That stall is on the OpenShell side,
 appears with the seven-commit stack too, and is not understood yet.
 
+A second branch, `lean-zero`
+([`5d2cd196`](https://github.com/dims/substrate/commit/5d2cd196fad71d43f8b908dfd2b3d8ac7b165e90), upstream
+main plus the [#1923](https://github.com/agent-substrate/substrate/pull/1923) pick), carries none of the six. This
+repo's `lean-zero` branch pairs with it: the sandbox image drops root itself,
+and on 2026-09-26 that passed the ten beats on both hosts with the same
+strict `run.sh`.
+
 Every commit was found by running a real non-root workload; none is specific
 to OpenShell. Before them, every actor container silently ran as root, and no
 container declaring a non-root `USER` could run at all, on either sandbox class.
