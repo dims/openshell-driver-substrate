@@ -75,6 +75,10 @@ kubectl create token ate-client -n ate-system --audience api.ate-system.svc --du
 kubectl get clustertrustbundle servicedns.podcert.ate.dev:identity:primary-bundle \
   -o jsonpath='{.spec.trustBundle}' > "${WORK}/ca.crt"
 sleep 2
+MODEL=${CHILD_ENV##*HELPDESK_MODEL=}; MODEL=${MODEL%%,*}  # load the model before the timed beats compete with snapshot I/O
+curl -fsS --max-time 120 -o /dev/null "http://${MODEL_HOST}:${MODEL_PORT}/v1/chat/completions" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}],\"max_tokens\":5}" ||
+  { echo "the model host ${MODEL_HOST}:${MODEL_PORT} did not answer a chat for ${MODEL} within 120 s" >&2; exit 1; }
 
 beat "1  Template and golden snapshot"
 if kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" >/dev/null 2>&1; then
