@@ -23,11 +23,17 @@ until_state() {  # actor state [seconds]
   done; echo "$1 did not reach $2" >&2; return 1
 }
 ask() {  # actor path [curl args]: through atenet-router's CONNECT tunnel to the relay
-  curl -sS --max-time 90 -p -x http://127.0.0.1:8001 \
+  curl -fsS --max-time 90 -p -x http://127.0.0.1:8001 \
     --proxy-header "ate-target-actor: ${ATESPACE}/$1" "${@:3}" "http://$1:8081$2"; echo
 }
-until_up() { local i; for ((i = 0; i < 60; i++)); do ask "$1" /status >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
-chat()  { ask "$1" /chat -X POST -H 'Content-Type: application/json' -d "{\"message\":\"$2\"}"; }
+until_up() {  # actor: a 502 from the router is not up
+  local i; for ((i = 0; i < 60; i++)); do ask "$1" /status >/dev/null 2>&1 && return 0; sleep 1; done
+  echo "$1 never answered /status through the router; read the worker pod log" >&2; return 1
+}
+chat()  {  # actor message: the answer must carry a reply, not the app's error JSON
+  local out; out=$(ask "$1" /chat -X POST -H 'Content-Type: application/json' -d "{\"message\":\"$2\"}")
+  echo "${out}"; jq -e '.reply' <<<"${out}" >/dev/null || { echo "$1 gave no reply" >&2; return 1; }
+}
 allow_egress() {  # actor: Substrate's own egress gate, the model host only
   grpcurl -cacert "${WORK}/ca.crt" -authority api.ate-system.svc \
     -H "authorization: Bearer $(cat "${WORK}/token")" \
@@ -74,12 +80,14 @@ beat "1  Template and golden snapshot"
 if kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" >/dev/null 2>&1; then
   echo "  ${TEMPLATE} exists; reusing its golden snapshot"
 else
-  "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | kubectl-ate create actor-template -f - >/dev/null
+  "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | kubectl-ate create actor-template -f - >/dev/null; created=1
   until kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" -o json |
         jq -e '.status.goldenSnapshotStatus.goldenTag.name' >/dev/null 2>&1; do sleep 2; done
 fi
 kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}"
-under 'qualif|Landlock ruleset|listener ready|boundary attached|PROC:LAUNCH|Actor checkpointed'
+evidence=$(under 'qualif|Landlock ruleset|listener ready|boundary attached|PROC:LAUNCH|Actor checkpointed'); echo "${evidence}"
+[[ -z ${created:-} ]] || grep -q 'listener ready' <<<"${evidence}" ||
+  { echo "the golden warm-up never logged 'Boundary control listener ready': the sandbox did not clear its gates; read the worker pod log" >&2; exit 1; }
 
 beat "2  Two agents restored from that one snapshot"
 for a in alice bob; do
