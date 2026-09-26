@@ -8,7 +8,7 @@ BUCKET_NAME=${BUCKET_NAME:-ate-snapshots}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "${HERE}/../.." && pwd)
 set -o allexport; . "${REPO}/out/helpdesk.env"; set +o allexport
-TEMPLATE=helpdesk-$(echo "${SANDBOX_IMAGE}${SUPERVISOR_IMAGE}${BOOTSTRAP_FILES_IMAGE}" | sha256sum | cut -c1-8)
+TEMPLATE=helpdesk-$(TEMPLATE=x "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | sha256sum | cut -c1-8)
 export ATESPACE BUCKET_NAME TEMPLATE
 WORK=$(mktemp -d)
 T0=$(date +%s)

@@ -29,7 +29,7 @@ any base works; `Dockerfile` puts it on `python:3.12-slim`.
 | # | Beat | What you see | Under the covers |
 |---|---|---|---|
 | 1 | Template and golden snapshot | One `ActorTemplate` names the three containers. Substrate boots it once, waits 20 s, and snapshots the whole VM. | The sandbox logs `Boundary control listener ready` (every qualification gate passed), `Landlock ruleset built`, `PROC:LAUNCH python3`. The supervisor logs `Isolation boundary attached`. ateom writes `memory-ranges`, `rootfs-upper.tar`, `durable-dir.tar`, `state.json` to the bucket. |
-| 2 | Two agents from that snapshot | `create actor` and `resume` bring up alice and bob, each on its own worker. | `Actor restored (overlay rootfs) in ~350 ms`. Nothing boots: both are the same frozen process image, so both start at `turns: 0`. Each actor also gets a Substrate `EgressPolicy` for the model host. |
+| 2 | Two agents from that snapshot | `create actor` and `resume` bring up alice and bob, each on its own worker: a worker hosts as many actors as fit, and each helpdesk actor asks for the whole worker's CPU. | `Actor restored (overlay rootfs) in ~350 ms`. Nothing boots: both are the same frozen process image, so both start at `turns: 0`. Each actor also gets a Substrate `EgressPolicy` for the model host. |
 | 3 | Egress is an allow-list | `https://example.com/` fails name resolution. The model host answers. | The sandbox's network broker denies the `connect(2)` (`syscall=42`) with `EACCES`: the host is not in `data.yaml`. The supervisor's OCSF audit line for the allowed one is `NET:OPEN ALLOWED /usr/local/bin/python3.12 -> 172.18.0.1:11434 [policy:model engine:opa]`. |
 | 4 | alice answers | `/chat` returns the model's reply, `turns: 1`. | `OCSF HTTP:POST ALLOWED POST http://.../v1/chat/completions`. The request went through the supervisor's proxy, which is where a provider credential would be attached. The agent never holds one. |
 | 5 | Suspend alice | `ACTOR_STATE_SUSPENDED`. Her worker shows `0/1` actors. | `Actor checkpointed` with the snapshot's file list. The VM is gone; only the snapshot remains. |
@@ -59,9 +59,10 @@ the host lets it: on a firewalled host the input chain needs an allowance for
 the model port from the kind bridge. `qwen2.5:0.5b` also works but answers the
 memory question in beat 6 badly.
 
-Two free workers. alice and bob each take one, and the pool in root README
-step 6 has two, so no other actor may be running; `run.sh` checks and
-refuses otherwise. Suspend or delete the others, or raise the pool's replicas.
+Two free workers. Each helpdesk actor asks for a worker's whole CPU so alice
+and bob land on different workers, and the pool in root README step 6 has
+two, so no other actor may be running; `run.sh` checks and refuses otherwise.
+Suspend or delete the others, or raise the pool's replicas.
 
 On PATH: `docker`, `cargo`, `kubectl`, `kubectl-ate` (ahead of any older
 copy), `jq`, `curl`, `grpcurl`, `envsubst`.
@@ -106,9 +107,9 @@ watch -n2 'kubectl-ate get actors -a ate-openshell-microvm; echo; kubectl-ate ge
 ```
 
 Knobs: `ATESPACE` (default `ate-openshell-microvm`), `BUCKET_NAME`
-(`ate-snapshots`). The template is named `helpdesk-<hash>` from the three
-image digests, so a rerun with the same images reuses it and beat 1 is
-instant. On success `run.sh` deletes alice and bob and leaves the template. On
+(`ate-snapshots`). The template is named `helpdesk-<hash>` from the rendered
+template, so a rerun with the same images and template reuses it and beat 1
+is instant. On success `run.sh` deletes alice and bob and leaves the template. On
 failure it keeps both for inspection and prints the delete command.
 
 ## Expected output

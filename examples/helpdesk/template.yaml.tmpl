@@ -44,10 +44,12 @@ containers:
     securityContext:
       capabilities:
         drop: ["ALL"]
+# The whole worker's CPU, so alice and bob land on different workers: a
+# worker hosts as many actors as fit, and beat 8 kills one worker.
 resources:
   limits:
     - name: cpu
-      quantity: "1"
+      quantity: "2"
     - name: memory
       quantity: 1Gi
 volumes:
