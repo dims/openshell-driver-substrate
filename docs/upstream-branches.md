@@ -88,7 +88,7 @@ that no longer exists, every 10 seconds, without end. The actor and its
 template can then not be deleted (`Aborted: another operation is in progress`).
 
 The driver's vendored `proto/ateapi.proto` matches upstream's
-`pkg/proto/ateapipb/ateapi.proto` at `ed6d2a1f`; the six commits do not touch
+`pkg/proto/ateapipb/ateapi.proto` at [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c); the six commits do not touch
 it. [`../proto/README.md`](../proto/README.md) says how to refresh it.
 
 ## kata-containers
