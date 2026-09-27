@@ -1,6 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+[workspace]
+members = ["harness/bootstrap-gen"]
+
+# Genuine upstream OpenShell, unmodified. One rev for the driver and for
+# bootstrap-gen, so the credentials it mints match the binaries in the images.
+[workspace.dependencies]
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
+openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
+openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
+
 [package]
 name = "openshell-driver-substrate"
 description = "Agent Substrate compute driver for OpenShell"
@@ -16,12 +26,10 @@ name = "openshell-driver-substrate"
 path = "src/main.rs"
 
 [dependencies]
-# Genuine upstream OpenShell, unmodified. The driver only needs the
-# generated compute-driver proto types and a couple of env-var-name
-# constants; it registers as an out-of-process driver
-# (ComputeDriverServer over a socket), so no gateway code or fork is
-# needed on the OpenShell side.
-openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
+# The driver only needs the generated compute-driver proto types and a couple
+# of env-var-name constants; it registers as an out-of-process driver
+# (ComputeDriverServer over a socket), so no gateway code or fork is needed.
+openshell-core = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1.43", features = ["full"] }

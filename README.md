@@ -102,10 +102,10 @@ harness/
 ## Build and test
 
 ```sh
-cargo build --release
+cargo build --workspace --release
 cargo test --lib          # no cluster needed
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
@@ -251,7 +251,7 @@ An Ed25519-signed JWT pair and TLS material bound to one session id:
 mkdir -p out
 openssl genpkey -algorithm ed25519 -out out/signing.key.pem
 openssl pkey -in out/signing.key.pem -pubout -out out/signing.pub.pem
-cargo run --manifest-path harness/bootstrap-gen/Cargo.toml -- out/
+cargo run -p bootstrap-gen -- out/
 ```
 
 That writes `bootstrap.json`, `server.crt`, `server.key` (the sandbox's side)

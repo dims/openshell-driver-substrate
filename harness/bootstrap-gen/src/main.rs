@@ -14,7 +14,8 @@ use openshell_isolation_interface::contract::{
 };
 use openshell_sandbox_backend::boundary_protocol::{
     BoundaryConfig, BoundaryListener, GatewayVerificationKey, SandboxRuntimeDescriptor,
-    SandboxTlsClientConfig, SandboxTlsServerConfig, SandboxTransport, generate_sandbox_tls_material,
+    SandboxTlsClientConfig, SandboxTlsServerConfig, SandboxTransport,
+    generate_sandbox_tls_material,
 };
 use serde::Serialize;
 
