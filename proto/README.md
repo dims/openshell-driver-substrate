@@ -38,7 +38,9 @@ the generated Rust is the same either way, and the driver never Debug-prints a
 request or response. If it ever logs one, it needs its own masking for those
 two fields.
 
-To vendor the file byte for byte, build with a protoc that knows the option:
-`protobuf-src` 2.x, which needs cmake, or a system protoc 22 or newer, which
-means `build.rs` must stop overriding `PROTOC`. Then the `gsed` line above
-goes.
+To vendor the file byte for byte, build with a protoc that knows the option.
+The cheap way is the one OpenShell itself uses: the `protoc-bin-vendored`
+crate, which ships prebuilt binaries (libprotoc 31.1 at 3.2.0) and is already
+in this repository's dependency graph through `openshell-core`. Swapping it in
+for `protobuf-src` in `Cargo.toml` and `build.rs` also drops a from-source
+build of libprotobuf from every clean build. Then the `gsed` line above goes.
