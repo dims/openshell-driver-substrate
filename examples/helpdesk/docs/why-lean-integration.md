@@ -173,7 +173,7 @@ CONNECT branch never looks at the buffer past the header again. When the
 workload's bytes arrive before that first read, which mostly happens right
 after a VM restore while the supervisor is slow to schedule, the request is
 dropped. A one-line change, reading the header one byte at a time so the
-trailing bytes stay in the `BufReader`, ran 23 of 23 demo runs clean on
-2026-09-27 while the unpatched supervisor stalled 2 in 12 on the other host
-in the same minutes. The bug is present at the pinned `0.1.0-pre.8` and at
+trailing bytes stay in the `BufReader`, ran 122 demo runs clean across both
+hosts on 2026-09-27 (23, then 50 per host) while the unpatched supervisor
+stalled 2 in 12 in the same hour. The bug is present at the pinned `0.1.0-pre.8` and at
 upstream main `0.0.117-dev.303`; the fix goes to NVIDIA/OpenShell.
