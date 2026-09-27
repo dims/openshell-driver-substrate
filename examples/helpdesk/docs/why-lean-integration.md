@@ -155,13 +155,25 @@ does not need to trust a script for it. The PRs remain the right answer;
 The entry script is specific to this demo's image. Another image needs its
 own, with its own uid and shared directories.
 
-## Still open
+## Still open: an OpenShell supervisor bug, fix pending upstream
 
-About one run in three stalls once, on either test host: an actor's first
-request to the model host after a restore reaches the supervisor, which logs
-the connection (`OCSF NET:OPEN`) but never the request (`HTTP:POST`), and
-atenet-egress shows that connection open for 80 s with no bytes either way.
-The next request from the same actor goes through at once. It appears with
-and without the Substrate patches, so it sits between the sandbox and the
-supervisor inside the micro-VM and is not understood yet. `run.sh` fails the
-demo when it happens.
+About one run in six stalls once, on either test host, with or without the
+Substrate patches: an actor's first request to the model host after a restore
+reaches the supervisor, which logs `OCSF NET:OPEN` but never `HTTP:POST`, and
+the connection sits open until the app gives up. `run.sh` fails the demo when
+it happens.
+
+The cause is in OpenShell's supervisor, in
+[`handle_mediated_connection`](https://github.com/NVIDIA/OpenShell/blob/d3480d2a7efab3fd0217ab67828655617b9af777/crates/openshell-supervisor-network/src/proxy.rs#L2244).
+A mediated open reaches the proxy through an in-memory duplex with a
+synthesized `CONNECT` header in front of the workload's own bytes. The proxy
+reads that header into an 8192-byte buffer through a `BufReader` of the same
+size, so one read can return the header and the request behind it, and the
+CONNECT branch never looks at the buffer past the header again. When the
+workload's bytes arrive before that first read, which mostly happens right
+after a VM restore while the supervisor is slow to schedule, the request is
+dropped. A one-line change, reading the header one byte at a time so the
+trailing bytes stay in the `BufReader`, ran 23 of 23 demo runs clean on
+2026-09-27 while the unpatched supervisor stalled 2 in 12 on the other host
+in the same minutes. The bug is present at the pinned `0.1.0-pre.8` and at
+upstream main `0.0.117-dev.303`; the fix goes to NVIDIA/OpenShell.
