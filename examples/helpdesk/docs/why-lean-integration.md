@@ -7,7 +7,7 @@ Two ways to run the helpdesk demo exist in this repository. On
 [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) and the demo
 image does the same work itself. This page records why the patches were
 needed, what each one did, how the image got by without them, and what it
-cost. State as of 2026-09-26.
+cost. State as of 2026-09-27.
 
 ## What OpenShell demands of its sandbox
 
@@ -56,18 +56,16 @@ At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae
 
 ## [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration): patch Substrate
 
-Six commits on upstream main. Each carries the same code change as its PR; the
-PR versions of [#1910](https://github.com/agent-substrate/substrate/pull/1910) and of the third commit of [#1904](https://github.com/agent-substrate/substrate/pull/1904) add comment and
-documentation text that the branch does not:
+Six commits on upstream main, the PR commits themselves, cherry-picked in order:
 
 | Commit | Change | PR |
 |---|---|---|
-| [`f706c3c0`](https://github.com/dims/substrate/commit/f706c3c0b39574998c98fbe08f519b96c8461825) | atelet honors the image's `USER` | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
-| [`e7e6db21`](https://github.com/dims/substrate/commit/e7e6db2197c562882000652a6d778e720c028f77) | durable-dir volumes are `0777` | [#1906](https://github.com/agent-substrate/substrate/pull/1906) |
-| [`61ef7233`](https://github.com/dims/substrate/commit/61ef7233cca5af27dcd7a29cc94aa656e2831b8f) | atelet holds `CAP_DAC_OVERRIDE` to reset actor dirs | [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
-| [`85836a7c`](https://github.com/dims/substrate/commit/85836a7c83f961611b65ec316465adb01376f046) | micro-VM forwards `Linux.Sysctl` to the kata agent | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
-| [`776d5241`](https://github.com/dims/substrate/commit/776d5241fc519751929e3563e61f566a51b4470d) | micro-VM sets `net.ipv4.ip_unprivileged_port_start=0` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
-| [`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c) | micro-VM sets `no_new_privileges` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`0578655e`](https://github.com/dims/substrate/commit/0578655e1d6c45ab61f8f1a15cd13df9559a3c12) | atelet honors the image's `USER` | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`8476f5d0`](https://github.com/dims/substrate/commit/8476f5d0e3fa1899c1386a5acfe2752c46500586) | durable-dir volumes are `0777` | [#1906](https://github.com/agent-substrate/substrate/pull/1906) |
+| [`de620517`](https://github.com/dims/substrate/commit/de62051716f8a3df34100efb23961169163aa760) | atelet holds `CAP_DAC_OVERRIDE` to reset actor dirs | [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
+| [`15d2b715`](https://github.com/dims/substrate/commit/15d2b71512d4cc62e3534be06da9cf14178cd511) | micro-VM forwards `Linux.Sysctl` to the kata agent | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`5c2a4c21`](https://github.com/dims/substrate/commit/5c2a4c21b88eb684f88c8ac4de4fc8945be6d595) | micro-VM sets `net.ipv4.ip_unprivileged_port_start=0` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e) | micro-VM sets `no_new_privileges` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
 
 Each is necessary. On 2026-09-26 every commit was left out in turn, the
 cluster rebuilt from scratch, and the ten beats run, scored on the log

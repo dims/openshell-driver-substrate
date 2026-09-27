@@ -168,7 +168,7 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ```sh
 git clone https://github.com/dims/substrate && cd substrate
-git checkout ae03ebbb                  # lean-integration; see docs/upstream-branches.md
+git checkout 1eb9b810                  # lean-integration; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
@@ -180,7 +180,7 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-[`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c) is the head of
+[`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e) is the head of
 [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration); [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
@@ -361,13 +361,13 @@ once; its JSON report is in the worker pod's log, and a passing run says
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`f706c3c0`](https://github.com/dims/substrate/commit/f706c3c0b39574998c98fbe08f519b96c8461825), and an image that declares `USER` |
+| 1 | non-root UID **and** GID | [`0578655e`](https://github.com/dims/substrate/commit/0578655e1d6c45ab61f8f1a15cd13df9559a3c12), and an image that declares `USER` |
 | 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c) |
+| 3 | `no_new_privs == 1` | [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e) |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
 | 5 | Landlock allow/deny | a writable `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`85836a7c`](https://github.com/dims/substrate/commit/85836a7c83f961611b65ec316465adb01376f046), [`776d5241`](https://github.com/dims/substrate/commit/776d5241fc519751929e3563e61f566a51b4470d) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`15d2b715`](https://github.com/dims/substrate/commit/15d2b71512d4cc62e3534be06da9cf14178cd511), [`5c2a4c21`](https://github.com/dims/substrate/commit/5c2a4c21b88eb684f88c8ac4de4fc8945be6d595) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file, the
