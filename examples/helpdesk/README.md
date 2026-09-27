@@ -80,7 +80,7 @@ to `out/helpdesk.env` for `run.sh`:
 
 | Image | Contents |
 |---|---|
-| `helpdesk-sandbox` | `openshell-sandbox` from the stock image, `python:3.12-slim`, `agent.py`, `relay.py`, the baked bootstrap |
+| `helpdesk-sandbox` | `openshell-sandbox` from the stock image, `python:3.12-slim`, `agent.py`, `relay.py`, `sandbox-entry.sh`, the baked bootstrap |
 | `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, OpenShell's stock `sandbox-policy.rego` as `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume |
 
 Knobs: `MODEL_HOST` (default `172.18.0.1`), `MODEL_PORT` (`11434`),
@@ -192,6 +192,7 @@ of memory, not uptime.
 | `run.sh` | The ten beats. Prints the matching Substrate and OpenShell log lines after each. |
 | `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
 | `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
+| `sandbox-entry.sh` | Runs first, as root: the low-port sysctl, the shared directory's mode, then `setpriv` to 65532 with empty capability sets and `no_new_privs`. |
 | `docs/why-lean-integration.md` | Why the demo needs Substrate patches, and how the [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) image replaces them. |
 | `Dockerfile` | The sandbox image: `openshell-sandbox` from the stock image, python, the agent, the baked bootstrap. |
 | `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. |

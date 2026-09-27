@@ -15,18 +15,16 @@ A stock `openshell-gateway` drives the driver over `--compute-driver-socket`
 and creates sandboxes through it, but cannot bring one to `Ready`; see
 [Known gaps](#known-gaps).
 
-Micro-VM needs nested virtualisation (`/dev/kvm`). Six commits in Substrate
-are required, each necessary; a seventh matters on gVisor only. They are open
-as four PRs on `agent-substrate/substrate`, none merged: [#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906),
-[#1910](https://github.com/agent-substrate/substrate/pull/1910) and [#1918](https://github.com/agent-substrate/substrate/pull/1918). [`docs/upstream-branches.md`](docs/upstream-branches.md)
-lists the commits and what changes when they merge. The guest kernel is stock
-kata.
-
-A second variant needs no Substrate patch at all: on this repo's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch
-the sandbox image drops root itself, with a short entry script and four
-start-up capabilities, and Substrate is plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c). It
-passes the same ten beats. [`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate
-should do that work; the PRs are the fix.
+Micro-VM needs nested virtualisation (`/dev/kvm`). This branch needs no
+Substrate patch: the sandbox image drops root itself (see
+[`examples/helpdesk/sandbox-entry.sh`](examples/helpdesk/sandbox-entry.sh)),
+and Substrate is plain upstream main from
+[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c).
+[`main`](https://github.com/dims/openshell-driver-substrate/tree/main) pairs with [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration),
+where six Substrate commits do that work instead, open as four PRs on
+`agent-substrate/substrate`, none merged: [#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906), [#1910](https://github.com/agent-substrate/substrate/pull/1910) and
+[#1918](https://github.com/agent-substrate/substrate/pull/1918). [`docs/upstream-branches.md`](docs/upstream-branches.md) lists the
+commits and what changes when they merge. The guest kernel is stock kata.
 
 ---
 
@@ -165,8 +163,8 @@ build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 ### 1. Patch Substrate and bring up a cluster
 
 ```sh
-git clone https://github.com/dims/substrate && cd substrate
-git checkout 9d6020f5                  # lean-integration; see docs/upstream-branches.md
+git clone https://github.com/agent-substrate/substrate && cd substrate
+git checkout ed6d2a1f                  # upstream main; see docs/upstream-branches.md
 export GOFLAGS=-buildvcs=false
 ./hack/create-kind-cluster.sh
 docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
@@ -178,8 +176,8 @@ kubectl -n ate-system rollout status sts --timeout=10m
 make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-[`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7) is the head of
-[`lean-integration`](https://github.com/dims/substrate/tree/lean-integration); [`docs/upstream-branches.md`](docs/upstream-branches.md)
+[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) is upstream
+main; [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
 own readiness wait is 60 s per workload (`--rollout-timeout`), so keep the
@@ -189,15 +187,15 @@ The install labels the node with the build version. After a Substrate
 rebuild, move that label and every pool's `nodeSelector` to the new
 `git describe` output, or recreate the cluster.
 
-Without any one of these commits the demo fails, and `run.sh` says so at
-beat 1 or 2:
+What `sandbox-entry.sh` does before it becomes 65532, and the PR that makes
+each step unnecessary:
 
-- without `USER`, the sandbox runs as root and never clears its gates;
-- without the durable-dir mode, a non-root sandbox cannot write `/tmp`;
-- without `CAP_DAC_OVERRIDE`, the golden snapshot never gets its tag: atelet
-  cannot reset directories the sandbox wrote;
-- without sysctl forwarding, the low-port sysctl, or `no_new_privs`, the
-  sandbox never reports `Boundary control listener ready`.
+- writes `net.ipv4.ip_unprivileged_port_start=0`, needing `NET_ADMIN` ([#1904](https://github.com/agent-substrate/substrate/pull/1904));
+- makes the shared directory world-writable with a sticky bit ([#1906](https://github.com/agent-substrate/substrate/pull/1906));
+- `setpriv --reuid=65532 --regid=65532 --clear-groups --bounding-set=-all --inh-caps=-all --no-new-privs`,
+  needing `SETUID`, `SETGID` and `SETPCAP` ([#1918](https://github.com/agent-substrate/substrate/pull/1918), [#1904](https://github.com/agent-substrate/substrate/pull/1904));
+- `/tmp` and the supervisor-CA directory live in the image's writable rootfs,
+  so atelet never has to clean files a non-root process wrote ([#1910](https://github.com/agent-substrate/substrate/pull/1910)).
 
 ### 2. Install the micro-VM backend
 
@@ -359,13 +357,13 @@ once; its JSON report is in the worker pod's log, and a passing run says
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`b5c3fdc1`](https://github.com/dims/substrate/commit/b5c3fdc1e022c759ea993fa630c801a5bdac84cd), and an image that declares `USER` |
-| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7) |
+| 1 | non-root UID **and** GID | `sandbox-entry.sh`: `setpriv --reuid=65532 --regid=65532` |
+| 2 | all five capability sets empty | `setpriv --bounding-set=-all --inh-caps=-all` after the four start-up capabilities |
+| 3 | `no_new_privs == 1` | `setpriv --no-new-privs` |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
-| 5 | Landlock allow/deny | a writable `/tmp` |
+| 5 | Landlock allow/deny | the image's `/tmp` |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`b47e9040`](https://github.com/dims/substrate/commit/b47e9040a6c4fe999c16e1d0957a0a85e5d76b51), [`dc53a35b`](https://github.com/dims/substrate/commit/dc53a35ba72437827198dc7ba921b7ca09f651e2) |
+| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | `sandbox-entry.sh` writes the sysctl with `NET_ADMIN` |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
 `std::env::temp_dir()`, and the stock sandbox image contains one file, the
