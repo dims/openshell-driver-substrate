@@ -16,19 +16,17 @@ and creates sandboxes through it, but cannot bring one to `Ready`; see
 [Known gaps](#known-gaps).
 
 Micro-VM needs nested virtualisation (`/dev/kvm`). Six commits in Substrate
-are required, each shown necessary by leaving it out; a seventh matters on
-gVisor only. They are open as four PRs, ready for review, none merged yet:
-[#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906), [#1910](https://github.com/agent-substrate/substrate/pull/1910) and
-[#1918](https://github.com/agent-substrate/substrate/pull/1918); [`docs/upstream-branches.md`](docs/upstream-branches.md)
-lists the commits. The guest kernel is stock kata.
+are required, each necessary; a seventh matters on gVisor only. They are open
+as four PRs on `agent-substrate/substrate`, none merged: [#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906),
+[#1910](https://github.com/agent-substrate/substrate/pull/1910) and [#1918](https://github.com/agent-substrate/substrate/pull/1918). [`docs/upstream-branches.md`](docs/upstream-branches.md)
+lists the commits and what changes when they merge. The guest kernel is stock
+kata.
 
-A second variant needs no Substrate patch at all: on this repo's
-[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch the sandbox image drops root itself,
-with a short entry script and four start-up capabilities, and Substrate is
-plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c), where
-[#1923](https://github.com/agent-substrate/substrate/pull/1923) merged. It passes the same ten beats.
-[`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate should do
-that work; the PRs are the fix.
+A second variant needs no Substrate patch at all: on this repo's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch
+the sandbox image drops root itself, with a short entry script and four
+start-up capabilities, and Substrate is plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c). It
+passes the same ten beats. [`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate
+should do that work; the PRs are the fix.
 
 ---
 

@@ -10,8 +10,7 @@ client the driver uses (`src/lib.rs`'s `ateapi` module). The driver does
 not vendor any OpenShell protos. The OpenShell-side message and trait
 types it implements come from the `openshell-core` crate dependency.
 
-The copy matches upstream at `ed6d2a1f`; upstream last changed the file in
-`7f7a40c1` (#1810).
+The copy matches upstream at [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c).
 
 Refresh by re-copying the file from a current substrate checkout:
 

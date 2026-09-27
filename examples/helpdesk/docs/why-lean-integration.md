@@ -1,13 +1,10 @@
-# Why the demo needed Substrate patches, and how the image replaced them
+# Why the demo needs Substrate patches, and how the image can replace them
 
-Two ways to run the helpdesk demo exist in this repository. On
-[`main`](https://github.com/dims/openshell-driver-substrate/tree/main), Substrate is patched: six commits on the
-[`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) branch of `dims/substrate`. On
-[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero), Substrate is plain upstream main from
-[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) and the demo
-image does the same work itself. This page records why the patches were
-needed, what each one did, how the image got by without them, and what it
-cost. State as of 2026-09-27.
+Two ways to run the helpdesk demo exist in this repository. On [`main`](https://github.com/dims/openshell-driver-substrate/tree/main),
+Substrate is patched: six commits on the [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) branch of `dims/substrate`. On
+[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero), Substrate is plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) and the demo image does the
+same work itself. This page says why the patches are needed, what each one
+does, how the image gets by without them, and what that costs.
 
 ## What OpenShell demands of its sandbox
 
@@ -38,25 +35,24 @@ directory the sandbox creates and then sets to `0755` itself
 At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c):
 
 - atelet ignores the image's `Config.User`; every container process is root.
-  Gate 1 fails. Filed as [#1918](https://github.com/agent-substrate/substrate/pull/1918).
+  Gate 1 fails. [#1918](https://github.com/agent-substrate/substrate/pull/1918) fixes it.
 - An ActorTemplate cannot set a sysctl, and the micro-VM runtime does not
   forward `Linux.Sysctl` to the kata agent, so the guest keeps
-  `ip_unprivileged_port_start=1024`. Gate 5 fails. Filed as
-  [#1904](https://github.com/agent-substrate/substrate/pull/1904).
+  `ip_unprivileged_port_start=1024`. Gate 5 fails. [#1904](https://github.com/agent-substrate/substrate/pull/1904) fixes it.
 - `no_new_privileges` is not set on micro-VM containers; gVisor gets it from
-  `runsc --allow-suid=false`. Gate 3 fails. Filed as [#1904](https://github.com/agent-substrate/substrate/pull/1904).
+  `runsc --allow-suid=false`. Gate 3 fails. [#1904](https://github.com/agent-substrate/substrate/pull/1904) fixes it.
 - Durable-dir volumes are created root-only, so a non-root process cannot
-  write `/tmp` or the shared socket directory. Filed as [#1906](https://github.com/agent-substrate/substrate/pull/1906).
+  write `/tmp` or the shared socket directory. [#1906](https://github.com/agent-substrate/substrate/pull/1906) fixes it.
 - atelet drops every capability, so after a checkpoint it cannot delete files
   a non-root process wrote inside a directory it does not own. The golden
-  snapshot never gets its tag. Filed as [#1910](https://github.com/agent-substrate/substrate/pull/1910).
+  snapshot never gets its tag. [#1910](https://github.com/agent-substrate/substrate/pull/1910) fixes it.
 - On gVisor only, the merged rootfs root is `0700`, so a non-root process
-  cannot search `/`. Filed as [#1905](https://github.com/agent-substrate/substrate/pull/1905), now closed; the change
-  rides as the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918). The micro-VM guest already sees `0755`.
+  cannot search `/`. The first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918) fixes it; the micro-VM
+  guest already sees `0755`.
 
 ## [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration): patch Substrate
 
-Six commits on upstream main, the PR commits themselves, cherry-picked in order:
+The six PR commits, cherry-picked in order onto upstream main:
 
 | Commit | Change | PR |
 |---|---|---|
@@ -67,23 +63,12 @@ Six commits on upstream main, the PR commits themselves, cherry-picked in order:
 | [`5c2a4c21`](https://github.com/dims/substrate/commit/5c2a4c21b88eb684f88c8ac4de4fc8945be6d595) | micro-VM sets `net.ipv4.ip_unprivileged_port_start=0` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
 | [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e) | micro-VM sets `no_new_privileges` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
 
-Each is necessary. On 2026-09-26 every commit was left out in turn, the
-cluster rebuilt from scratch, and the ten beats run, scored on the log
-evidence (`Boundary control listener ready`, `PROC:LAUNCH`, `OCSF NET:OPEN`,
-a `reply` in beats 4 and 10):
-
-| Variant | Result |
-|---|---|
-| all six, or all six plus the rootfs mode | passes |
-| without the rootfs mode | passes: micro-VM does not need it |
-| without `USER`, the durable-dir mode, sysctl forwarding, the low-port sysctl or `no_new_privileges` | the sandbox never starts; every request is the router's 502 |
-| without `CAP_DAC_OVERRIDE` | the golden snapshot never gets its tag |
-| none of them | the sandbox never starts |
-
-The first pass of that experiment reported eight passes out of eight, because
-`run.sh` accepted the router's `bad gateway` body as an answer. It now fails
-on a dead sandbox; see the troubleshooting table in the
-[helpdesk README](../README.md).
+Each is necessary. Leave any one out and the demo fails at beat 1 or 2:
+without `CAP_DAC_OVERRIDE` the golden snapshot never gets its tag; without any
+other, the sandbox never starts and every request is the router's 502. `run.sh`
+scores on the log evidence (`Boundary control listener ready`, `PROC:LAUNCH`,
+`OCSF NET:OPEN`, a `reply` in beats 4 and 10), so a dead sandbox behind a live
+actor fails the run instead of passing it.
 
 ## [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero): let the image do it
 
@@ -116,8 +101,8 @@ exec "$@"
 Step by step, against the list above:
 
 - `NET_ADMIN` lets the script write the sysctl. Substrate's Open Container
-  Initiative (OCI) spec marks no path read-only, so `/proc/sys` accepts it. That replaces the two sysctl
-  commits.
+  Initiative (OCI) spec marks no path read-only, so `/proc/sys` accepts it.
+  That replaces the two sysctl commits.
 - `setpriv` drops the bounding set (this needs `SETPCAP`), clears the
   inheritable set, sets `no_new_privs`, and changes to `65532:65532`
   (`SETUID`, `SETGID`). Changing to a non-root user clears the permitted and
@@ -132,14 +117,13 @@ Step by step, against the list above:
   files on the host, atelet's reset needs no `CAP_DAC_OVERRIDE`. That
   replaces the durable-dir mode and the capability.
 
-Two facts about Substrate made this possible without patching it: the
+Two facts about Substrate make this possible without patching it: the
 template API grants capabilities on top of a default set
 ([`ateapi.proto`](https://github.com/agent-substrate/substrate/blob/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c/pkg/proto/ateapipb/ateapi.proto#L1027)), and the OCI
 spec builder sets neither `readonlyPaths` nor `maskedPaths`
 ([`ocispec.go`](https://github.com/agent-substrate/substrate/blob/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c/internal/ocispec/ocispec.go)).
 
-Result: the ten beats pass on plain upstream main on both test hosts, 53 s,
-58 s and 62 s with a fresh golden snapshot, the same strict `run.sh`.
+Result: the ten beats pass on plain upstream main with the same `run.sh`.
 
 ## What it costs
 
@@ -148,18 +132,18 @@ capabilities. `setpriv` gives them all up before the sandbox binary runs, and
 the gates verify that, but a Substrate that honors `USER`, sets the sysctl
 and `no_new_privileges` itself, and can clean up after a non-root process
 does not need to trust a script for it. The PRs remain the right answer;
-[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) is what runs today without them.
+[`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) is what runs without them.
 
 The entry script is specific to this demo's image. Another image needs its
 own, with its own uid and shared directories.
 
-## Still open: an OpenShell supervisor bug, fix pending upstream
+## An OpenShell supervisor bug
 
-About one run in six stalls once, on either test host, with or without the
-Substrate patches: an actor's first request to the model host after a restore
-reaches the supervisor, which logs `OCSF NET:OPEN` but never `HTTP:POST`, and
-the connection sits open until the app gives up. `run.sh` fails the demo when
-it happens.
+About one run in six stalls once, with or without the Substrate patches: an
+actor's first request to the model host after a restore reaches the
+supervisor, which logs `OCSF NET:OPEN` but never `HTTP:POST`, and the
+connection sits open until the app gives up. `run.sh` fails the demo when it
+happens.
 
 The cause is in OpenShell's supervisor, in
 [`handle_mediated_connection`](https://github.com/NVIDIA/OpenShell/blob/d3480d2a7efab3fd0217ab67828655617b9af777/crates/openshell-supervisor-network/src/proxy.rs#L2244).
@@ -170,9 +154,10 @@ size, so one read can return the header and the request behind it, and the
 CONNECT branch never looks at the buffer past the header again. When the
 workload's bytes arrive before that first read, which mostly happens right
 after a VM restore while the supervisor is slow to schedule, the request is
-dropped. A one-line change, reading the header one byte at a time so the
-trailing bytes stay in the `BufReader`, ran 122 demo runs clean across both
-hosts on 2026-09-27 (23, then 50 per host) while the unpatched supervisor
-stalled 2 in 12 in the same hour. The bug is present at the pinned `0.1.0-pre.8` and at
-upstream main `0.0.117-dev.303`; the fix is
-[NVIDIA/OpenShell#3745](https://github.com/NVIDIA/OpenShell/pull/3745).
+dropped.
+
+The fix is [NVIDIA/OpenShell#3745](https://github.com/NVIDIA/OpenShell/pull/3745):
+the proxy takes only the header out of the `BufReader`, so the bytes behind it
+stay buffered for the relay. The pinned revision, `0.1.0-pre.8`, has the bug.
+Once the fix is in a release, move the pin in `Cargo.toml` past it and rebuild
+the images; the stall goes with it.
