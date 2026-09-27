@@ -176,4 +176,5 @@ dropped. A one-line change, reading the header one byte at a time so the
 trailing bytes stay in the `BufReader`, ran 122 demo runs clean across both
 hosts on 2026-09-27 (23, then 50 per host) while the unpatched supervisor
 stalled 2 in 12 in the same hour. The bug is present at the pinned `0.1.0-pre.8` and at
-upstream main `0.0.117-dev.303`; the fix goes to NVIDIA/OpenShell.
+upstream main `0.0.117-dev.303`; the fix is
+[NVIDIA/OpenShell#3745](https://github.com/NVIDIA/OpenShell/pull/3745).

@@ -259,7 +259,7 @@ workload trusts. A durable-dir volume works because those are `0777`.
 | `delete actor-template` says `Aborted: another operation is in progress` | Its golden warm-up is running. | Retry after it tags. |
 | Beat 8: alice stays `RUNNING` on a `DRAINING` worker | The pod was deleted without `--force`. The pool's grace period is an hour and ateom waits for the guest workloads. | `kubectl delete pod --grace-period=0 --force`, as `run.sh` does. |
 | `kubectl-ate logs actor` prints nothing | Restored actors log through the worker pod. | `kubectl logs -n ${ATESPACE} <worker-pod>`, which is what `run.sh` filters. |
-| A chat in beat 4, 6 or 10 hangs about 90 s, then `<actor> gave no reply`; the supervisor logged `NET:OPEN` but no `HTTP:POST` | An OpenShell supervisor bug, about one run in six: the workload's first bytes after a restore are dropped with the synthesized `CONNECT` header. See [docs/why-lean-integration.md](docs/why-lean-integration.md#still-open-an-openshell-supervisor-bug-fix-pending-upstream). | Run again; the fix is a one-line change to `openshell-supervisor`, pending upstream. |
+| A chat in beat 4, 6 or 10 hangs about 90 s, then `<actor> gave no reply`; the supervisor logged `NET:OPEN` but no `HTTP:POST` | An OpenShell supervisor bug, about one run in six: the workload's first bytes after a restore are dropped with the synthesized `CONNECT` header. See [docs/why-lean-integration.md](docs/why-lean-integration.md#still-open-an-openshell-supervisor-bug-fix-pending-upstream). | Run again; the fix is [NVIDIA/OpenShell#3745](https://github.com/NVIDIA/OpenShell/pull/3745), a one-line change to `openshell-supervisor`. |
 
 ## Cleanup
 
