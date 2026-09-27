@@ -66,8 +66,9 @@ Each PR states its own:
 ### After they merge
 
 Point step 1 of the root README at upstream main and retire [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration). The vendored
-[`proto/ateapi.proto`](../proto/ateapi.proto) matches upstream at [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) and the
-six commits do not touch it; [`proto/README.md`](../proto/README.md) says how to
+[`proto/ateapi.proto`](../proto/ateapi.proto) matches upstream at the commit in
+[`proto/upstream-rev`](../proto/upstream-rev), which CI checks, and the six
+commits do not touch it; [`proto/README.md`](../proto/README.md) says how to
 refresh it when upstream changes the file.
 
 ### Related
