@@ -90,13 +90,12 @@ synthesis), `main.rs` (the socket server).
 src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
-docs/                 architecture, with diagrams, and the upstream branch index
+docs/                 architecture and the upstream branch index
 examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats; docs/ tells why
 harness/
   bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle the binaries require
-  images/             sandbox image with its bootstrap baked in
-  manifests/          WorkerPool and capability-probe templates
-  scripts/            credential baking, template rendering, version retargeting
+  manifests/          the WorkerPool
+  scripts/render.sh   renders a .tmpl from the environment
 ```
 
 ## Build and test
@@ -188,9 +187,9 @@ registry at `localhost:5001`; that is `<registry>` in every step below. The inst
 own readiness wait is 60 s per workload (`--rollout-timeout`), so keep the
 three `kubectl` waits above after it returns.
 
-On a **fresh** cluster the node is labelled with the build version
-automatically. Retargeting only applies after a rebuild
-(see [Retargeting](#retargeting-after-a-rebuild)).
+The install labels the node with the build version. After a Substrate
+rebuild, move that label and every pool's `nodeSelector` to the new
+`git describe` output, or recreate the cluster.
 
 Without any one of these commits the demo fails, and `run.sh` says so at
 beat 1 or 2:
@@ -240,10 +239,8 @@ docker-image` does not produce one.
 
 ### 4. Mint the credentials
 
-`examples/helpdesk/build.sh` does steps 4 and 5 for the example; the commands
-below are for the capability probe and the gateway path. The tokens last one
-hour (below), so do steps 4, 5 and 8 in one sitting, after 1 to 3 and 6. The
-same hour applies between `build.sh` and `run.sh` in step 7.
+`examples/helpdesk/build.sh` does steps 4 and 5. The tokens last one hour
+(below), so do steps 4, 5, 7 and 8 in one sitting, after 1 to 3 and 6.
 
 An Ed25519-signed JWT pair and TLS material bound to one session id:
 
@@ -262,7 +259,7 @@ token. A gateway refreshes a sandbox's tokens; this hand-applied harness has
 nothing to refresh from, so run the actor within the hour. After that the
 supervisor logs `Starting sandbox supervision` and then, about 90 seconds
 later, `boundary unavailable ... timed out while waiting for remote boundary
-boot`, with no mention of authentication. Mint again and repeat step 5.
+boot`, with no mention of authentication. Run `build.sh` again.
 
 Any keypair is accepted as a trust anchor: `SandboxLaunchAuthentication`
 validates against its own embedded key, and nothing ties that key to a
@@ -270,19 +267,13 @@ gateway.
 
 ### 5. Bake the credentials
 
-```sh
-harness/scripts/package-credentials.sh out/ <registry>/openshell-sandbox:dev <registry>
-```
-
-This prints `SANDBOX_BAKED_IMAGE`, the sandbox image with its bootstrap baked
-into the writable rootfs, used by the gateway path and the capability probe.
-It also leaves `out/bootstrap.tar` for the helpdesk image.
-
-Baked rather than mounted, because the sandbox **consumes** its bootstrap,
-unlinking the file after reading it, so a read-only image volume fails with
-`Read-only file system`. Substrate discards image file ownership, so `--chown`
-has no effect and the tree is world-writable instead (see
-[Known gaps](#known-gaps)).
+The sandbox **consumes** its bootstrap, unlinking the file after reading it,
+so a read-only image volume fails with `Read-only file system`. `build.sh`
+tars `bootstrap.json`, `server.crt` and `server.key` into the helpdesk image's
+rootfs instead. Substrate discards image file ownership, so `--chown` has no
+effect and the tree is world-writable (see [Known gaps](#known-gaps)). The
+image's `CMD` names the bootstrap, so the gateway path, which sends no
+command, finds it too.
 
 ### 6. Create the pool
 
@@ -346,7 +337,7 @@ grpcurl -plaintext -import-path <openshell>/proto -proto openshell.proto -d '{
   "workspace_scope": {"workspace": "default"},
   "name": "alice",
   "spec": {"log_level": "info",
-           "template": {"image": "<SANDBOX_BAKED_IMAGE>"},
+           "template": {"image": "<SANDBOX_IMAGE from out/helpdesk.env>"},
            "policy": {"version": 1}}
 }' 127.0.0.1:17670 openshell.v1.OpenShell/CreateSandbox
 ```
@@ -360,26 +351,13 @@ five minutes; see [Known gaps](#known-gaps).
 
 ## Debugging
 
-### The fast loop
-
-`openshell-sandbox capability-probe` runs the whole qualification gate on its
-own and prints a JSON report. The template's golden warm-up runs it once; the
-report is in the worker pod's log.
-
-```sh
-export SANDBOX_BAKED_IMAGE=...   # step 5
-harness/scripts/render.sh harness/manifests/capability-probe-template.yaml.tmpl \
-  | kubectl-ate create actor-template -f -
-```
-
-A passing run reports `"qualified":true` with `landlock_abi: 7`,
-`seccomp_notification: true`, `socket_virtualization: true`,
-`dns_relay_bind: true`.
-
 ### The gates
 
 `run_boundary` calls `qualify_runtime()` unconditionally; a failed gate ends
-the sandbox.
+the sandbox. The golden warm-up also runs `openshell-sandbox capability-probe`
+once; its JSON report is in the worker pod's log, and a passing run says
+`"qualified":true` with `landlock_abi: 7`, `seccomp_notification: true`,
+`socket_virtualization: true`, `dns_relay_bind: true`.
 
 | # | Gate | What it needs |
 |---|---|---|
@@ -418,19 +396,6 @@ kubectl logs -n "${ATESPACE}" <worker-pod> | grep -i openshell
 `Boundary control listener ready` says the sandbox cleared every gate and is
 serving. `Isolation boundary attached` and `PROC:LAUNCH` say the supervisor
 reached it and started the workload.
-
-### Retargeting after a rebuild
-
-atelet and ateom are versioned per node. An install creates a DaemonSet named
-`atelet-<version>` with a `nodeSelector` on `ate.dev/substrate-version`, and
-does **not** move an already-labelled node. A rebuild does nothing until the
-node label and every `WorkerPool`'s `nodeSelector` move too; a pool whose
-selector does not match sits in `Pending`. A dirty worktree makes
-`git describe` yield `<sha>-dirty`, and the label has to match that exactly.
-
-```sh
-harness/scripts/retarget-substrate-version.sh <node> <version> [ateom-image]
-```
 
 ---
 

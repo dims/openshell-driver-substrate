@@ -9,3 +9,5 @@ COPY agent.py relay.py /opt/helpdesk/
 ADD bootstrap.tar /
 USER 65532:65532
 ENTRYPOINT ["/openshell-sandbox"]
+# The gateway path sends no command, so the image names its own bootstrap.
+CMD ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]

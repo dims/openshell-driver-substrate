@@ -5,10 +5,9 @@ not the driver itself. See the [root README](../README.md) for the walkthrough.
 
 | Path | What |
 |---|---|
-| `bootstrap-gen/` | Mints the Ed25519/JWT/TLS bundle the sandbox and supervisor require. Pinned to the same OpenShell rev as the driver. |
-| `images/sandbox-with-bootstrap/` | Derived sandbox image with its bootstrap baked into the writable rootfs. Needed because the sandbox unlinks its bootstrap and Substrate discards image file ownership. |
-| `manifests/` | The WorkerPool and the capability-probe ActorTemplate. Render with `scripts/render.sh`. The workload template is `examples/helpdesk`. |
-| `scripts/` | Credential baking, template rendering, and retargeting a node + pools onto a rebuilt substrate version. |
+| `bootstrap-gen/` | Mints the Ed25519/JWT/TLS bundle the sandbox and supervisor require. A workspace member, so it builds against the same OpenShell rev as the driver. |
+| `manifests/` | The WorkerPool. Render with `scripts/render.sh`. The workload template is `examples/helpdesk`. |
+| `scripts/render.sh` | Renders a `.tmpl` from the environment; refuses to run with a variable unset. |
 
 `scripts/render.sh` needs `envsubst` (gettext). It ships with most Linux
 distros; on macOS it comes from `brew install gettext`.

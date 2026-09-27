@@ -1,8 +1,7 @@
 # Architecture
 
 How an OpenShell sandbox becomes an Agent Substrate actor, what runs where,
-and what each piece trusts. The diagrams are Mermaid sources in
-[`diagrams/`](diagrams/), rendered to SVG by [`diagrams/render.sh`](diagrams/render.sh).
+and what each piece trusts.
 
 ## In one paragraph
 
@@ -20,7 +19,79 @@ are required, and a seventh matters on gVisor only;
 
 ## The big picture
 
-![architecture](diagrams/architecture.svg)
+```mermaid
+flowchart TB
+  classDef stock fill:#ecfdf5,stroke:#059669,color:#064e3b
+  classDef ours fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px
+  classDef sub fill:#fff7ed,stroke:#ea580c,color:#7c2d12
+  classDef guest fill:#fdf4ff,stroke:#a21caf,color:#701a75
+  classDef store fill:#f1f5f9,stroke:#475569,color:#0f172a
+  classDef edge fill:#f0fdf4,stroke:#16a34a,color:#14532d
+
+  cli["openshell CLI, grpcurl, curl"]
+  kate["kubectl-ate"]
+
+  subgraph openshell["NVIDIA OpenShell (stock)"]
+    gw["openshell-gateway<br/>--compute-driver substrate<br/>--compute-driver-socket"]
+  end
+
+  subgraph repo["this repository"]
+    driver["openshell-driver-substrate<br/>ComputeDriver gRPC server on a Unix socket<br/>a sandbox is an Actor, a workload is one ActorTemplate<br/>named by the hash of its own contents"]
+  end
+
+  subgraph substrate["Substrate control plane"]
+    direction LR
+    ctl["ate-controller<br/>WorkerPool → Deployment of worker pods<br/>syncer: pod ↔ Worker, drain,<br/>release the actors of a dead pod"]
+    api["ate-api-server<br/>ateapi.Control, gRPC over TLS 1.3 + bearer token<br/>ActorTemplate, Actor, Worker, EgressPolicy, Tag<br/>workflows: resume, suspend, revert, delete"]
+    pg[("postgres")]
+    recon["template reconciler<br/>golden actor: boot, wait 20 s,<br/>checkpoint, tag"]
+    ctl --> api
+    api --- pg
+    api --> recon
+  end
+
+  router["atenet router, ingress<br/>CONNECT tunnel on :8081<br/>ate-target-actor: atespace/name"]
+
+  atelet["atelet, DaemonSet, one per node, versioned<br/>pulls images by digest, builds OCI specs, durable dirs<br/>AteomHerder: Run, Checkpoint, Restore"]
+
+  subgraph pod["worker pod"]
+    ateom["ateom-microvm<br/>cloud-hypervisor, virtiofsd, kata-agent"]
+  end
+
+  subgraph vm["micro-VM"]
+    direction LR
+    relay["relay container, plain<br/>0.0.0.0:8081 → 127.0.0.1:8080"]
+    sbx["sandbox container<br/>openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay"]
+    sup["supervisor container<br/>openshell-supervisor, isolation-backend role<br/>OPA policy, egress proxy, TLS CA, OCSF audit"]
+    relay -- "loopback" --> sbx
+    sbx <-- "boundary, TLS on 127.0.0.1:17777" --> sup
+  end
+
+  store[("object store, rustfs in kind, GCS on GKE<br/>golden and per-actor snapshots")]
+  egress["atenet egress<br/>terminates the actor's CONNECT<br/>allows the actor's EgressPolicy only"]
+  model["model endpoint, ollama on the host<br/>the one allow-listed destination"]
+
+  cli --> gw
+  gw -- "compute_driver.proto" --> driver
+  driver -- "CreateActorTemplate, CreateActor, ResumeActor,<br/>SuspendActor, DeleteActor, GetActor, ListActors" --> api
+  kate -- "ateapi.Control" --> api
+  api -- "Restore, Checkpoint" --> atelet
+  ctl -. "creates, replaces" .-> pod
+  atelet -- "RunWorkload, RestoreWorkload, CheckpointWorkload" --> ateom
+  ateom -- "restore ≈ 350 ms" --> sbx
+  ateom <-- "snapshot files" --> store
+  cli -- "CONNECT through a port-forward" --> router
+  router --> relay
+  sup -- "allowed connections, atunnel" --> egress
+  egress --> model
+
+  class gw stock
+  class driver ours
+  class api,pg,recon,ctl,atelet,ateom sub
+  class router,egress edge
+  class sbx,sup,relay guest
+  class store,model store
+```
 
 Colors: green is stock OpenShell, blue is this repository, orange is
 Substrate, purple is inside the guest, light green is Substrate's network edge.
@@ -179,11 +250,71 @@ The boundary channel is TCP on loopback, not a Unix socket: containers of one
 actor share the guest network namespace, but a Unix socket on a shared
 durable dir is not shared across them (`connect(2)` gives `ECONNREFUSED`).
 
-![inside the VM](diagrams/seq-inside-vm.svg)
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as ateom-microvm
+  participant K as kata-agent
+  participant SB as sandbox container<br/>openshell-sandbox
+  participant SU as supervisor container<br/>openshell-supervisor
+  participant RL as relay container
+  participant WL as workload<br/>python3 agent.py
+
+  A->>K: create containers from the OCI specs
+  K->>SB: start /openshell-sandbox --bootstrap /.openshell/channel/sandbox/bootstrap.json
+  K->>SU: start openshell-supervisor --role isolation-backend<br/>--backend-descriptor-file, --auth-bundle-file, --policy-rules, --policy-data
+  K->>RL: start python3 relay.py
+  SB->>SB: read bootstrap.json, then unlink it
+  Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp,<br/>seccomp notification, socket virtualization + DNS relay bind
+  SB->>SB: listen TLS on 127.0.0.1:17777 · "Boundary control listener ready"
+  SU->>SU: read runtime-descriptor.json and auth.json (JWT pair, 1 h)
+  SU->>SB: dial the boundary, present the sandbox token
+  SB-->>SU: verified against the embedded key · "Isolation boundary attached"
+  SU->>SU: load policy.rego + data.yaml into OPA
+  SU->>SU: create CA in /run/openshell-supervisor-ca · "Landlock ruleset built"
+  SU->>SB: start_agent(python3 /opt/helpdesk/agent.py, child_env)
+  SB->>WL: fork, apply seccomp + Landlock, exec · "PROC:LAUNCH python3"
+  WL->>WL: listen 0.0.0.0:8080 inside the sandbox
+  RL->>RL: listen 0.0.0.0:8081, forward to 127.0.0.1:8080
+  Note over A,WL: the template reconciler checkpoints this whole VM at 20 s,<br/>and every actor is a restore of it, with booted set before the snapshot
+```
 
 ## Lifecycle
 
-![lifecycle](diagrams/lifecycle.svg)
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> SUSPENDED: CreateActor, holds the golden snapshot
+  SUSPENDED --> RESUMING: ResumeActor (create_sandbox, start_sandbox)
+  RESUMING --> RUNNING: RestoreWorkload done
+  RUNNING --> SUSPENDING: SuspendActor (stop_sandbox)
+  SUSPENDING --> SUSPENDED: CheckpointWorkload done, worker freed
+  RUNNING --> CRASHED: worker pod gone, syncer releases the actor
+  CRASHED --> REVERTING: RevertActor (kubectl-ate revert)
+  REVERTING --> SUSPENDED: back at the last external snapshot
+  RUNNING --> DELETING: DeleteActor any_state (delete_sandbox)
+  SUSPENDED --> DELETING: DeleteActor
+  CRASHED --> DELETING: DeleteActor
+  DELETING --> [*]
+
+  note right of RUNNING
+    gateway phase Ready
+    Ready=True, reason ContainerRunning
+  end note
+  note right of SUSPENDED
+    gateway phase Stopped
+    Suspended=True and Ready=False (ContainerStopped)
+  end note
+  note left of RESUMING
+    gateway phase Provisioning
+    Bootstrapping=True and Ready=False (ContainerStarting)
+  end note
+  note right of CRASHED
+    gateway phase Error
+    Ready=False (ContainerExited)
+    resume is refused, revert or delete
+  end note
+```
 
 An actor is born `SUSPENDED`, holding its template's golden snapshot. Resume
 and suspend move it between `RUNNING` and `SUSPENDED` through a restore or a
@@ -196,7 +327,52 @@ and an operator uses `kubectl-ate revert actor`.
 
 ### Creating a sandbox
 
-![create sandbox](diagrams/seq-create-sandbox.svg)
+```mermaid
+sequenceDiagram
+  autonumber
+  participant GW as openshell-gateway
+  participant D as openshell-driver-substrate
+  participant API as ate-api-server
+  participant R as template reconciler
+  participant W as atelet → ateom-microvm
+  participant S as object store
+
+  GW->>D: ValidateSandboxCreate(sandbox)
+  D-->>GW: ok, or FailedPrecondition when the image has no @sha256 digest
+  GW->>D: CreateSandbox(sandbox)
+  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, command, env,<br/>gateway endpoint, sandbox config
+  D->>API: CreateActorTemplate(name, spec)
+  alt template is new
+    API->>R: reconcile
+    R->>API: create golden actor, ResumeActor
+    API->>W: Restore from cold boot
+    W->>W: boot the micro-VM, start the containers
+    Note over R,W: sandbox clears its 7 gates, supervisor attaches,<br/>workload launched
+    R->>R: wait 20 s (goldenSnapshotWarmup)
+    R->>API: SuspendActor
+    API->>W: Checkpoint
+    W->>S: memory-ranges, rootfs-upper.tar, durable-dir.tar, state.json
+    R->>API: tag the snapshot in atespace ate-golden
+  else template exists
+    API-->>D: AlreadyExists, same name means same inputs
+  end
+  loop every 2 s, up to template_ready_timeout_secs (180)
+    D->>API: GetActorTemplate(name)
+    API-->>D: status.goldenSnapshotStatus
+  end
+  D->>API: CreateActor(name = sandbox id, template)
+  Note over D,API: actor starts SUSPENDED,<br/>holding the golden snapshot
+  D->>API: ResumeActor
+  API->>API: pick a free Worker
+  API->>W: Restore
+  W->>S: fetch snapshot
+  W-->>API: RUNNING (≈ 350 ms)
+  D-->>GW: CreateSandboxResponse
+  loop watch_sandboxes: ListActors every 2 s, diffed
+    D-->>GW: DriverSandbox with conditions
+    Note over GW,D: derive_phase: Ready=True → Ready, Suspended=True → Stopped,<br/>Ready=False with a transient reason → Provisioning
+  end
+```
 
 The first `create_sandbox` for a workload pays for the golden snapshot: about
 30 s in all, a few seconds of boot, the fixed 20 s warm-up, and the checkpoint. Every later one, and every later
@@ -205,7 +381,40 @@ provisioning ceiling is comfortably above this.
 
 ### Reaching the agent, and the two egress layers
 
-![request path](diagrams/seq-request-path.svg)
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as curl
+  participant RT as atenet router
+  participant RL as relay
+  participant WL as agent.py<br/>in the sandbox
+  participant SB as sandbox broker<br/>seccomp notify
+  participant SU as supervisor<br/>OPA + proxy
+  participant EG as atenet egress
+  participant M as model
+
+  C->>RT: CONNECT alice:8081, proxy-header ate-target-actor: atespace/alice
+  RT->>RL: TCP to the actor's address :8081
+  Note over RT,WL: the broker refuses accept(2) from a non-loopback peer,<br/>so the relay connects to the agent over 127.0.0.1
+  RL->>WL: POST /chat
+  WL->>SB: connect(2) to 172.18.0.1:11434 · intercepted
+  SB->>SU: who, where: /usr/local/bin/python3.12 → host:port
+  alt not in data.yaml network_policies
+    SU-->>SB: deny
+    SB-->>WL: EACCES · "network_broker: denied (syscall=42)"
+  else allowed for this binary, host and port
+    SU-->>SB: allow · OCSF NET:OPEN ALLOWED [policy:model engine:opa]
+    SU->>EG: HTTP CONNECT 172.18.0.1:11434 (atunnel)
+    alt no EgressPolicy on the actor
+      EG-->>SU: 403 · the agent sees RemoteDisconnected
+    else EgressPolicy allows 172.18.0.1/32
+      EG->>M: TCP tunnel
+      SU->>M: POST /v1/chat/completions · OCSF HTTP:POST ALLOWED
+      M-->>WL: reply
+    end
+  end
+  WL-->>C: {"reply": ..., "turns": n}
+```
 
 Ingress is Substrate's router, the relay, then loopback into the sandbox.
 Egress is decided twice, in order. First OpenShell: the sandbox intercepts
@@ -221,7 +430,34 @@ supervisor can widen its own reach.
 
 ### Suspend and resume
 
-![suspend and resume](diagrams/seq-suspend-resume.svg)
+```mermaid
+sequenceDiagram
+  autonumber
+  participant OP as kubectl-ate or gateway
+  participant API as ate-api-server
+  participant AT as atelet
+  participant AM as ateom-microvm
+  participant S as object store
+
+  OP->>API: SuspendActor(alice)
+  Note over OP,API: RUNNING → SUSPENDING
+  API->>AT: Checkpoint
+  AT->>AM: CheckpointWorkload
+  AM->>AM: pause the VM, dump guest memory, tar rootfs upper and durable dirs
+  AM->>S: base-id, config.json, memory-ranges, rootfs-upper.tar, durable-dir.tar, state.json
+  AM->>AM: tear the VM down · "Actor checkpointed"
+  AT->>AT: resetActorDirs (needs CAP_DAC_OVERRIDE for files uid 65532 created)
+  API->>API: SUSPENDED · worker assignment cleared, worker shows 0/1
+  Note over OP,S: nothing runs, the snapshot is the only copy
+  OP->>API: ResumeActor(alice)
+  API->>API: SUSPENDED → RESUMING · pick a free Worker, maybe another pod
+  API->>AT: Restore
+  AT->>AM: RestoreWorkload
+  AM->>S: fetch the snapshot
+  AM->>AM: cloud-hypervisor restore, virtiofs lowers, tap · "Actor restored in ≈ 350 ms"
+  API->>API: RUNNING
+  Note over OP,S: process memory is back: turns and booted as they were
+```
 
 A checkpoint pauses the VM, writes guest memory plus the rootfs upper layer
 and the durable dirs to the object store, and tears the VM down. The worker is
@@ -231,7 +467,33 @@ as it was: the agent's chat history and its `booted` timestamp included.
 
 ### A host dies
 
-![host death](diagrams/seq-host-death.svg)
+```mermaid
+sequenceDiagram
+  autonumber
+  participant OP as operator
+  participant K8S as kube-apiserver
+  participant CTL as ate-controller syncer
+  participant API as ate-api-server
+  participant DEP as worker Deployment
+  participant AM as new ateom-microvm
+
+  OP->>K8S: delete pod --grace-period=0 --force
+  Note over OP,CTL: a plain delete gives 3600 s of grace and ateom waits<br/>for the guest, so the actor stays RUNNING on a DRAINING worker
+  K8S-->>CTL: pod gone
+  CTL->>API: DeleteWorker(worker)
+  API->>API: drain, then release bound actors:<br/>"Releasing actor from a worker whose pod is gone"
+  Note over CTL,API: alice RUNNING → CRASHED, assignment cleared<br/>bob on the other worker is untouched
+  K8S->>DEP: replica count short
+  DEP->>AM: create the replacement pod
+  AM->>CTL: register
+  CTL->>API: new Worker ACTIVE (about a second)
+  OP->>API: RevertActor(alice)
+  API->>API: CRASHED → REVERTING → SUSPENDED, holding the last external snapshot
+  OP->>API: ResumeActor(alice)
+  Note over OP,API: ResourceExhausted if it beats the registration, so retry
+  API->>AM: Restore on the new worker
+  API-->>OP: RUNNING · turns back at the last suspend
+```
 
 A worker pod that vanishes takes its actor to `CRASHED`, and the Deployment
 replaces the pod within seconds. A plain `kubectl delete pod` does not model
@@ -242,7 +504,34 @@ that suspends idle sandboxes bounds that loss to the idle window.
 
 ## Credentials
 
-![credentials](diagrams/credentials.svg)
+```mermaid
+flowchart LR
+  classDef file fill:#fef9c3,stroke:#ca8a04,color:#713f12
+  classDef img fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
+  classDef vol fill:#fdf4ff,stroke:#a21caf,color:#701a75
+
+  key["signing.key.pem<br/>Ed25519, any key is a trust anchor"]:::file
+  gen["bootstrap-gen<br/>BOOTSTRAP_CHILD_ENV → workload env"]
+  bs["bootstrap.json · server.crt · server.key<br/>BoundaryConfig: listener 127.0.0.1:17777,<br/>verification key, child_env"]:::file
+  rd["runtime-descriptor.json<br/>SandboxRuntimeDescriptor: where the boundary is,<br/>its TLS trust anchor"]:::file
+  ab["auth.json<br/>SupervisorAuthBundle: gateway and sandbox JWTs,<br/>expire in one hour"]:::file
+  pkg["build.sh<br/>dirs 0777, files 0666 → bootstrap.tar"]
+  simg["helpdesk-sandbox image<br/>python:3.12-slim + /openshell-sandbox<br/>+ agent.py, relay.py + bootstrap.tar"]:::img
+  fimg["openshell-bootstrap-files image<br/>/supervisor/{runtime-descriptor.json, auth.json,<br/>policy.rego, data.yaml}"]:::img
+  sbx["sandbox container<br/>reads and unlinks its bootstrap,<br/>so it must sit on the writable rootfs"]:::vol
+  sup["supervisor container<br/>image volume at /.openshell, read-only is fine"]:::vol
+  note["Substrate discards image file ownership,<br/>so the tree is world-writable instead of owned by 65532"]
+
+  key --> gen
+  gen --> bs
+  gen --> rd
+  gen --> ab
+  bs --> pkg --> simg --> sbx
+  rd --> fimg
+  ab --> fimg
+  fimg --> sup
+  pkg -.- note
+```
 
 OpenShell's sandbox and supervisor authenticate to each other with a pair of
 Ed25519-signed JWTs and TLS material bound to one session id. In a normal
@@ -277,12 +566,3 @@ Templates and their golden snapshots are never garbage-collected. The
 driver's content-hash naming keeps their number equal to the number of
 distinct workloads; the helpdesk's `run.sh` names its template from a hash of
 the rendered template, image digests included, for the same reason.
-
-## Regenerating the diagrams
-
-```sh
-brew install mermaid-cli      # mmdc
-docs/diagrams/render.sh
-```
-
-The SVGs use plain SVG text, not HTML labels, so they render in any viewer.

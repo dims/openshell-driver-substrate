@@ -74,13 +74,14 @@ REGISTRY=localhost:5001 examples/helpdesk/build.sh
 ```
 
 This mints a credential set with the model endpoint in the workload's
-environment, bakes it, builds and pushes the two images, and writes their
-digests to `out/helpdesk.env` for `run.sh`:
+environment, bakes it into the sandbox image, fetches OpenShell's stock policy
+at the pinned rev, builds and pushes the two images, and writes their digests
+to `out/helpdesk.env` for `run.sh`:
 
 | Image | Contents |
 |---|---|
 | `helpdesk-sandbox` | `openshell-sandbox` from the stock image, `python:3.12-slim`, `agent.py`, `relay.py`, the baked bootstrap |
-| `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume |
+| `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, OpenShell's stock `sandbox-policy.rego` as `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume |
 
 Knobs: `MODEL_HOST` (default `172.18.0.1`), `MODEL_PORT` (`11434`),
 `MODEL_NAME` (`qwen2.5:1.5b`).
@@ -187,13 +188,12 @@ of memory, not uptime.
 
 | File | Purpose |
 |---|---|
-| `build.sh` | Mints the credentials, builds and pushes the two images, writes `out/helpdesk.env`. |
+| `build.sh` | Mints and bakes the credentials, fetches the policy, builds and pushes the two images, writes `out/helpdesk.env`. |
 | `run.sh` | The ten beats. Prints the matching Substrate and OpenShell log lines after each. |
 | `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
 | `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
 | `docs/why-lean-integration.md` | Why the demo needed Substrate patches, and how the [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) image gets by without them. |
 | `Dockerfile` | The sandbox image: `openshell-sandbox` from the stock image, python, the agent, the baked bootstrap. |
-| `policy.rego` | OpenShell's shipped `sandbox-policy.rego` at the pinned rev, unmodified. |
 | `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. |
 | `template.yaml.tmpl` | The `ActorTemplate`: three containers, four volumes, micro-VM class, snapshots on pause and commit. |
 

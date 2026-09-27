@@ -10,7 +10,7 @@
 //! export SUBSTRATE_LIVE_BEARER_TOKEN_PATH=creds/token
 //! export SUBSTRATE_LIVE_TLS_SERVER_NAME=api.ate-system.svc
 //! export SUBSTRATE_LIVE_SNAPSHOTS_LOCATION=gs://ate-snapshots/ate-openshell-microvm/
-//! export SUBSTRATE_LIVE_TEST_IMAGE=<SANDBOX_BAKED_IMAGE>
+//! export SUBSTRATE_LIVE_TEST_IMAGE=<SANDBOX_IMAGE from out/helpdesk.env>
 //! cargo test --test live -- --ignored
 //! ```
 //!

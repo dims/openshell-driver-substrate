@@ -30,18 +30,29 @@ else
     openssl pkey -in "${OUT}/signing.key.pem" -pubout -out "${OUT}/signing.pub.pem"
   }
   BOOTSTRAP_CHILD_ENV="${CHILD_ENV}" \
-    cargo run -q --manifest-path "${REPO}/harness/bootstrap-gen/Cargo.toml" -- "${OUT}"
-  "${REPO}/harness/scripts/package-credentials.sh" "${OUT}" "${REGISTRY}/openshell-sandbox:dev" "${REGISTRY}" >/dev/null
+    cargo run -q --manifest-path "${REPO}/Cargo.toml" -p bootstrap-gen -- "${OUT}"
 fi
 
+# The sandbox unlinks its bootstrap after reading it, so it must sit on the
+# writable rootfs, not an image volume. Substrate discards image file
+# ownership, so the tree is world-writable rather than owned by 65532.
+rm -rf "${OUT}/bake"; mkdir -p "${OUT}/bake/.openshell/channel/sandbox"
+cp "${OUT}"/{bootstrap.json,server.crt,server.key} "${OUT}/bake/.openshell/channel/sandbox/"
+chmod -R a+rwX "${OUT}/bake/.openshell"
+tar -cf "${CTX}/bootstrap.tar" -C "${OUT}/bake" .
+
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
-cp "${HERE}"/{Dockerfile,agent.py,relay.py} "${OUT}/bootstrap.tar" "${CTX}/"
+cp "${HERE}"/{Dockerfile,agent.py,relay.py} "${CTX}/"
 docker build -q --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:dev" \
   -t "${REGISTRY}/helpdesk-sandbox:dev" "${CTX}" >/dev/null
 docker push -q "${REGISTRY}/helpdesk-sandbox:dev" >/dev/null
 
-# The supervisor's files: descriptor, auth bundle, policy, data.
-cp "${OUT}"/{runtime-descriptor.json,auth.json} "${HERE}/policy.rego" "${CTX}/files/supervisor/"
+# The supervisor's files: descriptor, auth bundle, OpenShell's stock policy at
+# the pinned rev, data.
+REV=$(grep -oE 'rev = "[0-9a-f]{40}"' "${REPO}/Cargo.toml" | head -1 | cut -d'"' -f2)
+curl -fsSL -o "${CTX}/files/supervisor/policy.rego" \
+  "https://raw.githubusercontent.com/NVIDIA/OpenShell/${REV}/crates/openshell-supervisor-network/data/sandbox-policy.rego"
+cp "${OUT}"/{runtime-descriptor.json,auth.json} "${CTX}/files/supervisor/"
 MODEL_HOST=${MODEL_HOST} MODEL_PORT=${MODEL_PORT} \
   "${REPO}/harness/scripts/render.sh" "${HERE}/data.yaml.tmpl" > "${CTX}/files/supervisor/data.yaml"
 printf 'FROM scratch\nCOPY supervisor/ /supervisor/\n' > "${CTX}/files/Dockerfile"
