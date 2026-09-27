@@ -65,8 +65,9 @@ Related, not on the branch:
   are closed. The four PRs above were rebased onto that main the same day.
 - [#1911](https://github.com/agent-substrate/substrate/issues/1911) proposes
   renaming the node state root `/var/lib/ateom-gvisor` to `/var/lib/ate`. Both
-  sandbox classes mount it; the name predates micro-VM. The rename needs a
-  two-release migration, so it is an issue, not a PR.
+  sandbox classes mount it; the name predates micro-VM. Draft
+  [#1926](https://github.com/agent-substrate/substrate/pull/1926) does the rename with a
+  legacy-path fallback, so one release carries both paths.
 
 Behavior changes for existing workloads, to state in any PR:
 
