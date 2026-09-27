@@ -8,14 +8,14 @@ use std::env;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto");
 
-    // Match openshell-core's pattern: use the bundled protoc from
-    // protobuf-src so the build does not depend on a system protoc that
-    // may lack the well-known type includes.
+    // The same vendored protoc and include tree openshell-core builds with, so
+    // the build depends on no system protoc and needs no compile of libprotobuf.
     //
     // SAFETY: build scripts are single-threaded.
     #[allow(unsafe_code)]
     unsafe {
-        env::set_var("PROTOC", protobuf_src::protoc());
+        env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
+        env::set_var("PROTOC_INCLUDE", protoc_bin_vendored::include_path()?);
     }
 
     tonic_prost_build::configure()
