@@ -17,9 +17,10 @@ and creates sandboxes through it, but cannot bring one to `Ready`; see
 
 Micro-VM needs nested virtualisation (`/dev/kvm`). Six commits in Substrate
 are required, each shown necessary by leaving it out; a seventh matters on
-gVisor only. They are open as four draft PRs and none is merged;
-[`docs/upstream-branches.md`](docs/upstream-branches.md) lists them. The guest
-kernel is stock kata.
+gVisor only. They are open as four PRs, ready for review, none merged yet:
+[#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906), [#1910](https://github.com/agent-substrate/substrate/pull/1910) and
+[#1918](https://github.com/agent-substrate/substrate/pull/1918); [`docs/upstream-branches.md`](docs/upstream-branches.md)
+lists the commits. The guest kernel is stock kata.
 
 A second variant needs no Substrate patch at all: on this repo's
 [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch the sandbox image drops root itself,
@@ -90,7 +91,7 @@ src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
 docs/                 architecture, with diagrams, and the upstream branch index
-examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats
+examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats; docs/ tells why
 harness/
   bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle the binaries require
   images/             sandbox image with its bootstrap baked in
@@ -454,6 +455,10 @@ harness/scripts/retarget-substrate-version.sh <node> <version> [ateom-image]
 - **Templates are never garbage-collected.**
 - **The driver creates no `EgressPolicy`.** Substrate denies an actor's egress
   until one exists, so a gateway-created sandbox cannot reach anything.
+- **OpenShell's supervisor can drop a mediated request** that arrives in the
+  same read as the synthesized `CONNECT` header, about once in ten first opens
+  after a restore, so the demo stalls about one run in six until
+  [NVIDIA/OpenShell#3745](https://github.com/NVIDIA/OpenShell/pull/3745) lands. `run.sh` reports it.
 - **A gateway can create a sandbox, but not bring it to `Ready`.** The
   synthesized template is one container, with no supervisor and no
   credentials, so no supervisor session can be established. The gateway holds
