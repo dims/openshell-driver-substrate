@@ -57,7 +57,7 @@ At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae
 ## [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration): patch Substrate
 
 Six commits on upstream main. Each carries the same code change as its PR; the
-PR versions of #1910 and of the third commit of #1904 add comment and
+PR versions of [#1910](https://github.com/agent-substrate/substrate/pull/1910) and of the third commit of [#1904](https://github.com/agent-substrate/substrate/pull/1904) add comment and
 documentation text that the branch does not:
 
 | Commit | Change | PR |
