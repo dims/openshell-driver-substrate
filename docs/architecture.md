@@ -14,8 +14,9 @@ sandbox is a restore of that template's golden snapshot into a micro-VM. Inside
 the VM, stock OpenShell binaries run unmodified: `openshell-sandbox` holds the
 workload, `openshell-supervisor` enforces policy and audits, and a small relay
 container makes the workload reachable through Substrate's ingress. Nothing in
-OpenShell, Substrate's guest kernel, or kata is forked; seven Substrate commits
-are required and listed in [`upstream-branches.md`](upstream-branches.md).
+OpenShell, Substrate's guest kernel, or kata is forked. Six Substrate commits
+are required, and a seventh matters on gVisor only;
+[`upstream-branches.md`](upstream-branches.md) lists them.
 
 ## The big picture
 
@@ -28,7 +29,7 @@ Three trust domains meet here:
 
 | Domain | Runs | Trusts |
 |---|---|---|
-| OpenShell gateway and this driver | outside the cluster, or as a pod | `ate-api-server` over TLS 1.3 with a bearer token whose audience is `api.ate-system.svc` |
+| OpenShell gateway and this driver | outside the cluster, or as a pod | `ate-api-server` over TLS with a bearer token whose audience is `api.ate-system.svc` |
 | Substrate control plane and node agents | namespace `ate-system`, one atelet per node, one ateom per worker pod | Kubernetes RBAC, image digests, the object store |
 | The guest | one micro-VM per actor | its own kernel and cloud-hypervisor; inside it, the sandbox trusts only the key embedded in its bootstrap |
 
@@ -36,8 +37,9 @@ Three trust domains meet here:
 
 ### openshell-gateway, stock
 
-Any `--compute-driver <name>` that is not one of the gateway's built-ins
-resolves to an external driver at `--compute-driver-socket`. The gateway keeps
+With `--compute-driver-socket`, the gateway binds the name given to
+`--compute-driver` to that socket, whether or not a built-in driver has the
+same name. The gateway keeps
 the sandbox catalog, mints the per-sandbox launch credentials, and derives a
 sandbox's phase from the conditions the driver reports (`derive_phase`):
 `Ready=True` is Ready, `Suspended=True` without `Ready=True` is Stopped, a
@@ -81,7 +83,7 @@ is written against the gateway's phase rules and pinned by a table test:
 | SUSPENDING, PAUSING | `Suspended=False` only | Provisioning |
 | SUSPENDED, PAUSED | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
-| DELETING | `Ready=False` (ContainerStopped), `deleting` | Deleting |
+| DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
 
 ### Template synthesis, `src/template.rs`
 
@@ -120,7 +122,7 @@ set, or `error_message` is set (FailedPrecondition), or 180 s pass
   picks a Worker and asks its node's atelet to restore; suspend asks for a
   checkpoint and clears the assignment; revert puts a crashed or running actor
   back at its last external snapshot; delete tears down from any state when
-  asked. It speaks gRPC over TLS 1.3 with the `servicedns` trust bundle and a
+  asked. It speaks gRPC over TLS with the `servicedns` trust bundle and a
   bearer token; it needs no client certificate.
 - **template reconciler**, inside ate-api-server, gives a new template its
   golden snapshot: it creates one golden actor, resumes it from cold boot,
@@ -132,15 +134,16 @@ set, or `error_message` is set (FailedPrecondition), or 180 s pass
   its Worker `DRAINING`, a vanished pod deletes its Worker, which releases the
   actors bound to it into `CRASHED`.
 - **atelet** is a DaemonSet, one per node and versioned per node. It pulls
-  images by digest into a cache, builds the OCI specs (honoring the image's
-  `USER`, dropping capabilities, setting `no_new_privileges` and the low-port
-  sysctl for micro-VM), lays out durable dirs, and drives the node's ateoms
+  images by digest into a cache, builds the OCI specs (capabilities as the
+  template says; with the commits in [`upstream-branches.md`](upstream-branches.md),
+  also the image's `USER` and, for micro-VM, `no_new_privileges` and the
+  low-port sysctl), lays out durable dirs, and drives the node's ateoms
   through `AteomHerder`: Run, Checkpoint, Restore.
 - **ateom-microvm** is the worker pod's process: it launches cloud-hypervisor,
   serves the rootfs layers over virtiofsd, talks to the kata-agent in the
   guest to start containers, and checkpoints or restores the whole VM. A
-  worker hosts one actor at a time, so a pool of two gives two concurrent
-  actors.
+  worker hosts as many actors as its capacity fits; the helpdesk template asks
+  for a worker's whole CPU, so its pool of two gives two concurrent actors.
 - **object store**: rustfs in kind, GCS on GKE. A snapshot is `base-id`,
   `config.json`, `memory-ranges`, `rootfs-upper.tar`, `durable-dir.tar`,
   `state.json`. A restore is about 350 ms.
@@ -163,9 +166,10 @@ One guest, one network namespace, three containers from the helpdesk template:
   calls.
 - **supervisor**: `openshell-supervisor --role isolation-backend` finds the
   boundary through its runtime descriptor, authenticates with its token pair,
-  loads the Rego policy and data into OPA, installs a TLS-interception CA the
-  workload trusts, starts the workload through the sandbox, decides every
-  connection, proxies the allowed ones, and writes OCSF audit lines.
+  loads the Rego policy and data into Open Policy Agent (OPA), installs a
+  TLS-interception certificate authority (CA) the workload trusts, starts the
+  workload through the sandbox, decides every connection, proxies the allowed
+  ones, and writes Open Cybersecurity Schema Framework (OCSF) audit lines.
 - **relay**: plain `asyncio` in a plain container. The sandbox's broker refuses
   `accept(2)` from a non-loopback peer, so Substrate's router cannot reach the
   agent directly. The relay accepts on the actor's address and connects over
@@ -271,8 +275,8 @@ or not the supervisor has attached by then. Read the worker pod's log:
 
 Templates and their golden snapshots are never garbage-collected. The
 driver's content-hash naming keeps their number equal to the number of
-distinct workloads; the helpdesk's `build.sh` names its template from the
-image digests for the same reason.
+distinct workloads; the helpdesk's `run.sh` names its template from a hash of
+the rendered template, image digests included, for the same reason.
 
 ## Regenerating the diagrams
 

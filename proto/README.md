@@ -7,8 +7,11 @@ the protoc that `protobuf-src` bundles predates them and a client has no use
 for them.
 `build.rs` runs `tonic_prost_build` over it to generate the `Control`
 client the driver uses (`src/lib.rs`'s `ateapi` module). The driver does
-not vendor any OpenShell protos — the OpenShell-side message and trait
+not vendor any OpenShell protos. The OpenShell-side message and trait
 types it implements come from the `openshell-core` crate dependency.
+
+The copy matches upstream at `ed6d2a1f`; upstream last changed the file in
+`7f7a40c1` (#1810).
 
 Refresh by re-copying the file from a current substrate checkout:
 

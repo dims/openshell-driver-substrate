@@ -4,7 +4,7 @@ Two ways to run the helpdesk demo exist in this repository. On
 [`main`](https://github.com/dims/openshell-driver-substrate/tree/main), Substrate is patched: six commits on the
 [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) branch of `dims/substrate`. On
 [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero), Substrate is plain upstream main from
-[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90) and the demo
+[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) and the demo
 image does the same work itself. This page records why the patches were
 needed, what each one did, how the image got by without them, and what it
 cost. State as of 2026-09-26.
@@ -23,18 +23,23 @@ cost. State as of 2026-09-26.
 | 5 | `net.ipv4.ip_unprivileged_port_start` is `0`, then a bind of `127.0.0.53:53` | [`main.rs#L283`](https://github.com/NVIDIA/OpenShell/blob/d3480d2a7efab3fd0217ab67828655617b9af777/crates/openshell-sandbox/src/main.rs#L283) |
 | 6 | Landlock ABI 3 or newer | [`main.rs#L215`](https://github.com/NVIDIA/OpenShell/blob/d3480d2a7efab3fd0217ab67828655617b9af777/crates/openshell-sandbox/src/main.rs#L215) |
 
+This table numbers only the gates the Substrate patches touch. The root
+README's [gates table](../../../README.md#the-gates) lists every check in
+source order; there, socket virtualization, the DNS relay bind and the
+Landlock ABI are gate 7.
+
 Beyond the gates, the sandbox writes: the Landlock probe builds a tree under
-`/tmp`, and the supervisor CA is installed into a directory the sandbox
-creates and then sets to `0755` itself
+`/tmp`, and the supervisor's certificate authority (CA) is installed into a
+directory the sandbox creates and then sets to `0755` itself
 ([`boundary_server.rs#L2700`](https://github.com/NVIDIA/OpenShell/blob/d3480d2a7efab3fd0217ab67828655617b9af777/crates/openshell-sandbox/src/boundary_server.rs#L2700)).
 
 ## What upstream Substrate does not do
 
-At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90):
+At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c):
 
 - atelet ignores the image's `Config.User`; every container process is root.
   Gate 1 fails. Filed as [#1918](https://github.com/agent-substrate/substrate/pull/1918).
-- An ActorTemplate cannot set a sysctl, and the micro-VM runtime did not
+- An ActorTemplate cannot set a sysctl, and the micro-VM runtime does not
   forward `Linux.Sysctl` to the kata agent, so the guest keeps
   `ip_unprivileged_port_start=1024`. Gate 5 fails. Filed as
   [#1904](https://github.com/agent-substrate/substrate/pull/1904).
@@ -51,7 +56,9 @@ At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60
 
 ## [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration): patch Substrate
 
-Six commits on upstream main, each the version filed in its PR:
+Six commits on upstream main. Each carries the same code change as its PR; the
+PR versions of #1910 and of the third commit of #1904 add comment and
+documentation text that the branch does not:
 
 | Commit | Change | PR |
 |---|---|---|
@@ -83,8 +90,9 @@ on a dead sandbox; see the troubleshooting table in the
 ## [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero): let the image do it
 
 The sandbox container starts as root, does what Substrate does not, and
-becomes the image's user before `openshell-sandbox` runs. Three template
-lines and one script:
+becomes the image's user before `openshell-sandbox` runs. Two changed template
+lines (the command and an `add:` list), two volumes dropped (`tmp` and
+`supervisor-ca`), and one script:
 
 ```yaml
 command: ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
@@ -109,8 +117,8 @@ exec "$@"
 
 Step by step, against the list above:
 
-- `NET_ADMIN` lets the script write the sysctl. Substrate's OCI spec marks no
-  path read-only, so `/proc/sys` accepts it. That replaces the two sysctl
+- `NET_ADMIN` lets the script write the sysctl. Substrate's Open Container
+  Initiative (OCI) spec marks no path read-only, so `/proc/sys` accepts it. That replaces the two sysctl
   commits.
 - `setpriv` drops the bounding set (this needs `SETPCAP`), clears the
   inheritable set, sets `no_new_privs`, and changes to `65532:65532`
@@ -128,9 +136,9 @@ Step by step, against the list above:
 
 Two facts about Substrate made this possible without patching it: the
 template API grants capabilities on top of a default set
-([`ateapi.proto`](https://github.com/agent-substrate/substrate/blob/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90/pkg/proto/ateapipb/ateapi.proto#L1027)), and the OCI
+([`ateapi.proto`](https://github.com/agent-substrate/substrate/blob/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c/pkg/proto/ateapipb/ateapi.proto#L1027)), and the OCI
 spec builder sets neither `readonlyPaths` nor `maskedPaths`
-([`ocispec.go`](https://github.com/agent-substrate/substrate/blob/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90/internal/ocispec/ocispec.go)).
+([`ocispec.go`](https://github.com/agent-substrate/substrate/blob/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c/internal/ocispec/ocispec.go)).
 
 Result: the ten beats pass on plain upstream main on both test hosts, 53 s,
 58 s and 62 s with a fresh golden snapshot, the same strict `run.sh`.

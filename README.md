@@ -23,8 +23,8 @@ kernel is stock kata.
 
 A second variant needs no Substrate patch at all: on this repo's
 [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch the sandbox image drops root itself,
-with a five-line entry script and four start-up capabilities, and Substrate is
-plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90), where
+with a short entry script and four start-up capabilities, and Substrate is
+plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c), where
 [#1923](https://github.com/agent-substrate/substrate/pull/1923) merged. It passes the same ten beats.
 [`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate should do
 that work; the PRs are the fix.
@@ -66,8 +66,8 @@ Substrate's actor lifecycle:
 | `ensure_workspace` | `CreateAtespace` |
 | `delete_workspace` | no-op: one atespace serves every workspace |
 
-One `ActorTemplate` is reused for every actor whose template comes out identical
-— its name is a hash of the template itself — so only the first
+One `ActorTemplate` is reused for every actor whose template comes out
+identical, because its name is a hash of the template itself. So only the first
 `create_sandbox` for a workload pays for a golden-snapshot build. Nothing that
 varies per sandbox goes into a template: a snapshot freezes process memory, so
 a per-sandbox value would come back identical in every actor restored from it.
@@ -92,7 +92,7 @@ tests/live.rs         full lifecycle against a real cluster
 docs/                 architecture, with diagrams, and the upstream branch index
 examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats
 harness/
-  bootstrap-gen/      mints the Ed25519/JWT/TLS bundle the binaries require
+  bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle the binaries require
   images/             sandbox image with its bootstrap baked in
   manifests/          WorkerPool and capability-probe templates
   scripts/            credential baking, template rendering, version retargeting
@@ -112,7 +112,8 @@ Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
 
 Bumping the OpenShell pin in `Cargo.toml` is not a one-line change:
 `harness/bootstrap-gen` builds `BoundaryConfig` and `SandboxRuntimeDescriptor`
-by hand, and those types and `proto/openshell.proto` move between releases.
+by hand, and those types and OpenShell's `proto/openshell.proto` move between
+releases.
 Budget bootstrap-gen work with every bump.
 
 ---
@@ -146,21 +147,21 @@ curl -fsSL https://sh.rustup.rs | sh -s -- -y
 curl -fsSL https://mise.run | sh                           # OpenShell's toolchain (step 3)
 export GITHUB_TOKEN=...                                    # mise: 60 anonymous API calls/hour otherwise
 go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest   # steps 7 and 8
-# go >= 1.23, docker, kubectl, kind from their upstream installers
+# go >= 1.27 (Substrate's go.mod; an older go with GOTOOLCHAIN=auto downloads it), docker, kubectl, kind from their upstream installers
 ```
 
 Use a current `kind`; an old one fails against the node image with `unknown
 containerd config version: 4`.
 
 A host with a managed firewall can leave the kind node with no egress at all.
-On a BCM-provisioned host, nftables `cm_filter` has a forward policy of DROP
+On a host provisioned by NVIDIA Base Command Manager (BCM), nftables `cm_filter` has a forward policy of DROP
 and `cmd` re-applies it, so disabling the firewall does not hold; the fix is to
 add the kind bridge to the template's `@nat_ifaces` set, and the input chain
 needs an allowance for anything on the host the node must reach, such as the
 model endpoint in step 7. The symptom is an install that looks like a slow
 registry for twenty minutes. The pre-flight in step 1 catches it.
 
-`ko` does **not** need installing separately — Substrate vendors it and every
+`ko` does **not** need installing separately. Substrate vendors it, and every
 build must go through its wrapper, `./hack/run-tool.sh ko ...`.
 
 ### 1. Patch Substrate and bring up a cluster
@@ -183,8 +184,8 @@ make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any ol
 [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration); [`docs/upstream-branches.md`](docs/upstream-branches.md)
 links each commit on it. `create-kind-cluster.sh` also starts a local image
 registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
-own readiness wait is 60 s per workload and it exits 0 when that wait times
-out, so gate on the three `kubectl` waits, not on its exit code.
+own readiness wait is 60 s per workload (`--rollout-timeout`), so keep the
+three `kubectl` waits above after it returns.
 
 On a **fresh** cluster the node is labelled with the build version
 automatically. Retargeting only applies after a rebuild
@@ -210,8 +211,8 @@ ARCH=amd64 ATE_INSTALL_KIND=true hack/install-microvm-deps.sh --install
 
 This downloads the kata asset set, stages it to the cluster object store, and
 applies the cluster-wide `microvm` SandboxConfig. `ATE_INSTALL_KIND=true`
-picks the in-cluster rustfs bucket; without it the script takes the GKE path
-and fails on `gcloud: command not found`.
+picks the in-cluster rustfs bucket; without it the script takes the Google
+Kubernetes Engine (GKE) path and fails on `gcloud: command not found`.
 
 ### 3. Build the OpenShell images
 
@@ -240,7 +241,8 @@ docker-image` does not produce one.
 
 `examples/helpdesk/build.sh` does steps 4 and 5 for the example; the commands
 below are for the capability probe and the gateway path. The tokens last one
-hour (below), so do steps 4, 5 and 7 in one sitting, after 1 to 3 and 6.
+hour (below), so do steps 4, 5 and 8 in one sitting, after 1 to 3 and 6. The
+same hour applies between `build.sh` and `run.sh` in step 7.
 
 An Ed25519-signed JWT pair and TLS material bound to one session id:
 
@@ -271,9 +273,9 @@ gateway.
 harness/scripts/package-credentials.sh out/ <registry>/openshell-sandbox:dev <registry>
 ```
 
-This prints `SANDBOX_BAKED_IMAGE` — the sandbox image with its bootstrap baked
-into the writable rootfs, used by the gateway path and the capability probe —
-and leaves `out/bootstrap.tar` for the helpdesk image.
+This prints `SANDBOX_BAKED_IMAGE`, the sandbox image with its bootstrap baked
+into the writable rootfs, used by the gateway path and the capability probe.
+It also leaves `out/bootstrap.tar` for the helpdesk image.
 
 Baked rather than mounted, because the sandbox **consumes** its bootstrap,
 unlinking the file after reading it, so a read-only image volume fails with
@@ -310,8 +312,10 @@ the worker pod log.
 
 ### 8. Drive it from a gateway
 
-A stock `openshell-gateway` dispatches to this driver over a Unix socket. Any
-driver name that is not one of its built-ins resolves to an external driver.
+A stock `openshell-gateway` dispatches to this driver over a Unix socket. With
+`--compute-driver-socket`, the gateway binds the name given to
+`--compute-driver` to that socket, whether or not a built-in driver has the
+same name.
 
 ```sh
 kubectl port-forward -n ate-system svc/api 8443:443 &
@@ -330,7 +334,7 @@ openshell-gateway --compute-driver substrate \
   --compute-driver-socket /tmp/substrate.sock --disable-tls
 ```
 
-`ate-api-server` needs TLS 1.3, the `servicedns` trust bundle, server name
+`ate-api-server` needs TLS with the `servicedns` trust bundle, server name
 `api.ate-system.svc`, and a bearer token whose audience is that same name. It
 does not require a client certificate.
 
@@ -387,7 +391,7 @@ the sandbox.
 | 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`85836a7c`](https://github.com/dims/substrate/commit/85836a7c83f961611b65ec316465adb01376f046), [`776d5241`](https://github.com/dims/substrate/commit/776d5241fc519751929e3563e61f566a51b4470d) |
 
 Gate 5 needs `/tmp` because the probe builds its test tree under
-`std::env::temp_dir()`, and the stock sandbox image contains one file — the
+`std::env::temp_dir()`, and the stock sandbox image contains one file, the
 binary.
 
 ### Two transient conditions
@@ -395,9 +399,11 @@ binary.
 `kubectl-ate delete actor-template` returns `Aborted: another operation is in
 progress` while that template's golden warm-up runs. Retry after it finishes.
 
-The warm-up snapshots at a fixed 20 seconds after the actor starts, whether or
-not the containers are ready. A supervisor that has not attached by then is
-captured in that state and stays that way in every restore.
+For a template without a wakeup probe on every container, which is every
+template in this repo, the warm-up snapshots at a fixed 20 seconds after the
+actor starts, whether or not the containers are ready. A supervisor that has
+not attached by then is captured in that state and stays that way in every
+restore.
 
 ### Where the output is
 

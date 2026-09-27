@@ -1,7 +1,7 @@
 # Harness
 
 Everything needed to reproduce a working OpenShell-on-Substrate run that is
-not the driver itself. See the root README for the walkthrough.
+not the driver itself. See the [root README](../README.md) for the walkthrough.
 
 | Path | What |
 |---|---|

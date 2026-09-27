@@ -30,7 +30,7 @@ any base works; `Dockerfile` puts it on `python:3.12-slim`.
 |---|---|---|---|
 | 1 | Template and golden snapshot | One `ActorTemplate` names the three containers. Substrate boots it once, waits 20 s, and snapshots the whole VM. | The sandbox logs `Boundary control listener ready` (every qualification gate passed), `Landlock ruleset built`, `PROC:LAUNCH python3`. The supervisor logs `Isolation boundary attached`. ateom writes `memory-ranges`, `rootfs-upper.tar`, `durable-dir.tar`, `state.json` to the bucket. |
 | 2 | Two agents from that snapshot | `create actor` and `resume` bring up alice and bob, each on its own worker: a worker hosts as many actors as fit, and each helpdesk actor asks for the whole worker's CPU. | `Actor restored (overlay rootfs) in ~350 ms`. Nothing boots: both are the same frozen process image, so both start at `turns: 0`. Each actor also gets a Substrate `EgressPolicy` for the model host. |
-| 3 | Egress is an allow-list | `https://example.com/` fails name resolution. The model host answers. | The sandbox's network broker denies the `connect(2)` (`syscall=42`) with `EACCES`: the host is not in `data.yaml`. The supervisor's OCSF audit line for the allowed one is `NET:OPEN ALLOWED /usr/local/bin/python3.12 -> 172.18.0.1:11434 [policy:model engine:opa]`. |
+| 3 | Egress is an allow-list | `https://example.com/` fails name resolution. The model host answers. | The sandbox's network broker denies the `connect(2)` (`syscall=42`) with `EACCES`: the host is not in `data.yaml`. The supervisor's Open Cybersecurity Schema Framework (OCSF) audit line for the allowed one is `NET:OPEN ALLOWED /usr/local/bin/python3.12 -> 172.18.0.1:11434 [policy:model engine:opa]`. |
 | 4 | alice answers | `/chat` returns the model's reply, `turns: 1`. | `OCSF HTTP:POST ALLOWED POST http://.../v1/chat/completions`. The request went through the supervisor's proxy, which is where a provider credential would be attached. The agent never holds one. |
 | 5 | Suspend alice | `ACTOR_STATE_SUSPENDED`. Her worker shows `0/1` actors. | `Actor checkpointed` with the snapshot's file list. The VM is gone; only the snapshot remains. |
 | 6 | Resume alice | `/status` still says `turns: 1`. The follow-up question is answered from history, `turns: 2`. | `Actor restored ... in ~350 ms`. The history came back inside the memory image. |
@@ -65,7 +65,7 @@ two, so no other actor may be running; `run.sh` checks and refuses otherwise.
 Suspend or delete the others, or raise the pool's replicas.
 
 On PATH: `docker`, `cargo`, `kubectl`, `kubectl-ate` (ahead of any older
-copy), `jq`, `curl`, `grpcurl`, `envsubst`.
+copy), `jq`, `curl`, `grpcurl`, `envsubst`, `openssl`, `sha256sum`.
 
 ## Build
 
@@ -191,7 +191,7 @@ of memory, not uptime.
 | `run.sh` | The ten beats. Prints the matching Substrate and OpenShell log lines after each. |
 | `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
 | `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
-| `docs/why-lean-integration.md` | Why the demo needed Substrate patches, and how the [`lean-zero`](https://github.com/dims/substrate/tree/lean-zero) image gets by without them. |
+| `docs/why-lean-integration.md` | Why the demo needed Substrate patches, and how the [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) image gets by without them. |
 | `Dockerfile` | The sandbox image: `openshell-sandbox` from the stock image, python, the agent, the baked bootstrap. |
 | `policy.rego` | OpenShell's shipped `sandbox-policy.rego` at the pinned rev, unmodified. |
 | `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. |
@@ -216,8 +216,9 @@ curl -p -x http://127.0.0.1:8001 --proxy-header "ate-target-actor: ${ATESPACE}/a
 `policy.rego`'s `egress_authorization` rule allows a connection only if
 `data.yaml` names the host, the port, and the binary making it. A policy
 without that rule denies everything. Then Substrate's atenet-egress answers
-403 until the actor has an `EgressPolicy`; `kubectl-ate` has no verb for it,
-so `run.sh` creates one per actor over gRPC:
+403 until the actor has an `EgressPolicy`. `run.sh` creates one per actor over
+gRPC; `kubectl-ate create egress-policy <actor> -a <atespace> -f <manifest>`
+does the same from a YAML manifest:
 
 ```sh
 grpcurl -cacert ca.crt -authority api.ate-system.svc -H "authorization: Bearer ${TOKEN}" \
@@ -258,6 +259,7 @@ workload trusts. A durable-dir volume works because those are `0777`.
 | `delete actor-template` says `Aborted: another operation is in progress` | Its golden warm-up is running. | Retry after it tags. |
 | Beat 8: alice stays `RUNNING` on a `DRAINING` worker | The pod was deleted without `--force`. The pool's grace period is an hour and ateom waits for the guest workloads. | `kubectl delete pod --grace-period=0 --force`, as `run.sh` does. |
 | `kubectl-ate logs actor` prints nothing | Restored actors log through the worker pod. | `kubectl logs -n ${ATESPACE} <worker-pod>`, which is what `run.sh` filters. |
+| A chat in beat 4, 6 or 10 hangs about 90 s, then `<actor> gave no reply`; the supervisor logged `NET:OPEN` but no `HTTP:POST` | The open stall in [docs/why-lean-integration.md](docs/why-lean-integration.md#still-open): about one run in three, with or without the Substrate patches. | Run again. |
 
 ## Cleanup
 

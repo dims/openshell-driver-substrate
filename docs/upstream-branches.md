@@ -8,28 +8,31 @@ first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918).
 
 **Branch:** [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) at
 [`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c): six commits on `agent-substrate/substrate` main
-[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90), the merge of
+[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c), the merge of
 [#1923](https://github.com/agent-substrate/substrate/pull/1923). Previous heads are kept as
 [`archive/lean-integration-2026-09-23`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-23) ([`0ff8b818`](https://github.com/dims/substrate/commit/0ff8b818d515036409d4ce0070f00582cb010659)),
 [`archive/lean-integration-2026-09-25`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-25) ([`8a290199`](https://github.com/dims/substrate/commit/8a290199df2c5dd7b2ecc8d5c43627182803ecab)),
 [`archive/lean-integration-2026-09-26`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-26) ([`ec91ff65`](https://github.com/dims/substrate/commit/ec91ff65dab1a3a674cbb0660bf9be1b178b4b86))
-and [`archive/lean-integration-2026-09-26b`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-26b) ([`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c)).
+and [`archive/lean-integration-2026-09-26b`](https://github.com/dims/substrate/tree/archive/lean-integration-2026-09-26b) ([`d6249cde`](https://github.com/dims/substrate/commit/d6249cde54de32ecd5fe085e67de8758c54a7972)).
 
 The head is verified, and so is each commit's necessity: on 2026-09-26
 `examples/helpdesk/run.sh` passed all ten beats on a Linux host with
-`/dev/kvm` rebuilt from scratch at [`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c), and a rebuild without
-any one of the six commits fails at beat 1 or 2. The seventh change, the
-rootfs mode, is not needed on micro-VM, whose guest already sees `0755`; it
-lives on as the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918), which needs it on
-gVisor. On a second host the same head passes beats 1 to 9
-and then stalls at beat 10: the supervisor logs the connection to the model
-host but never the request, for 80 s. That stall is on the OpenShell side,
-appears with the seven-commit stack too, and is not understood yet.
+`/dev/kvm`, with Substrate rebuilt from scratch at [`ae03ebbb`](https://github.com/dims/substrate/commit/ae03ebbbac81311af81c7bed510d539e77e0559c), and a
+rebuild without any one of the six commits fails at beat 1 or 2. The seventh
+change, the rootfs mode, is not needed on micro-VM, whose guest already sees
+`0755`; it lives on as the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918), which needs it on
+gVisor. One failure is still open, on both test hosts: about one run in three
+stalls once at beat 10, where the supervisor logs the connection to the model
+host but never the request, for 80 s. It appears with and without the six
+commits, so it sits inside the micro-VM between the sandbox and the supervisor;
+see the [helpdesk notes](../examples/helpdesk/docs/why-lean-integration.md#still-open).
+`run.sh` fails the demo when it happens.
 
 This repo's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch needs none of the six:
 the sandbox image drops root itself, and Substrate is plain upstream main from
-[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1f4a60aa5c2e5bd3e7d5a0d5de3ec5bd90). On 2026-09-26
-that passed the ten beats on both hosts with the same strict `run.sh`.
+[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c). On 2026-09-26
+that passed the ten beats on both hosts with the same strict `run.sh`, subject
+to the same open stall.
 
 Every commit was found by running a real non-root workload; none is specific
 to OpenShell. Before them, every actor container silently ran as root, and no
@@ -38,7 +41,7 @@ container declaring a non-root `USER` could run at all, on either sandbox class.
 | Commit | Change | Upstream |
 |---|---|---|
 | not on the branch | `imagecache`: make the merged rootfs root searchable by non-root. `rootfs` and `upper` were `0700`; on gVisor the container's `/` takes that mode, so a non-root process could not search its own root. The micro-VM guest already saw `0755`, so the helpdesk demo does not need it. `TestSetupBundleRootfs_RootIsSearchableByNonRoot`. | [#1905](https://github.com/agent-substrate/substrate/pull/1905) closed 2026-09-26; the change is the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918), which needs it on gVisor |
-| [`f706c3c0`](https://github.com/dims/substrate/commit/f706c3c0b39574998c98fbe08f519b96c8461825) | `atelet`: honor a container image's own `USER`. `ocispec.Options` gains `UID`/`GID`, resolved by `resolveUser` with containerd's rule: numeric `uid[:gid]`, no group means gid 0, `root` is 0, ids are bounded to int32; a named user is an error, not a silent fall-back to root. The pause container follows the same rule. `TestResolveUser`, `TestBuild_ProcessUser`, `TestShapers_PreserveProcessUser`, `TestSpecToAgentPB_ForwardsProcessUser`. | [#1918](https://github.com/agent-substrate/substrate/pull/1918) draft, stacked on [#1905](https://github.com/agent-substrate/substrate/pull/1905)'s commit; not to merge before [#1906](https://github.com/agent-substrate/substrate/pull/1906) and [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
+| [`f706c3c0`](https://github.com/dims/substrate/commit/f706c3c0b39574998c98fbe08f519b96c8461825) | `atelet`: honor a container image's own `USER`. `ocispec.Options` gains `UID`/`GID`, resolved by `resolveUser` with containerd's rule: numeric `uid[:gid]`, no group means gid 0, `root` is 0, ids are bounded to int32; a named user is an error, not a silent fall-back to root. The pause container follows the same rule. `TestResolveUser`, `TestBuild_ProcessUser`, `TestShapers_PreserveProcessUser`, `TestSpecToAgentPB_ForwardsProcessUser`. | [#1918](https://github.com/agent-substrate/substrate/pull/1918) draft, two commits with the rootfs change first; not to merge before [#1906](https://github.com/agent-substrate/substrate/pull/1906) and [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
 | [`e7e6db21`](https://github.com/dims/substrate/commit/e7e6db2197c562882000652a6d778e720c028f77) | `atelet`: make durable-dir volumes writable by non-root containers (`0777`, as Kubernetes gives an emptyDir). `TestPrepareDurableDirVolume`. | [#1906](https://github.com/agent-substrate/substrate/pull/1906) draft |
 | [`61ef7233`](https://github.com/dims/substrate/commit/61ef7233cca5af27dcd7a29cc94aa656e2831b8f) | `atelet`: add `CAP_DAC_OVERRIDE` to reset dirs a non-root container wrote. Plain root cannot unlink files from a directory another uid owns, so `resetActorDirs` failed after every checkpoint of such an actor and the suspend never completed. | [#1910](https://github.com/agent-substrate/substrate/pull/1910) draft; its own PR after [#1906](https://github.com/agent-substrate/substrate/pull/1906), the body argues the alternatives, cleanup in ateom first among them |
 | [`85836a7c`](https://github.com/dims/substrate/commit/85836a7c83f961611b65ec316465adb01376f046) | `microvm`: forward `Linux.Sysctl` to the kata agent. `TestSpecToAgentPB_ForwardsSysctl`. | [#1904](https://github.com/agent-substrate/substrate/pull/1904) draft |
@@ -52,9 +55,9 @@ older gVisor snapshots unrestorable.
 Related, not on the branch:
 
 - [#1912](https://github.com/agent-substrate/substrate/pull/1912) put the ActorIdentity extension back on the
-  ateom-for-actor certificate as a stopgap for the agentgateway e2e lane
+  ateom-for-actor certificate as a stopgap for the agentgateway end-to-end test lane
   ([#1922](https://github.com/agent-substrate/substrate/issues/1922)); [#1923](https://github.com/agent-substrate/substrate/pull/1923), the pin bump to an
-  agentgateway build that reads the URI SAN, merged on 2026-09-26 and both
+  agentgateway build that reads the URI subject alternative name (SAN), merged on 2026-09-26 and both
   are closed. The four PRs above were rebased onto that main the same day.
 - [#1911](https://github.com/agent-substrate/substrate/issues/1911) proposes
   renaming the node state root `/var/lib/ateom-gvisor` to `/var/lib/ate`. Both
@@ -84,8 +87,9 @@ ateom has torn the VM down, the reconciler retries the checkpoint against a VM
 that no longer exists, every 10 seconds, without end. The actor and its
 template can then not be deleted (`Aborted: another operation is in progress`).
 
-The driver's vendored `proto/ateapi.proto` tracks this head; see
-[`../proto/README.md`](../proto/README.md).
+The driver's vendored `proto/ateapi.proto` matches upstream's
+`pkg/proto/ateapipb/ateapi.proto` at `ed6d2a1f`; the six commits do not touch
+it. [`../proto/README.md`](../proto/README.md) says how to refresh it.
 
 ## kata-containers
 
