@@ -80,8 +80,7 @@ refresh it when upstream changes the file.
   operation is in progress`).
 - [#1911](https://github.com/agent-substrate/substrate/issues/1911) proposes renaming the node state root
   `/var/lib/ateom-gvisor` to `/var/lib/ate`; both sandbox classes mount it,
-  and the name predates micro-VM. Draft [#1926](https://github.com/agent-substrate/substrate/pull/1926) does the rename with a
-  legacy-path fallback, so one release carries both paths.
+  and the name predates micro-VM. Draft [#1926](https://github.com/agent-substrate/substrate/pull/1926) does the rename.
 
 ## kata-containers
 
