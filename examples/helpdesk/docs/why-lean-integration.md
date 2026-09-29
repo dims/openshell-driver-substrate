@@ -1,7 +1,7 @@
 # Why the demo needs Substrate patches, and how the image can replace them
 
 Two ways to run the helpdesk demo exist in this repository. On [`main`](https://github.com/dims/openshell-driver-substrate/tree/main),
-Substrate is patched: six commits on the [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) branch of `dims/substrate`. On
+Substrate is patched: the commits of four open PRs on the [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) branch of `dims/substrate`. On
 [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero), Substrate is plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c) and the demo image does the
 same work itself. This page says why the patches are needed, what each one
 does, how the image gets by without them, and what that costs.
@@ -52,18 +52,21 @@ At [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae
 
 ## [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration): patch Substrate
 
-The six PR commits, cherry-picked in order onto upstream main:
+The PR commits, cherry-picked in order onto upstream main:
 
 | Commit | Change | PR |
 |---|---|---|
-| [`0578655e`](https://github.com/dims/substrate/commit/0578655e1d6c45ab61f8f1a15cd13df9559a3c12) | atelet honors the image's `USER` | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
-| [`8476f5d0`](https://github.com/dims/substrate/commit/8476f5d0e3fa1899c1386a5acfe2752c46500586) | durable-dir volumes are `0777` | [#1906](https://github.com/agent-substrate/substrate/pull/1906) |
-| [`de620517`](https://github.com/dims/substrate/commit/de62051716f8a3df34100efb23961169163aa760) | atelet holds `CAP_DAC_OVERRIDE` to reset actor dirs | [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
-| [`15d2b715`](https://github.com/dims/substrate/commit/15d2b71512d4cc62e3534be06da9cf14178cd511) | micro-VM forwards `Linux.Sysctl` to the kata agent | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
-| [`5c2a4c21`](https://github.com/dims/substrate/commit/5c2a4c21b88eb684f88c8ac4de4fc8945be6d595) | micro-VM sets `net.ipv4.ip_unprivileged_port_start=0` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
-| [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e) | micro-VM sets `no_new_privileges` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`d4602e7f`](https://github.com/dims/substrate/commit/d4602e7f7897e120efa9c311c8b2eb596e6817e2) | imagecache reads a file from the image's layers, for `USER` | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`106cfec9`](https://github.com/dims/substrate/commit/106cfec9f5c0898ea91e32425a9b54402390a063) | atelet takes the bundle path as a parameter; no behavior change | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`b5c3fdc1`](https://github.com/dims/substrate/commit/b5c3fdc1e022c759ea993fa630c801a5bdac84cd) | atelet honors the image's `USER`, resolved against its passwd and group | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`f2d7f787`](https://github.com/dims/substrate/commit/f2d7f7878051769a4f56d9d63f9c8e0f7ee38442) | atelet starts the process in the image's `WORKDIR` | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`0b8d124a`](https://github.com/dims/substrate/commit/0b8d124ae64c2722489eec012f9ec6ee63464143) | durable-dir volumes are `0777` | [#1906](https://github.com/agent-substrate/substrate/pull/1906) |
+| [`742e8f1c`](https://github.com/dims/substrate/commit/742e8f1c4ba8ecf28e14808ff89a3cda1321a353) | atelet holds `CAP_DAC_OVERRIDE` to reset actor dirs | [#1910](https://github.com/agent-substrate/substrate/pull/1910) |
+| [`b47e9040`](https://github.com/dims/substrate/commit/b47e9040a6c4fe999c16e1d0957a0a85e5d76b51) | micro-VM forwards `Linux.Sysctl` to the kata agent | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`dc53a35b`](https://github.com/dims/substrate/commit/dc53a35ba72437827198dc7ba921b7ca09f651e2) | micro-VM sets `net.ipv4.ip_unprivileged_port_start=0` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7) | micro-VM sets `no_new_privileges` | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
 
-Each is necessary. Leave any one out and the demo fails at beat 1 or 2:
+Each PR is necessary. Leave any one out and the demo fails at beat 1 or 2:
 without `CAP_DAC_OVERRIDE` the golden snapshot never gets its tag; without any
 other, the sandbox never starts and every request is the router's 502. `run.sh`
 scores on the log evidence (`Boundary control listener ready`, `PROC:LAUNCH`,

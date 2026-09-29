@@ -5,32 +5,35 @@ where each change stands, and what to do when it lands.
 
 ## agent-substrate/substrate
 
-Six commits are needed. They are open as four PRs on
+Nine commits are needed. They are open as four PRs on
 `agent-substrate/substrate`, none merged: [#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906), [#1910](https://github.com/agent-substrate/substrate/pull/1910)
 and [#1918](https://github.com/agent-substrate/substrate/pull/1918). Until they merge, the demo runs against [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration) on
-`dims/substrate`, head [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e): the six PR commits, cherry-picked in order
+`dims/substrate`, head [`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7): the PR commits, cherry-picked in order
 onto upstream main [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c). The branch has no commits of its own. When a PR
 changes, the branch is re-picked and the pin in step 1 of the root README moves
 with it.
 
 | Commit | Change | PR |
 |---|---|---|
-| [`0578655e`](https://github.com/dims/substrate/commit/0578655e1d6c45ab61f8f1a15cd13df9559a3c12) | `atelet`: honor a container image's own `USER`. `ocispec.Options` gains `UID`/`GID`, resolved by `resolveUser` with containerd's rule: numeric `uid[:gid]`, no group means gid 0, `root` is 0, ids are bounded to int32; a named user is an error, not a silent fall-back to root. The pause container follows the same rule. | [#1918](https://github.com/agent-substrate/substrate/pull/1918), second commit. Merge after [#1906](https://github.com/agent-substrate/substrate/pull/1906) and [#1910](https://github.com/agent-substrate/substrate/pull/1910): a non-root workload needs both. |
-| [`8476f5d0`](https://github.com/dims/substrate/commit/8476f5d0e3fa1899c1386a5acfe2752c46500586) | `atelet`: make durable-dir volumes writable by non-root containers (`0777`, as Kubernetes gives an emptyDir). | [#1906](https://github.com/agent-substrate/substrate/pull/1906) |
-| [`de620517`](https://github.com/dims/substrate/commit/de62051716f8a3df34100efb23961169163aa760) | `atelet`: add `CAP_DAC_OVERRIDE` to reset dirs a non-root container wrote. Plain root cannot unlink files from a directory another uid owns, so `resetActorDirs` fails after every checkpoint of such an actor and the suspend never completes. | [#1910](https://github.com/agent-substrate/substrate/pull/1910). The body argues the alternatives, cleanup in ateom first among them. |
-| [`15d2b715`](https://github.com/dims/substrate/commit/15d2b71512d4cc62e3534be06da9cf14178cd511) | `microvm`: forward `Linux.Sysctl` to the kata agent. | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
-| [`5c2a4c21`](https://github.com/dims/substrate/commit/5c2a4c21b88eb684f88c8ac4de4fc8945be6d595) | `microvm`: let a capability-free container bind a low port: `net.ipv4.ip_unprivileged_port_start=0` in `ShapeMicroVM`, parity with gVisor, whose netstack has no privileged-port check. | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
-| [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e) | `microvm`: set `no_new_privileges` on every guest container, parity with `runsc --allow-suid=false`. | [#1904](https://github.com/agent-substrate/substrate/pull/1904), third commit. The body says why no `allowPrivilegeEscalation` field is proposed and offers to split the commit out. |
+| [`d4602e7f`](https://github.com/dims/substrate/commit/d4602e7f7897e120efa9c311c8b2eb596e6817e2) | `imagecache`: read a file from an image's layer chain, so atelet can read the image's `/etc/passwd` and `/etc/group` before the rootfs is mounted. | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`106cfec9`](https://github.com/dims/substrate/commit/106cfec9f5c0898ea91e32425a9b54402390a063) | `atelet`: pass the bundle path into `prepareOCIDirectory`. No behavior change; lets a test drive it against a temp dir. | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`b5c3fdc1`](https://github.com/dims/substrate/commit/b5c3fdc1e022c759ea993fa630c801a5bdac84cd) | `atelet`: honor a container image's own `USER`, resolved as Docker does against the image's `/etc/passwd` and `/etc/group`: `uid:gid` as is, a bare uid with its login group (gid 0 without an entry), names looked up or `Run`/`Restore` fails, group memberships as supplementary groups. The pause container follows the same rule. | [#1918](https://github.com/agent-substrate/substrate/pull/1918). Merge after [#1906](https://github.com/agent-substrate/substrate/pull/1906) and [#1910](https://github.com/agent-substrate/substrate/pull/1910): a non-root workload needs both. |
+| [`f2d7f787`](https://github.com/dims/substrate/commit/f2d7f7878051769a4f56d9d63f9c8e0f7ee38442) | `atelet`: honor a container image's `WORKDIR`: the process starts there instead of `/`, and the directory is created in the actor's upper when the image lacks it. | [#1918](https://github.com/agent-substrate/substrate/pull/1918) |
+| [`0b8d124a`](https://github.com/dims/substrate/commit/0b8d124ae64c2722489eec012f9ec6ee63464143) | `atelet`: make durable-dir volumes writable by non-root containers (`0777`, as Kubernetes gives an emptyDir). | [#1906](https://github.com/agent-substrate/substrate/pull/1906) |
+| [`742e8f1c`](https://github.com/dims/substrate/commit/742e8f1c4ba8ecf28e14808ff89a3cda1321a353) | `atelet`: add `CAP_DAC_OVERRIDE` to reset dirs a non-root container wrote. Plain root cannot unlink files from a directory another uid owns, so `resetActorDirs` fails after every checkpoint of such an actor and the suspend never completes. | [#1910](https://github.com/agent-substrate/substrate/pull/1910). The body argues the alternatives, cleanup in ateom first among them. |
+| [`b47e9040`](https://github.com/dims/substrate/commit/b47e9040a6c4fe999c16e1d0957a0a85e5d76b51) | `microvm`: forward `Linux.Sysctl` to the kata agent. | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`dc53a35b`](https://github.com/dims/substrate/commit/dc53a35ba72437827198dc7ba921b7ca09f651e2) | `microvm`: let a capability-free container bind a low port: `net.ipv4.ip_unprivileged_port_start=0` in `ShapeMicroVM`, parity with gVisor, whose netstack has no privileged-port check. | [#1904](https://github.com/agent-substrate/substrate/pull/1904) |
+| [`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7) | `microvm`: set `no_new_privileges` on every guest container, parity with `runsc --allow-suid=false`. | [#1904](https://github.com/agent-substrate/substrate/pull/1904), third commit. The body says why no `allowPrivilegeEscalation` field is proposed and offers to split the commit out. |
 
 Every commit was found by running a real non-root workload; none is specific
 to OpenShell. Without them, every actor container silently runs as root, and no
 container declaring a non-root `USER` can run at all, on either sandbox class.
-Each of the six is necessary for the demo: without `CAP_DAC_OVERRIDE` the
+Each PR is necessary for the demo: without `CAP_DAC_OVERRIDE` the
 golden snapshot never gets its tag, and without any other the sandbox never
 starts. [`why-lean-integration.md`](../examples/helpdesk/docs/why-lean-integration.md)
 maps each commit to the OpenShell gate it clears.
 
-A seventh change is not on the branch. `imagecache` leaves the merged rootfs
+One change is not on the branch. `imagecache` leaves the merged rootfs
 root at `0700`; on gVisor the container's `/` takes that mode, so a non-root
 process cannot search its own root. The micro-VM guest already sees `0755`, so
 the demo does not need it. It is the first commit of [#1918](https://github.com/agent-substrate/substrate/pull/1918), which needs it
@@ -41,33 +44,34 @@ compares them with the checkpoint-time spec, so a shared default would make
 older gVisor snapshots unrestorable.
 
 This repository's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch runs the same demo against plain upstream main
-[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c): the sandbox image drops root itself and needs none of the six.
+[`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c): the sandbox image drops root itself and needs none of them.
 
 ### Behavior changes for existing workloads
 
 Each PR states its own:
 
-- [`0578655e`](https://github.com/dims/substrate/commit/0578655e1d6c45ab61f8f1a15cd13df9559a3c12): an image with a numeric `USER` used to run as root and now
-  runs as that user (gid 0 when the image names no group); one with a named
-  `USER` now fails to start. On gVisor, a snapshot taken before this change
-  from an image with a numeric `USER` does not restore after it, the golden
-  snapshot included: `runsc restore` enforces that `Process.User` matches the
-  checkpoint-time spec. Such templates need a new golden snapshot; micro-VM
-  has no such check.
-- [`8476f5d0`](https://github.com/dims/substrate/commit/8476f5d0e3fa1899c1386a5acfe2752c46500586): durable dirs are world-writable inside the actor. That is
+- [`b5c3fdc1`](https://github.com/dims/substrate/commit/b5c3fdc1e022c759ea993fa630c801a5bdac84cd), [`f2d7f787`](https://github.com/dims/substrate/commit/f2d7f7878051769a4f56d9d63f9c8e0f7ee38442): an image with a `USER` used to run as root and now
+  runs as that user, with the gid and supplementary groups its passwd and
+  group files give it; a named `USER` absent from passwd fails to start. The
+  process starts in the image's `WORKDIR`, not `/`. On gVisor, a snapshot
+  taken before this change from an image with a `USER` or `WORKDIR` does not
+  restore after it, the golden snapshot included: `runsc restore` enforces that
+  `Process.User` and `Process.Cwd` match the checkpoint-time spec. Such
+  templates need a new golden snapshot; micro-VM has no such check.
+- [`0b8d124a`](https://github.com/dims/substrate/commit/0b8d124ae64c2722489eec012f9ec6ee63464143): durable dirs are world-writable inside the actor. That is
   what Kubernetes does for an emptyDir, and only that actor's containers can
   reach the directory.
-- [`de620517`](https://github.com/dims/substrate/commit/de62051716f8a3df34100efb23961169163aa760): atelet holds one capability where the manifest dropped them
+- [`742e8f1c`](https://github.com/dims/substrate/commit/742e8f1c4ba8ecf28e14808ff89a3cda1321a353): atelet holds one capability where the manifest dropped them
   all. ateom already holds it; the alternative is to move durable-dir cleanup
   there.
-- [`1eb9b810`](https://github.com/dims/substrate/commit/1eb9b8106aaf14394aadd940e00aba3adfa9a15e): every micro-VM container gets `no_new_privileges`; there is
+- [`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7): every micro-VM container gets `no_new_privileges`; there is
   no field to opt out.
 
 ### After they merge
 
 Point step 1 of the root README at upstream main and retire [`lean-integration`](https://github.com/dims/substrate/tree/lean-integration). The vendored
 [`proto/ateapi.proto`](../proto/ateapi.proto) matches upstream at the commit in
-[`proto/upstream-rev`](../proto/upstream-rev), which CI checks, and the six
+[`proto/upstream-rev`](../proto/upstream-rev), which CI checks, and these
 commits do not touch it; [`proto/README.md`](../proto/README.md) says how to
 refresh it when upstream changes the file.
 
