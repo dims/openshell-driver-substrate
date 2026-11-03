@@ -21,6 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(false) // client-only -- the driver speaks to ate-api-server
         .build_client(true)
+        // Deterministic map encoding: template names hash the encoded template.
+        .btree_map(".")
         .compile_protos(&["proto/ateapi.proto"], &["proto"])?;
 
     Ok(())

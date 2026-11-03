@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: proto matches the pinned upstream rev
-        run: curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat proto/upstream-rev)/pkg/proto/ateapipb/ateapi.proto" | diff -u - proto/ateapi.proto
+        run: curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat proto/upstream-rev)/api/ateapi/v1/ateapi.proto" | diff -u - proto/ateapi.proto
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

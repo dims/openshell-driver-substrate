@@ -12,7 +12,7 @@
 //! protocol as OpenShell's in-tree Docker/Podman/Kubernetes drivers, so
 //! wiring it in is gateway configuration, not a source change.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,9 +25,10 @@ use openshell_core::proto::compute::v1::{
     EnsureWorkspaceRequest, EnsureWorkspaceResponse, GetCapabilitiesRequest,
     GetCapabilitiesResponse, GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest,
     ListSandboxesResponse, StartSandboxRequest, StartSandboxResponse, StopSandboxRequest,
-    StopSandboxResponse, ValidateSandboxCreateRequest, ValidateSandboxCreateResponse,
-    WatchSandboxesDeletedEvent, WatchSandboxesEvent, WatchSandboxesRequest,
-    WatchSandboxesSandboxEvent, compute_driver_server::ComputeDriver, watch_sandboxes_event,
+    StopSandboxResponse, SuspendSandboxRequest, SuspendSandboxResponse,
+    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
+    WatchSandboxesEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
+    compute_driver_server::ComputeDriver, watch_sandboxes_event,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -98,7 +99,7 @@ const REASON_STARTING: &str = "ContainerStarting";
     missing_docs
 )]
 pub mod ateapi {
-    tonic::include_proto!("ateapi");
+    tonic::include_proto!("substrate.ateapi.v1");
 }
 
 pub mod template;
@@ -118,14 +119,13 @@ pub struct SubstrateComputeConfig {
     /// `create_sandbox`, not on get/stop/start/delete, so a per-workspace
     /// atespace can't be resolved for those calls anyway.
     pub atespace: String,
-    /// Name of the cluster-provisioned `SandboxConfig` object supplying
-    /// the micro-VM assets every synthesized `ActorTemplate` references.
-    /// Operators provision this once per cluster; the driver never
-    /// creates it.
-    pub sandbox_config_name: String,
-    /// Object-storage location prefix every synthesized `ActorTemplate`
-    /// writes its `snapshotConfig.storageLocation` to.
-    pub snapshots_location: String,
+    /// Labels every synthesized `ActorTemplate` selects its workers by. The
+    /// pool they pick decides the sandbox class; the harness pool carries
+    /// `workload=openshell-microvm`.
+    pub worker_selector: BTreeMap<String, String>,
+    /// Resource limits for a template whose sandbox spec names none.
+    pub default_cpu_millicores: i64,
+    pub default_memory_bytes: i64,
     /// How long to wait for a synthesized `ActorTemplate` to reach a
     /// golden snapshot before giving up.
     pub template_ready_timeout_secs: u64,
@@ -155,8 +155,12 @@ impl Default for SubstrateComputeConfig {
         Self {
             api_endpoint: String::from("127.0.0.1:8080"),
             atespace: String::from("default"),
-            sandbox_config_name: String::from("microvm"),
-            snapshots_location: String::from("gs://openshell-ate-snapshots/"),
+            worker_selector: BTreeMap::from([(
+                String::from("workload"),
+                String::from("openshell-microvm"),
+            )]),
+            default_cpu_millicores: 1000,
+            default_memory_bytes: 1 << 30,
             template_ready_timeout_secs: 180,
             gateway_endpoint: String::new(),
             api_tls_ca_path: None,
@@ -204,6 +208,9 @@ impl From<SubstrateDriverError> for Status {
             }
             SubstrateDriverError::Connect { .. } => Status::unavailable(err.to_string()),
             SubstrateDriverError::Rpc(status) => status.clone(),
+            SubstrateDriverError::Template(template::TemplateError::InvalidSpec(_)) => {
+                Status::invalid_argument(err.to_string())
+            }
             SubstrateDriverError::Template(template::TemplateError::PhaseFailed { .. }) => {
                 Status::failed_precondition(err.to_string())
             }
@@ -448,8 +455,7 @@ fn condition(r#type: &str, status: &str, reason: &str, message: &str) -> DriverC
 /// again. A crashed actor is a deliberate Error: it needs `RevertActor`.
 fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
     use ateapi::ActorState::{
-        Crashed, Deleting, Paused, Pausing, Resuming, Reverting, Running, Suspended, Suspending,
-        Unspecified,
+        Crashed, Deleting, Resuming, Reverting, Running, Suspended, Suspending, Unspecified,
     };
     use openshell_core::driver_utils::{CONDITION_EXITED, CONDITION_STOPPED};
     match state {
@@ -488,12 +494,6 @@ fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
             "Suspending",
             "actor is being checkpointed",
         )],
-        Pausing => vec![condition(
-            "Suspended",
-            "False",
-            "Pausing",
-            "actor is being paused",
-        )],
         Suspended => vec![
             condition(
                 "Suspended",
@@ -502,15 +502,6 @@ fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
                 "actor is checkpointed; start it to resume",
             ),
             condition("Ready", "False", CONDITION_STOPPED, "actor is checkpointed"),
-        ],
-        Paused => vec![
-            condition(
-                "Suspended",
-                "True",
-                "Paused",
-                "actor is paused; start it to resume",
-            ),
-            condition("Ready", "False", CONDITION_STOPPED, "actor is paused"),
         ],
         Crashed => vec![condition(
             "Ready",
@@ -549,7 +540,10 @@ fn require_actor_name(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
 
 /// Driver-specific validation applied before `CreateSandbox`, so the
 /// gateway gets a typed error before any platform state is touched.
-fn validate_substrate_sandbox(sandbox: &DriverSandbox) -> Result<(), Status> {
+fn validate_substrate_sandbox(
+    sandbox: &DriverSandbox,
+    config: &SubstrateComputeConfig,
+) -> Result<(), Status> {
     let spec = sandbox
         .spec
         .as_ref()
@@ -569,6 +563,8 @@ fn validate_substrate_sandbox(sandbox: &DriverSandbox) -> Result<(), Status> {
              (image@sha256:<digest>); bare tag references fail atelet's pull cache",
         ));
     }
+    template::resources_for(sandbox, config)
+        .map_err(|err| Status::invalid_argument(err.to_string()))?;
     Ok(())
 }
 
@@ -608,8 +604,10 @@ async fn list_atespace_actors(
         let resp = client
             .list_actors_page(ateapi::ListActorsRequest {
                 atespace: atespace.to_string(),
-                page_size: LIST_PAGE_SIZE,
-                page_token: page_token.clone(),
+                options: Some(ateapi::ListOptions {
+                    page_size: LIST_PAGE_SIZE,
+                    page_token: page_token.clone(),
+                }),
             })
             .await?;
         actors.extend(resp.actors);
@@ -673,7 +671,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        validate_substrate_sandbox(&sandbox)?;
+        validate_substrate_sandbox(&sandbox, &self.config)?;
         Ok(Response::new(ValidateSandboxCreateResponse {}))
     }
 
@@ -724,11 +722,12 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        validate_substrate_sandbox(&sandbox)?;
+        validate_substrate_sandbox(&sandbox, &self.config)?;
         let actor_name = require_actor_name(&sandbox.id, &sandbox.name)?;
         let atespace = self.config.atespace.clone();
 
-        let template_name = template::name_for(&sandbox, &self.config);
+        let template_name =
+            template::name_for(&sandbox, &self.config).map_err(SubstrateDriverError::from)?;
 
         let mut client = self.control_client().await?;
         template::ensure_ready(
@@ -809,9 +808,21 @@ impl ComputeDriver for SubstrateComputeDriver {
                     atespace: self.config.atespace.clone(),
                     name: actor_name,
                 }),
+                options: None,
             })
             .await?;
         Ok(Response::new(StopSandboxResponse {}))
+    }
+
+    async fn suspend_sandbox(
+        &self,
+        _request: Request<SuspendSandboxRequest>,
+    ) -> Result<Response<SuspendSandboxResponse>, Status> {
+        // Not advertised (openshell.compute.suspend-resume): stop_sandbox is
+        // the suspend.
+        Err(Status::unimplemented(
+            "substrate driver suspends on stop_sandbox",
+        ))
     }
 
     async fn delete_sandbox(
@@ -821,7 +832,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         let req = request.into_inner();
         let actor_name = require_actor_name(&req.sandbox_id, &req.name)?;
         let mut client = self.control_client().await?;
-        // any_state deletes a running or a suspended actor alike. The
+        // Substrate deletes a running or a suspended actor alike. The
         // template stays: other actors may share it.
         let result = client
             .delete_actor(ateapi::DeleteActorRequest {
@@ -829,7 +840,6 @@ impl ComputeDriver for SubstrateComputeDriver {
                     atespace: self.config.atespace.clone(),
                     name: actor_name,
                 }),
-                any_state: true,
                 options: None,
             })
             .await;
@@ -970,7 +980,7 @@ mod tests {
         let c = SubstrateComputeConfig::default();
         assert!(!c.api_endpoint.is_empty());
         assert!(!c.atespace.is_empty());
-        assert!(!c.sandbox_config_name.is_empty());
+        assert!(!c.worker_selector.is_empty());
         assert!(c.api_tls_ca_path.is_none());
     }
 
@@ -1061,8 +1071,7 @@ mod tests {
     #[test]
     fn actor_state_conditions_follow_the_gateway_phase_rules() {
         use ateapi::ActorState::{
-            Crashed, Deleting, Paused, Pausing, Resuming, Reverting, Running, Suspended,
-            Suspending, Unspecified,
+            Crashed, Deleting, Resuming, Reverting, Running, Suspended, Suspending, Unspecified,
         };
         use openshell_core::driver_utils::{CONDITION_EXITED, CONDITION_STOPPED};
         // is_terminal_failure_reason's allowlist, lower-cased as it compares.
@@ -1082,7 +1091,7 @@ mod tests {
             .collect();
         assert_eq!(
             states.len(),
-            10,
+            8,
             "a new ActorState needs a row in the match below"
         );
 
@@ -1103,7 +1112,7 @@ mod tests {
             }
             match state {
                 Running => assert!(has("Ready", "True")),
-                Suspended | Paused => {
+                Suspended => {
                     assert!(
                         has("Suspended", "True") && !has("Ready", "True"),
                         "{state:?}"
@@ -1120,7 +1129,7 @@ mod tests {
                         .iter()
                         .any(|c| c.r#type == "Ready" && c.reason == CONDITION_EXITED)
                 ),
-                Suspending | Pausing | Deleting | Unspecified => {
+                Suspending | Deleting | Unspecified => {
                     assert!(
                         !has("Ready", "True") && !has("Suspended", "True"),
                         "{state:?}"
@@ -1147,8 +1156,9 @@ mod tests {
 
     impl ListActors for Pages {
         fn list_actors_page(&mut self, req: ateapi::ListActorsRequest) -> ListPage<'_> {
+            let options = req.options.unwrap_or_default();
             self.seen
-                .push((req.atespace, req.page_size, req.page_token));
+                .push((req.atespace, options.page_size, options.page_token));
             let page = self
                 .pages
                 .pop_front()

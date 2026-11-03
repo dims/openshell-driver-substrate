@@ -3,9 +3,9 @@
 
 //! `ActorTemplate` synthesis.
 //!
-//! Substrate's `ActorTemplate` is a plain `ateapi.Control` gRPC resource: no
-//! CRD and no Kubernetes client. A template is derived from the sandbox spec
-//! and the driver config, and named by a hash of its own encoding, so repeat
+//! Substrate's `ActorTemplate` is a plain `Control` gRPC resource: no CRD and
+//! no Kubernetes client. A template is derived from the sandbox spec and the
+//! driver config, and named by a hash of its own encoding, so repeat
 //! `create_sandbox` calls for the same workload reuse the golden snapshot and
 //! any change to what the template contains gets a new one.
 //!
@@ -13,6 +13,10 @@
 //! process memory, so an environment variable set here comes back identical
 //! in every actor restored from it. The sandbox id and the gateway-minted
 //! sandbox token are per sandbox and are left out for that reason.
+//!
+//! The sandbox class is the worker pool's: the template selects its workers
+//! by the labels in the driver config, and the pool those labels name decides
+//! the class.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -31,9 +35,13 @@ struct Inputs {
     image: String,
     command: Vec<String>,
     env: BTreeMap<String, String>,
+    limits: ateapi::Resources,
 }
 
-fn inputs_for(sandbox: &DriverSandbox, config: &SubstrateComputeConfig) -> Inputs {
+fn inputs_for(
+    sandbox: &DriverSandbox,
+    config: &SubstrateComputeConfig,
+) -> Result<Inputs, TemplateError> {
     let spec = sandbox.spec.as_ref();
     let template_spec = spec.and_then(|s| s.template.as_ref());
 
@@ -53,48 +61,130 @@ fn inputs_for(sandbox: &DriverSandbox, config: &SubstrateComputeConfig) -> Input
         );
     }
 
-    Inputs {
+    Ok(Inputs {
         image: template_spec.map(|t| t.image.clone()).unwrap_or_default(),
         command: spec.map(|s| s.command.clone()).unwrap_or_default(),
         env,
+        limits: resources_for(sandbox, config)?,
+    })
+}
+
+/// The template's resource limits: the sandbox template's `cpu_limit` and
+/// `memory_limit`, Kubernetes quantities, when set; the config defaults
+/// otherwise.
+pub fn resources_for(
+    sandbox: &DriverSandbox,
+    config: &SubstrateComputeConfig,
+) -> Result<ateapi::Resources, TemplateError> {
+    let resources = sandbox
+        .spec
+        .as_ref()
+        .and_then(|s| s.template.as_ref())
+        .and_then(|t| t.resources.as_ref());
+    let cpu = resources
+        .map(|r| r.cpu_limit.trim())
+        .filter(|q| !q.is_empty());
+    let memory = resources
+        .map(|r| r.memory_limit.trim())
+        .filter(|q| !q.is_empty());
+    Ok(ateapi::Resources {
+        cpu_millicores: match cpu {
+            Some(q) => cpu_millicores(q).ok_or_else(|| {
+                TemplateError::InvalidSpec(format!("cpu_limit {q:?} is not a Kubernetes quantity"))
+            })?,
+            None => config.default_cpu_millicores,
+        },
+        memory_bytes: match memory {
+            Some(q) => memory_bytes(q).ok_or_else(|| {
+                TemplateError::InvalidSpec(format!(
+                    "memory_limit {q:?} is not a Kubernetes quantity"
+                ))
+            })?,
+            None => config.default_memory_bytes,
+        },
+    })
+}
+
+/// A Kubernetes CPU quantity as millicores: "2", "0.5", "500m".
+fn cpu_millicores(q: &str) -> Option<i64> {
+    if let Some(m) = q.strip_suffix('m') {
+        return m.parse::<i64>().ok().filter(|v| *v > 0);
     }
+    let (whole, frac) = q.split_once('.').unwrap_or((q, ""));
+    if frac.len() > 3 || !frac.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let whole: i64 = whole.parse().ok()?;
+    let frac: i64 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<3}").parse().ok()?
+    };
+    Some(whole * 1000 + frac).filter(|v| *v > 0)
+}
+
+/// A Kubernetes memory quantity as bytes: an integer, with a binary (Ki, Mi,
+/// Gi, Ti) or decimal (k, M, G, T) suffix or none.
+fn memory_bytes(q: &str) -> Option<i64> {
+    const SUFFIXES: [(&str, i64); 8] = [
+        ("Ki", 1 << 10),
+        ("Mi", 1 << 20),
+        ("Gi", 1 << 30),
+        ("Ti", 1 << 40),
+        ("k", 1_000),
+        ("M", 1_000_000),
+        ("G", 1_000_000_000),
+        ("T", 1_000_000_000_000),
+    ];
+    let (number, scale) = SUFFIXES
+        .iter()
+        .find_map(|(suffix, scale)| q.strip_suffix(suffix).map(|n| (n, *scale)))
+        .unwrap_or((q, 1));
+    number
+        .parse::<i64>()
+        .ok()?
+        .checked_mul(scale)
+        .filter(|v| *v > 0)
 }
 
 /// Deterministic, DNS-1123-safe template name: SHA-256 of the template's
 /// own encoding with its metadata blanked. prost encodes a given struct the
 /// same way every time, so the name is stable across toolchains.
-#[must_use]
-pub fn name_for(sandbox: &DriverSandbox, config: &SubstrateComputeConfig) -> String {
-    let mut template = synthesize("", "", sandbox, config);
+pub fn name_for(
+    sandbox: &DriverSandbox,
+    config: &SubstrateComputeConfig,
+) -> Result<String, TemplateError> {
+    let mut template = synthesize("", "", sandbox, config)?;
     template.metadata = None;
     let digest = Sha256::digest(template.encode_to_vec());
     let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    format!("oshl-{hex}")
+    Ok(format!("oshl-{hex}"))
 }
 
 /// Build an `ActorTemplate` from the sandbox spec and driver config. Pure:
 /// does not touch the cluster.
-#[must_use]
 pub fn synthesize(
     name: &str,
     atespace: &str,
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
-) -> ateapi::ActorTemplate {
-    let inputs = inputs_for(sandbox, config);
+) -> Result<ateapi::ActorTemplate, TemplateError> {
+    let inputs = inputs_for(sandbox, config)?;
     let env = inputs
         .env
         .into_iter()
         .map(|(name, value)| ateapi::EnvVar { name, value })
         .collect();
 
-    ateapi::ActorTemplate {
+    Ok(ateapi::ActorTemplate {
         metadata: Some(ateapi::ResourceMetadata {
             atespace: atespace.to_string(),
             name: name.to_string(),
             ..Default::default()
         }),
-        worker_selector: None,
+        worker_selector: Some(ateapi::Selector {
+            match_labels: config.worker_selector.clone(),
+        }),
         containers: vec![ateapi::Container {
             name: "sandbox".to_string(),
             image: inputs.image,
@@ -102,14 +192,9 @@ pub fn synthesize(
             args: vec![],
             env,
             wakeup_probe: None,
-            // The Landlock probe writes under /tmp, and the stock sandbox
-            // image has no /tmp.
-            volume_mounts: vec![ateapi::VolumeMount {
-                name: "tmp".to_string(),
-                mount_path: "/tmp".to_string(),
-            }],
+            volume_mounts: vec![],
             // openshell-sandbox refuses to run with any capability in its
-            // bounding set; substrate grants a few by default.
+            // bounding set; Substrate grants a few by default.
             security_context: Some(ateapi::SecurityContext {
                 capabilities: Some(ateapi::Capabilities {
                     drop: vec!["ALL".to_string()],
@@ -118,32 +203,30 @@ pub fn synthesize(
             }),
             resources: None,
         }],
-        volumes: vec![ateapi::Volume {
-            name: "tmp".to_string(),
-            durable_dir: Some(ateapi::DurableDirVolumeSource {}),
-            ..Default::default()
-        }],
+        volumes: vec![],
+        // Whole-memory snapshots, so a restored sandbox is the frozen
+        // process and not a fresh boot.
         snapshot_config: Some(ateapi::SnapshotConfig {
-            on_pause: ateapi::SnapshotContentScope::Full as i32,
-            on_commit: ateapi::SnapshotContentScope::Full as i32,
-            on_resume: Some(ateapi::OnResumeConfig {
-                from_data: ateapi::ResumeSource::ColdBoot as i32,
+            storage_location: String::new(),
+            preferred_fidelity: ateapi::SnapshotFidelity::Memory as i32,
+            golden_snapshot_config: Some(ateapi::GoldenSnapshotConfig {
+                mode: ateapi::GoldenSnapshotMode::Enabled as i32,
             }),
-            storage_location: config.snapshots_location.clone(),
         }),
-        sandbox_config: Some(ateapi::SandboxConfig {
-            sandbox_class: ateapi::SandboxClass::Microvm as i32,
-            config_name: config.sandbox_config_name.clone(),
+        resources: Some(ateapi::ResourceRequirements {
+            limits: Some(inputs.limits),
         }),
-        resources: None,
+        golden_egress_policy: None,
         status: None,
-    }
+    })
 }
 
 /// Errors specific to template management. Lifted into
 /// `SubstrateDriverError` at the lib boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum TemplateError {
+    #[error("invalid sandbox spec: {0}")]
+    InvalidSpec(String),
     #[error("Substrate RPC failed while managing ActorTemplate {atespace}/{name}: {source}")]
     Rpc {
         atespace: String,
@@ -172,7 +255,7 @@ pub async fn ensure_ready(
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
 ) -> Result<(), TemplateError> {
-    let template = synthesize(name, atespace, sandbox, config);
+    let template = synthesize(name, atespace, sandbox, config)?;
     let create = client
         .create_actor_template(ateapi::CreateActorTemplateRequest {
             actor_template: Some(template),
@@ -234,7 +317,9 @@ pub async fn ensure_ready(
 
 #[cfg(test)]
 mod tests {
-    use openshell_core::proto::compute::v1::{DriverSandboxSpec, DriverSandboxTemplate};
+    use openshell_core::proto::compute::v1::{
+        DriverResourceRequirements, DriverSandboxSpec, DriverSandboxTemplate,
+    };
 
     use super::*;
 
@@ -258,14 +343,24 @@ mod tests {
         }
     }
 
+    fn with_limits(mut sb: DriverSandbox, cpu: &str, memory: &str) -> DriverSandbox {
+        let template = sb.spec.as_mut().unwrap().template.as_mut().unwrap();
+        template.resources = Some(DriverResourceRequirements {
+            cpu_limit: cpu.to_string(),
+            memory_limit: memory.to_string(),
+            ..Default::default()
+        });
+        sb
+    }
+
     // Pinned: any change to what a template contains renames every existing
     // template and orphans its golden snapshot, so it must be a visible,
     // deliberate change.
     #[test]
     fn name_is_stable_and_dns_safe() {
         let config = SubstrateComputeConfig::default();
-        let name = name_for(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config);
-        assert_eq!(name, "oshl-c6270ac92d8e942c");
+        let name = name_for(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config).unwrap();
+        assert_eq!(name, "oshl-349c004eb3dbc071");
         assert!(
             name.chars()
                 .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
@@ -275,29 +370,37 @@ mod tests {
     #[test]
     fn name_covers_everything_the_snapshot_depends_on() {
         let config = SubstrateComputeConfig::default();
-        let base = name_for(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config);
+        let name = |sb: &DriverSandbox, c: &SubstrateComputeConfig| name_for(sb, c).unwrap();
+        let base = name(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config);
         assert_ne!(
             base,
-            name_for(&sandbox("img@sha256:def", &["/bin/foo"], &[]), &config)
+            name(&sandbox("img@sha256:def", &["/bin/foo"], &[]), &config)
         );
         assert_ne!(
             base,
-            name_for(&sandbox("img@sha256:abc", &["/bin/bar"], &[]), &config)
+            name(&sandbox("img@sha256:abc", &["/bin/bar"], &[]), &config)
         );
         assert_ne!(
             base,
-            name_for(
+            name(
                 &sandbox("img@sha256:abc", &["/bin/foo"], &[("A", "1")]),
+                &config
+            )
+        );
+        assert_ne!(
+            base,
+            name(
+                &with_limits(sandbox("img@sha256:abc", &["/bin/foo"], &[]), "2", ""),
                 &config
             )
         );
         // Environment order does not matter; the endpoint does.
         assert_eq!(
-            name_for(
+            name(
                 &sandbox("i@sha256:a", &[], &[("A", "1"), ("B", "2")]),
                 &config
             ),
-            name_for(
+            name(
                 &sandbox("i@sha256:a", &[], &[("B", "2"), ("A", "1")]),
                 &config
             )
@@ -308,21 +411,18 @@ mod tests {
         };
         assert_ne!(
             base,
-            name_for(
+            name(
                 &sandbox("img@sha256:abc", &["/bin/foo"], &[]),
                 &with_endpoint
             )
         );
-        let other_config = SubstrateComputeConfig {
-            sandbox_config_name: "microvm-2".to_string(),
+        let other_pool = SubstrateComputeConfig {
+            worker_selector: BTreeMap::from([("workload".to_string(), "other".to_string())]),
             ..SubstrateComputeConfig::default()
         };
         assert_ne!(
             base,
-            name_for(
-                &sandbox("img@sha256:abc", &["/bin/foo"], &[]),
-                &other_config
-            )
+            name(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &other_pool)
         );
     }
 
@@ -335,7 +435,7 @@ mod tests {
             ..SubstrateComputeConfig::default()
         };
         let sb = sandbox("img@sha256:abc", &["/bin/foo"], &[("CALLER", "x")]);
-        let tmpl = synthesize("oshl-abc123", "ws", &sb, &config);
+        let tmpl = synthesize("oshl-abc123", "ws", &sb, &config).unwrap();
         let env = &tmpl.containers[0].env;
         let get = |k: &str| env.iter().find(|e| e.name == k).map(|e| e.value.as_str());
 
@@ -350,8 +450,11 @@ mod tests {
             "the sandbox token must not be in the template"
         );
         assert_eq!(
-            tmpl.sandbox_config.as_ref().map(|s| s.sandbox_class),
-            Some(ateapi::SandboxClass::Microvm as i32)
+            tmpl.worker_selector
+                .as_ref()
+                .map(|s| s.match_labels.clone()),
+            Some(config.worker_selector.clone()),
+            "the pool decides the sandbox class"
         );
         let drops = tmpl.containers[0]
             .security_context
@@ -360,12 +463,70 @@ mod tests {
             .map(|c| c.drop.clone())
             .unwrap_or_default();
         assert_eq!(drops, ["ALL"], "the sandbox must start capability-free");
-        assert!(
-            tmpl.containers[0]
-                .volume_mounts
-                .iter()
-                .any(|m| m.mount_path == "/tmp"),
-            "the Landlock probe needs a writable /tmp"
+        let snapshot = tmpl.snapshot_config.as_ref().unwrap();
+        assert_eq!(
+            snapshot.preferred_fidelity,
+            ateapi::SnapshotFidelity::Memory as i32
         );
+        assert!(snapshot.storage_location.is_empty());
+        assert_eq!(
+            tmpl.resources.as_ref().and_then(|r| r.limits.as_ref()),
+            Some(&ateapi::Resources {
+                cpu_millicores: config.default_cpu_millicores,
+                memory_bytes: config.default_memory_bytes,
+            })
+        );
+    }
+
+    #[test]
+    fn resources_follow_the_spec_limits_or_the_defaults() {
+        let config = SubstrateComputeConfig::default();
+        let sb = with_limits(sandbox("img@sha256:abc", &[], &[]), "500m", "256Mi");
+        assert_eq!(
+            resources_for(&sb, &config).unwrap(),
+            ateapi::Resources {
+                cpu_millicores: 500,
+                memory_bytes: 256 << 20,
+            }
+        );
+        let partial = with_limits(sandbox("img@sha256:abc", &[], &[]), "", "1Gi");
+        assert_eq!(
+            resources_for(&partial, &config).unwrap(),
+            ateapi::Resources {
+                cpu_millicores: config.default_cpu_millicores,
+                memory_bytes: 1 << 30,
+            }
+        );
+        let bad = with_limits(sandbox("img@sha256:abc", &[], &[]), "two", "");
+        assert!(matches!(
+            resources_for(&bad, &config),
+            Err(TemplateError::InvalidSpec(_))
+        ));
+    }
+
+    #[test]
+    fn kubernetes_quantities() {
+        for (q, want) in [
+            ("2", Some(2000)),
+            ("500m", Some(500)),
+            ("0.5", Some(500)),
+            ("1.25", Some(1250)),
+            ("0", None),
+            ("x", None),
+            ("1.2345", None),
+        ] {
+            assert_eq!(cpu_millicores(q), want, "cpu {q:?}");
+        }
+        for (q, want) in [
+            ("256Mi", Some(256 << 20)),
+            ("1Gi", Some(1 << 30)),
+            ("1k", Some(1000)),
+            ("1G", Some(1_000_000_000)),
+            ("12", Some(12)),
+            ("1Gib", None),
+            ("0", None),
+        ] {
+            assert_eq!(memory_bytes(q), want, "memory {q:?}");
+        }
     }
 }

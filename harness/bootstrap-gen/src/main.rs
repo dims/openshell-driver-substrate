@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use openshell_core::SandboxSessionId;
 use openshell_core::jwt::{
@@ -9,9 +9,7 @@ use openshell_core::jwt::{
     SessionRotation, SessionVerificationKey, SupervisorAuthBundle, SystemJwtClock,
 };
 use openshell_core::sandbox_generation::SandboxGenerationId;
-use openshell_isolation_interface::contract::{
-    OuterFenceGuarantee, OuterFenceGuarantees, ResolvedWorkloadIdentity,
-};
+use openshell_isolation_interface::contract::{ProvisioningEvidence, ResolvedWorkloadIdentity};
 use openshell_sandbox_backend::boundary_protocol::{
     BoundaryConfig, BoundaryListener, GatewayVerificationKey, SandboxRuntimeDescriptor,
     SandboxTlsClientConfig, SandboxTlsServerConfig, SandboxTransport,
@@ -19,8 +17,16 @@ use openshell_sandbox_backend::boundary_protocol::{
 };
 use serde::Serialize;
 
+/// Where the supervisor listens and the sandbox dials. Every Substrate actor
+/// has this address (`internal/ateworker/actornet`), and the containers of one
+/// actor share the guest's network namespace. OpenShell refuses a boundary
+/// listener on loopback and a supervisor peer on the sandbox's own address, so
+/// the supervisor is the listener and the sandbox connects to it.
+const CONTROL_ADDRESS: SocketAddr =
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(169, 254, 17, 2)), 17777);
+
 #[derive(Serialize)]
-struct SubstrateOuterFenceEvidence<'a> {
+struct SubstrateProvisioningEvidence<'a> {
     generation: &'a str,
     backend: &'static str,
 }
@@ -43,9 +49,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &signing_key_pem,
         "test-key-1",
         gateway_id,
-        // OpenShell caps a session token at one hour (MAX_SESSION_TOKEN_TTL).
-        // A gateway refreshes it; this harness has nothing to refresh from.
-        Duration::from_secs(3600),
+        // Non-expiring: a gateway would refresh the tokens, this harness has
+        // nothing to refresh from, and a snapshot can sit for days.
+        None,
         Arc::new(SystemJwtClock),
     )?;
 
@@ -76,34 +82,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sha256:test".to_string(),
     )?;
 
-    let evidence = SubstrateOuterFenceEvidence {
+    let evidence = SubstrateProvisioningEvidence {
         generation: generation_str,
         backend: "microvm",
     };
     let encoded = serde_json::to_vec(&evidence)?;
-    let outer_fence = OuterFenceGuarantees::from_enforcement_evidence(
-        generation_str,
-        [
-            OuterFenceGuarantee::DefaultDenyEgress,
-            OuterFenceGuarantee::NoUnmanagedEgressPath,
-            OuterFenceGuarantee::RevocationVerified,
-            OuterFenceGuarantee::ControllerLossFailsClosed,
-        ],
-        &encoded,
-    )?;
-    outer_fence.validate(generation_str)?;
-
-    // TCP on loopback, not a unix socket on a shared volume. Containers of one
-    // actor share the guest's network namespace, so loopback reaches across
-    // them. A unix socket does not: the peer sees the socket file on the
-    // durable dir, but connect(2) returns ECONNREFUSED because the listening
-    // socket is not shared with it.
-    //
-    // Binding loopback rather than 0.0.0.0 keeps the listener off the actor's
-    // routable address, which substrate's ingress can otherwise reach.
-    let control_port: u16 = 17777;
-    let bind_address = std::net::SocketAddr::from(([127, 0, 0, 1], control_port));
-    let dial_address = bind_address;
+    let provisioning_evidence =
+        ProvisioningEvidence::from_enforcement_evidence(generation_str, &encoded)?;
+    provisioning_evidence.validate(generation_str)?;
 
     let boundary_config = BoundaryConfig {
         boundary_id: sandbox_id_str.to_string(),
@@ -113,17 +99,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_epoch: CredentialEpoch::new(1)?,
         gateway_id: gateway_id.to_string(),
         verification_keys: vec![verification_key_gw],
-        listener: BoundaryListener::TlsTcp {
-            address: bind_address,
+        listener: BoundaryListener::RuntimeInitiatedTlsTcp {
+            authority: tls.server_name.clone(),
+            addresses: vec![CONTROL_ADDRESS],
             tls: SandboxTlsServerConfig {
                 certificate_chain_path: PathBuf::from("/.openshell/channel/sandbox/server.crt"),
                 private_key_path: PathBuf::from("/.openshell/channel/sandbox/server.key"),
             },
+            route: None,
         },
         resource_claims: BTreeMap::new(),
         resource_claim_files: BTreeMap::new(),
         workload_identity: workload_identity.clone(),
-        outer_fence: outer_fence.clone(),
+        provisioning_evidence: provisioning_evidence.clone(),
         // BOOTSTRAP_CHILD_ENV="A=1,B=2" reaches the workload's environment.
         child_env: std::env::var("BOOTSTRAP_CHILD_ENV")
             .unwrap_or_default()
@@ -138,9 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         generation: generation_str.to_string(),
         session_id,
         workload_identity,
-        transport: SandboxTransport::Tcp {
+        transport: SandboxTransport::RuntimeInitiatedTcp {
             authority: tls.server_name.clone(),
-            addresses: vec![dial_address],
+            listen_address: CONTROL_ADDRESS,
         },
         tls: SandboxTlsClientConfig {
             server_name: tls.server_name.clone(),
@@ -148,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         host_gateway_ip: None,
         resource_claims: BTreeMap::new(),
-        outer_fence,
+        provisioning_evidence,
     };
 
     let auth_bundle = SupervisorAuthBundle {
@@ -160,6 +148,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gateway_expires_at: minted.gateway.expires_at,
         sandbox_token: minted.sandbox.token,
         sandbox_expires_at: minted.sandbox.expires_at,
+        ssh_host_private_key: None,
+        traces_otlp_headers: None,
+        ocsf_otlp_headers: None,
+        agent_otlp_headers: None,
+        otlp_tls: Vec::new(),
+        traces_otlp_tls: None,
+        ocsf_otlp_tls: None,
+        agent_otlp_tls: None,
     };
 
     let launch_authentication = SandboxLaunchAuthentication {

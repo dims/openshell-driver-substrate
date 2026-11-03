@@ -9,7 +9,6 @@
 //! export SUBSTRATE_LIVE_CA_PATH=creds/ctb.crt
 //! export SUBSTRATE_LIVE_BEARER_TOKEN_PATH=creds/token
 //! export SUBSTRATE_LIVE_TLS_SERVER_NAME=api.ate-system.svc
-//! export SUBSTRATE_LIVE_SNAPSHOTS_LOCATION=gs://ate-snapshots/ate-openshell-microvm/
 //! export SUBSTRATE_LIVE_TEST_IMAGE=<SANDBOX_IMAGE from out/helpdesk.env>
 //! cargo test --test live -- --ignored
 //! ```
@@ -40,7 +39,6 @@ fn live() -> Option<Live> {
         api_tls_ca_path: Some(PathBuf::from(var("SUBSTRATE_LIVE_CA_PATH")?)),
         api_bearer_token_path: Some(PathBuf::from(var("SUBSTRATE_LIVE_BEARER_TOKEN_PATH")?)),
         api_tls_server_name: var("SUBSTRATE_LIVE_TLS_SERVER_NAME"),
-        snapshots_location: var("SUBSTRATE_LIVE_SNAPSHOTS_LOCATION")?,
         ..SubstrateComputeConfig::default()
     };
     Some(Live {

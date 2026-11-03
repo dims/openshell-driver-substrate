@@ -27,13 +27,14 @@ struct Args {
     #[arg(long, env = "SUBSTRATE_ATESPACE", default_value = "default")]
     atespace: String,
 
-    /// Cluster-provisioned SandboxConfig object name (micro-VM assets).
-    #[arg(long, env = "SUBSTRATE_SANDBOX_CONFIG", default_value = "microvm")]
-    sandbox_config_name: String,
-
-    /// Object-storage prefix for synthesized ActorTemplates' snapshots.
-    #[arg(long, env = "SUBSTRATE_SNAPSHOTS_LOCATION")]
-    snapshots_location: String,
+    /// Worker labels the synthesized ActorTemplates select, as key=value pairs
+    /// separated by commas. The pool they name decides the sandbox class.
+    #[arg(
+        long,
+        env = "SUBSTRATE_WORKER_SELECTOR",
+        default_value = "workload=openshell-microvm"
+    )]
+    worker_selector: String,
 
     /// Seconds to wait for a synthesized ActorTemplate's golden snapshot.
     #[arg(
@@ -79,11 +80,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::new(&args.log_level))
         .init();
 
+    let worker_selector = args
+        .worker_selector
+        .split(',')
+        .filter(|kv| !kv.is_empty())
+        .map(|kv| {
+            kv.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| format!("--worker-selector: {kv:?} is not key=value"))
+        })
+        .collect::<Result<_, _>>()?;
     let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
         api_endpoint: args.api_endpoint,
         atespace: args.atespace,
-        sandbox_config_name: args.sandbox_config_name,
-        snapshots_location: args.snapshots_location,
+        worker_selector,
         template_ready_timeout_secs: args.template_ready_timeout_secs,
         gateway_endpoint: args.gateway_endpoint,
         api_tls_ca_path: args.api_tls_ca,
@@ -91,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_client_key_path: args.api_tls_key,
         api_tls_server_name: args.api_tls_server_name,
         api_bearer_token_path: args.api_bearer_token_path,
+        ..Default::default()
     });
 
     if let Some(parent) = args.bind_socket.parent() {

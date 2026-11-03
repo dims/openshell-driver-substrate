@@ -7,9 +7,9 @@ members = ["harness/bootstrap-gen"]
 # Genuine upstream OpenShell, unmodified. One rev for the driver and for
 # bootstrap-gen, so the credentials it mints match the binaries in the images.
 [workspace.dependencies]
-openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
-openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
-openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "d3480d2a7efab3fd0217ab67828655617b9af777" }
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
+openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
+openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
 
 [package]
 name = "openshell-driver-substrate"
@@ -32,7 +32,7 @@ path = "src/main.rs"
 openshell-core = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 # `tls-native-roots` pulls in tonic's rustls-based TLS stack with the
 # host's system trust roots, which is the minimum needed to dial
 # https://ate-api-server endpoints under a custom CA.

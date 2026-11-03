@@ -1,7 +1,7 @@
 # Vendored protos
 
 `ateapi.proto` is a verbatim copy of
-`github.com/agent-substrate/substrate/pkg/proto/ateapipb/ateapi.proto` at the
+`github.com/agent-substrate/substrate/api/ateapi/v1/ateapi.proto` at the
 commit named in [`upstream-rev`](upstream-rev). CI fetches the file at that
 commit and fails on any difference, so the copy cannot drift from its pin.
 `build.rs` runs `tonic_prost_build` over it, with the protoc that
@@ -16,7 +16,7 @@ driver code changes too, in the same commit:
 
 ```sh
 echo <substrate commit> > proto/upstream-rev
-curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat proto/upstream-rev)/pkg/proto/ateapipb/ateapi.proto" -o proto/ateapi.proto
+curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat proto/upstream-rev)/api/ateapi/v1/ateapi.proto" -o proto/ateapi.proto
 ```
 
 Two fields carry `[ debug_redact = true ]`, `EnvVar.value` and
