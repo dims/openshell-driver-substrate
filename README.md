@@ -5,28 +5,16 @@ driver for [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell), plus the
 harness to reproduce a working run.
 
 OpenShell's per-request sandbox becomes a Substrate actor, so it can be
-snapshotted and resumed instead of cold-started. Stock, unpatched OpenShell
-runs on Substrate's **micro-VM** sandbox class. The workload in
-[`examples/helpdesk`](examples/helpdesk) runs inside a real OpenShell sandbox,
-its egress is mediated, it is reachable through atenet-router, and its memory
-survives a suspend and resume.
+snapshotted and resumed instead of cold-started. Stock OpenShell v0.1.7 runs
+on Substrate's **micro-VM** sandbox class from upstream `main`, with no patch
+to either project. The workload in [`examples/helpdesk`](examples/helpdesk)
+runs inside a real OpenShell sandbox, its egress is mediated by the
+supervisor, it is reachable through atenet-router, and its memory survives a
+suspend and resume. It passes on arm64 and on amd64.
 
 A stock `openshell-gateway` drives the driver over `--compute-driver-socket`
 and creates sandboxes through it, but cannot bring one to `Ready`; see
 [Known gaps](#known-gaps).
-
-Micro-VM needs nested virtualisation (`/dev/kvm`). Six commits in Substrate
-are required, each necessary; a seventh matters on gVisor only. They are open
-as four PRs on `agent-substrate/substrate`, none merged: [#1904](https://github.com/agent-substrate/substrate/pull/1904), [#1906](https://github.com/agent-substrate/substrate/pull/1906),
-[#1910](https://github.com/agent-substrate/substrate/pull/1910) and [#1918](https://github.com/agent-substrate/substrate/pull/1918). [`docs/upstream-branches.md`](docs/upstream-branches.md)
-lists the commits and what changes when they merge. The guest kernel is stock
-kata.
-
-A second variant needs no Substrate patch at all: on this repo's [`lean-zero`](https://github.com/dims/openshell-driver-substrate/tree/lean-zero) branch
-the sandbox image drops root itself, with a short entry script and four
-start-up capabilities, and Substrate is plain upstream main from [`ed6d2a1f`](https://github.com/agent-substrate/substrate/commit/ed6d2a1fc8ae8337eb055d51b0b767b023cb3b5c). It
-passes the same ten beats. [`main`](https://github.com/dims/openshell-driver-substrate/tree/main) keeps the stock image because Substrate
-should do that work; the PRs are the fix.
 
 ---
 
@@ -43,7 +31,7 @@ OpenShell CLI / gateway  (stock, unmodified binary)
         v
 openshell-driver-substrate   (this repo; its own process)
         |
-        |  tonic gRPC, ateapi.Control
+        |  tonic gRPC, substrate.ateapi.v1.Control
         v
 Substrate ate-api-server  (ActorTemplate + Actor are gRPC resources)
         |
@@ -59,7 +47,8 @@ Substrate's actor lifecycle:
 | `create_sandbox` | `CreateActorTemplate` (reused by content hash) + `CreateActor` + `ResumeActor` |
 | `start_sandbox` | `ResumeActor` |
 | `stop_sandbox` | `SuspendActor` |
-| `delete_sandbox` | `DeleteActor` with `any_state: true` |
+| `suspend_sandbox` | not advertised; `stop_sandbox` is the suspend |
+| `delete_sandbox` | `DeleteActor` |
 | `get_sandbox` / `list_sandboxes` | `GetActor` / `ListActors` |
 | `watch_sandboxes` | polls `ListActors` every 2s (Substrate has no watch RPC) |
 | `ensure_workspace` | `CreateAtespace` |
@@ -70,8 +59,11 @@ identical, because its name is a hash of the template itself. So only the first
 `create_sandbox` for a workload pays for a golden-snapshot build. Nothing that
 varies per sandbox goes into a template: a snapshot freezes process memory, so
 a per-sandbox value would come back identical in every actor restored from it.
-Synthesized templates are `SANDBOX_CLASS_MICROVM`, name the `microvm`
-SandboxConfig, drop every capability, and mount a durable dir at `/tmp`.
+A synthesized template selects its workers by label (`--worker-selector`,
+default `workload=openshell-microvm`), and the pool those labels name decides
+the sandbox class. It drops every capability, takes memory snapshots, and gets
+its resource limits from the sandbox template's `cpu_limit` and `memory_limit`
+(Kubernetes quantities) or the driver's defaults.
 
 The driver registers out of process over a Unix socket, as OpenShell's in-tree
 `openshell-driver-podman` / `-docker` / `-kubernetes` / `-vm` binaries do. A
@@ -89,11 +81,13 @@ src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
 docs/                 architecture and the upstream branch index
-examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats; docs/ tells why
+examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats
 harness/
   bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle the binaries require
   manifests/          the WorkerPool
-  scripts/render.sh   renders a .tmpl from the environment
+  scripts/prep-host.sh  packages, Docker, Go, kind, kubectl and Rust on Ubuntu 24.04
+  scripts/kind-up.sh    Substrate on kind, the pool, the atespace and the model endpoint
+  scripts/render.sh     renders a .tmpl from the environment
 ```
 
 ## Build and test
@@ -109,198 +103,78 @@ Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
 `ate-api-server` and is ignored by default.
 
 Bumping the OpenShell pin in `Cargo.toml` is not a one-line change:
-`harness/bootstrap-gen` builds `BoundaryConfig` and `SandboxRuntimeDescriptor`
-by hand, and those types and OpenShell's `proto/openshell.proto` move between
-releases.
+`harness/bootstrap-gen` builds `BoundaryConfig`, `SandboxRuntimeDescriptor`
+and `SupervisorAuthBundle` by hand, and those types move between releases.
 Budget bootstrap-gen work with every bump.
 
 ---
 
 ## Reproducing a working run
 
-### 0. Prerequisites
+### 0. A host
 
 A Linux host with **`/dev/kvm`** (nested virtualisation if the host is itself
-a VM):
+a VM), Ubuntu 24.04 on amd64 or arm64. Each micro-VM worker takes 2 GiB; the
+pool below makes two. 16 GB of RAM is the floor, 32 GB is comfortable, and the
+clone, the builds and the images want about 30 GB of free disk. Everything
+cloned or pulled is public; no credentials are needed.
 
 ```sh
-ls /dev/kvm && grep -oE 'vmx|svm' /proc/cpuinfo | head -1
+sudo harness/scripts/prep-host.sh      # packages, Docker, Go, kind, kubectl, Rust; idempotent
 ```
 
-Each micro-VM worker takes 2 GiB; the pool below makes two. 16 GB of RAM is
-the floor, 32 GB is comfortable, and the builds and images want about 50 GB
-of free disk. Everything cloned or pulled is public; no credentials are needed.
-From nothing cached, the whole walkthrough takes about ten minutes on 16 cores
-with a fast connection; the two OpenShell release builds are the long pole at
-about a minute and a half each. `mise` may hit GitHub's anonymous API rate
-limit while installing OpenShell's toolchain; `export GITHUB_TOKEN=...` avoids
-it.
+A host firewall that drops forwarded traffic leaves the kind node with no
+egress, and the install then looks like a slow registry for twenty minutes.
+`kind-up.sh` checks the node's egress before installing anything, and runs
+`POST_KIND_HOOK` after the cluster exists so a site script can open the kind
+bridge. `ufw` in its default configuration is fine.
 
-Then:
+### 1. Substrate on kind
 
 ```sh
-sudo apt-get install -y build-essential protobuf-compiler pkg-config \
-                       libssl-dev jq gettext-base
-curl -fsSL https://sh.rustup.rs | sh -s -- -y
-curl -fsSL https://mise.run | sh                           # OpenShell's toolchain (step 3)
-export GITHUB_TOKEN=...                                    # mise: 60 anonymous API calls/hour otherwise
-go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest   # steps 7 and 8
-# go >= 1.27 (Substrate's go.mod; an older go with GOTOOLCHAIN=auto downloads it), docker, kubectl, kind from their upstream installers
+harness/scripts/kind-up.sh
+export PATH=$HOME/openshell-substrate/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-Use a current `kind`; an old one fails against the node image with `unknown
-containerd config version: 4`.
+One command, about eight minutes: it clones Substrate at `SUBSTRATE_REF`
+(default `upstream/main`) under `WORK` (default `$HOME/openshell-substrate`),
+builds `kubectl-ate`, creates the kind cluster and its registry at
+`localhost:5001`, installs `ate-system` with the micro-VM class
+(`ate-setup --kind deploy ate-system --sandbox-classes=microvm`), creates the
+pool of two micro-VM workers and the atespace `ate-openshell-microvm`, and
+deploys Ollama with `qwen2.5:1.5b` in that atespace as the model endpoint.
+Steps already done are skipped. Knobs: `ATESPACE`, `MODEL_NAME`, `MODEL_PORT`.
 
-A host with a managed firewall can leave the kind node with no egress at all.
-On a host provisioned by NVIDIA Base Command Manager (BCM), nftables `cm_filter` has a forward policy of DROP
-and `cmd` re-applies it, so disabling the firewall does not hold; the fix is to
-add the kind bridge to the template's `@nat_ifaces` set, and the input chain
-needs an allowance for anything on the host the node must reach, such as the
-model endpoint in step 7. The symptom is an install that looks like a slow
-registry for twenty minutes. The pre-flight in step 1 catches it.
+Substrate needs no patch: everything the demo once carried is in `main`
+([`docs/upstream-branches.md`](docs/upstream-branches.md)). One gap stays:
+micro-VM containers run without `no_new_privileges`, and `SecurityContext` has
+no field for it, so the helpdesk image sets it itself (step 2).
 
-`ko` does **not** need installing separately. Substrate vendors it, and every
-build must go through its wrapper, `./hack/run-tool.sh ko ...`.
-
-### 1. Patch Substrate and bring up a cluster
+### 2. Build the example
 
 ```sh
-git clone https://github.com/dims/substrate && cd substrate
-git checkout 9d6020f5                  # lean-integration; see docs/upstream-branches.md
-export GOFLAGS=-buildvcs=false
-./hack/create-kind-cluster.sh
-docker run --rm --network kind alpine wget -q -O /dev/null --timeout=5 \
-  http://detectportal.firefox.com/success.txt && echo egress ok   # from the kind bridge
-./hack/install-ate-kind.sh --deploy-ate-system
-kubectl -n ate-system wait --for=condition=Available deploy --all --timeout=10m
-kubectl -n ate-system rollout status ds --timeout=10m
-kubectl -n ate-system rollout status sts --timeout=10m
-make build-atectl && export PATH=$PWD/bin:$PATH   # kubectl-ate, ahead of any older copy
+REGISTRY=localhost:5001 examples/helpdesk/build.sh
 ```
 
-[`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7) is the head of
-[`lean-integration`](https://github.com/dims/substrate/tree/lean-integration); [`docs/upstream-branches.md`](docs/upstream-branches.md)
-links each commit on it. `create-kind-cluster.sh` also starts a local image
-registry at `localhost:5001`; that is `<registry>` in every step below. The installer's
-own readiness wait is 60 s per workload (`--rollout-timeout`), so keep the
-three `kubectl` waits above after it returns.
+This mirrors the release's `sandbox` and `supervisor` images from
+`ghcr.io/nvidia/openshell` into the registry (this platform's manifest), mints
+the credentials, builds the two helpdesk images and writes their digests to
+`out/helpdesk.env`. Templates reference images by digest; a bare tag fails
+atelet's pull cache, and Docker's own `RepoDigests` name the upstream index
+for a mirrored tag, so the digests come from the registry.
 
-The install labels the node with the build version. After a Substrate
-rebuild, move that label and every pool's `nodeSelector` to the new
-`git describe` output, or recreate the cluster.
-
-Without any one of these commits the demo fails, and `run.sh` says so at
-beat 1 or 2:
-
-- without `USER`, the sandbox runs as root and never clears its gates;
-- without the durable-dir mode, a non-root sandbox cannot write `/tmp`;
-- without `CAP_DAC_OVERRIDE`, the golden snapshot never gets its tag: atelet
-  cannot reset directories the sandbox wrote;
-- without sysctl forwarding, the low-port sysctl, or `no_new_privs`, the
-  sandbox never reports `Boundary control listener ready`.
-
-### 2. Install the micro-VM backend
-
-From the Substrate repo:
+### 3. Run it
 
 ```sh
-ARCH=amd64 ATE_INSTALL_KIND=true hack/install-microvm-deps.sh --install
+examples/helpdesk/run.sh        # ten beats, about a minute
+examples/helpdesk/soak.sh 10    # the same, ten times in a row
 ```
 
-This downloads the kata asset set, stages it to the cluster object store, and
-applies the cluster-wide `microvm` SandboxConfig. `ATE_INSTALL_KIND=true`
-picks the in-cluster rustfs bucket; without it the script takes the Google
-Kubernetes Engine (GKE) path and fails on `gcloud: command not found`.
+[`examples/helpdesk`](examples/helpdesk) explains the beats and what each one
+proves. The two agents are reached with `kubectl-ate proxy actor`, which holds
+the client certificate atenet-router requires.
 
-### 3. Build the OpenShell images
-
-From an OpenShell checkout at the rev `Cargo.toml` pins. The staging script
-runs cargo through `mise x`, so `mise install` has to have run in that
-checkout. zigbuild is required: a plain native build links
-`openshell-supervisor` against `libgcc_s.so.1`, which the distroless base does
-not ship.
-
-```sh
-mise trust && mise install
-PREBUILT_ARCH=amd64 tasks/scripts/stage-prebuilt-binaries.sh sandbox
-PREBUILT_ARCH=amd64 tasks/scripts/stage-prebuilt-binaries.sh supervisor
-docker build -f deploy/docker/Dockerfile.sandbox    -t <registry>/openshell-sandbox:dev .
-docker build -f deploy/docker/Dockerfile.supervisor -t <registry>/openshell-supervisor:dev .
-docker push <registry>/openshell-sandbox:dev
-docker push <registry>/openshell-supervisor:dev
-export SUPERVISOR_IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' <registry>/openshell-supervisor:dev)
-```
-
-Templates reference images by digest; a bare tag fails atelet's pull cache.
-Always push: a template needs the registry's digest, and `kind load
-docker-image` does not produce one.
-
-### 4. Mint the credentials
-
-`examples/helpdesk/build.sh` does steps 4 and 5. The tokens last one hour
-(below), so do steps 4, 5, 7 and 8 in one sitting, after 1 to 3 and 6.
-
-An Ed25519-signed JWT pair and TLS material bound to one session id:
-
-```sh
-mkdir -p out
-openssl genpkey -algorithm ed25519 -out out/signing.key.pem
-openssl pkey -in out/signing.key.pem -pubout -out out/signing.pub.pem
-cargo run -p bootstrap-gen -- out/
-```
-
-That writes `bootstrap.json`, `server.crt`, `server.key` (the sandbox's side)
-and `runtime-descriptor.json`, `auth.json` (the supervisor's).
-
-The tokens are valid for **one hour**, OpenShell's maximum for a session
-token. A gateway refreshes a sandbox's tokens; this hand-applied harness has
-nothing to refresh from, so run the actor within the hour. After that the
-supervisor logs `Starting sandbox supervision` and then, about 90 seconds
-later, `boundary unavailable ... timed out while waiting for remote boundary
-boot`, with no mention of authentication. Run `build.sh` again.
-
-Any keypair is accepted as a trust anchor: `SandboxLaunchAuthentication`
-validates against its own embedded key, and nothing ties that key to a
-gateway.
-
-### 5. Bake the credentials
-
-The sandbox **consumes** its bootstrap, unlinking the file after reading it,
-so a read-only image volume fails with `Read-only file system`. `build.sh`
-tars `bootstrap.json`, `server.crt` and `server.key` into the helpdesk image's
-rootfs instead. Substrate discards image file ownership, so `--chown` has no
-effect and the tree is world-writable (see [Known gaps](#known-gaps)). The
-image's `CMD` names the bootstrap, so the gateway path, which sends no
-command, finds it too.
-
-### 6. Create the pool
-
-```sh
-export ATESPACE=ate-openshell-microvm BUCKET_NAME=ate-snapshots
-export SUBSTRATE_VERSION=$(git -C <substrate> describe --always --dirty)
-export KO_DOCKER_REPO=<registry>
-export ATEOM_MICROVM_IMAGE=$(cd <substrate> && ./hack/run-tool.sh ko build ./cmd/ateom-microvm --platform=linux/amd64 | tail -1)
-
-harness/scripts/render.sh harness/manifests/openshell-microvm-pool.yaml.tmpl | kubectl apply -f -
-kubectl-ate create atespace "${ATESPACE}"
-```
-
-The atespace must exist before any template, or template creation fails with
-`FailedPrecondition ... persistence: failed precondition`.
-
-### 7. Run the example
-
-[`examples/helpdesk`](examples/helpdesk) is two commands. `build.sh` mints
-the credentials and builds the images. `run.sh` plays ten beats: two agents
-from one snapshot, an egress allow-list, a suspend and resume with the memory
-intact, a dead host, a revert, a delete. After each beat it prints what
-Substrate and OpenShell logged, so the mechanics are on screen.
-
-**Actor state is not proof the containers are alive.** A micro-VM snapshot is
-whole-VM memory, so a dead container never surfaces as a restore failure. Read
-the worker pod log.
-
-### 8. Drive it from a gateway
+### 4. Drive it from a gateway
 
 A stock `openshell-gateway` dispatches to this driver over a Unix socket. With
 `--compute-driver-socket`, the gateway binds the name given to
@@ -318,7 +192,7 @@ openshell-driver-substrate --bind-socket /tmp/substrate.sock \
   --api-endpoint 127.0.0.1:8443 \
   --api-tls-ca creds/ctb.crt --api-tls-server-name api.ate-system.svc \
   --api-bearer-token-path creds/token \
-  --atespace "${ATESPACE}" --snapshots-location "gs://${BUCKET_NAME}/${ATESPACE}/" &
+  --atespace ate-openshell-microvm &
 
 openshell-gateway --compute-driver substrate \
   --compute-driver-socket /tmp/substrate.sock --disable-tls
@@ -328,10 +202,10 @@ openshell-gateway --compute-driver substrate \
 `api.ate-system.svc`, and a bearer token whose audience is that same name. It
 does not require a client certificate.
 
-Create a sandbox with `grpcurl` (the gateway serves no reflection):
+Create a sandbox with `grpcurl` (the gateway serves reflection):
 
 ```sh
-grpcurl -plaintext -import-path <openshell>/proto -proto openshell.proto -d '{
+grpcurl -plaintext -d '{
   "workspace_scope": {"workspace": "default"},
   "name": "alice",
   "spec": {"log_level": "info",
@@ -354,22 +228,38 @@ five minutes; see [Known gaps](#known-gaps).
 `run_boundary` calls `qualify_runtime()` unconditionally; a failed gate ends
 the sandbox. The golden warm-up also runs `openshell-sandbox capability-probe`
 once; its JSON report is in the worker pod's log, and a passing run says
-`"qualified":true` with `landlock_abi: 7`, `seccomp_notification: true`,
-`socket_virtualization: true`, `dns_relay_bind: true`.
+`"qualified":true`.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | [`b5c3fdc1`](https://github.com/dims/substrate/commit/b5c3fdc1e022c759ea993fa630c801a5bdac84cd), and an image that declares `USER` |
-| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]` |
-| 3 | `no_new_privs == 1` | [`9d6020f5`](https://github.com/dims/substrate/commit/9d6020f51b47968c3d0f6eb27747f4cb4c7682c7) |
+| 1 | non-root UID **and** GID | an image `USER`, which Substrate honors, or `sandbox-entry.sh` dropping to 65532 |
+| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]`, and `setpriv --bounding-set=-all` after the start-up work |
+| 3 | `no_new_privs == 1` | `sandbox-entry.sh`: `setpriv --no-new-privs`; Substrate has no field for it |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
-| 5 | Landlock allow/deny | a writable `/tmp` |
+| 5 | Landlock allow/deny | a writable `/tmp`; Substrate mounts a tmpfs there |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind, Landlock ABI ≥ 3 | [`b47e9040`](https://github.com/dims/substrate/commit/b47e9040a6c4fe999c16e1d0957a0a85e5d76b51), [`dc53a35b`](https://github.com/dims/substrate/commit/dc53a35ba72437827198dc7ba921b7ca09f651e2) |
+| 7 | socket virtualization, DNS relay bind on `127.0.0.53:53`, loopback confinement, Landlock ABI ≥ 3 | nothing; Substrate lifts the guest's privileged-port limit |
 
-Gate 5 needs `/tmp` because the probe builds its test tree under
-`std::env::temp_dir()`, and the stock sandbox image contains one file, the
-binary.
+### The boundary channel
+
+OpenShell refuses a boundary listener on a loopback address and a supervisor
+peer whose address is the sandbox's own. The sandbox and supervisor containers
+share the actor's network namespace, so the channel runs the other way round:
+the supervisor listens on the actor's address, `169.254.17.2:17777`, the same
+in every Substrate actor, and the sandbox dials it over TLS
+(`RuntimeInitiatedTlsTcp`). `sandbox-entry.sh` waits for that listener before
+starting the sandbox. In the worker pod log, `Runtime-initiated Sandbox
+Protocol listener ready` is the supervisor and `Isolation boundary attached`
+is the pair.
+
+### DNS
+
+The sandbox answers the workload's DNS at `127.0.0.53` and its broker refuses
+any other nameserver. Substrate writes the actor gateway into `/etc/resolv.conf`
+in the rootfs base layer and keeps the actor's own edits, so `sandbox-entry.sh`
+writes `nameserver 127.0.0.53` on the first boot and the golden snapshot
+carries it. The supervisor's policy DNS then resolves only the hosts the
+policy names; a refused name shows as `NET:REFUSE ... policy_dns_ineligible`.
 
 ### Two transient conditions
 
@@ -384,31 +274,25 @@ restore.
 
 ### Where the output is
 
-`kubectl-ate logs actor` returns nothing once an actor has been restored from a
-snapshot. The worker pod forwards actor logs:
+The worker pod forwards actor logs, each line labelled with the actor and
+container; `kubectl-ate logs actor <name> -a <atespace>` filters them, and
+`run.sh` prints the matching lines after each beat:
 
 ```sh
 kubectl logs -n "${ATESPACE}" <worker-pod> | grep -i openshell
 ```
 
-`Boundary control listener ready` says the sandbox cleared every gate and is
-serving. `Isolation boundary attached` and `PROC:LAUNCH` say the supervisor
-reached it and started the workload.
+`Isolation boundary attached` and `PROC:LAUNCH` say the supervisor reached the
+sandbox and started the workload.
 
 ---
 
 ## Known gaps
 
-- **Image file ownership is discarded.** Substrate's `unpackLayer` never chowns
-  to the layer tar's uid/gid, so everything extracts root-owned; an image
-  shipping files owned by its runtime user lands unusable by that user. The
-  natural home for a fix is `FinalizeLayer` in privileged ateom. This is what
-  forces the baking in step 5.
-- **`no_new_privileges` is unconditional**, with no `SecurityContext` field to
-  opt out.
-- **`SecurityContext` has no `runAsUser`.** A container's identity comes from
-  its image's `Config.User` and nowhere else, and a named `USER` is rejected
-  rather than looked up in the image's passwd file.
+- **`no_new_privileges` has no `SecurityContext` field.** Micro-VM containers
+  run without it, so the sandbox image sets it itself. A change adding
+  `allowPrivilegeEscalation` (Kubernetes shape) is on the `dims/substrate`
+  fork, branch `allow-privilege-escalation`, pending a pull request.
 - **`Linux.Seccomp`, `Process.ApparmorProfile` and `SelinuxLabel` are not
   forwarded** to the kata agent. `Linux.Sysctl` is, but an ActorTemplate cannot
   set it.
@@ -418,18 +302,14 @@ reached it and started the workload.
 - **Templates are never garbage-collected.**
 - **The driver creates no `EgressPolicy`.** Substrate denies an actor's egress
   until one exists, so a gateway-created sandbox cannot reach anything.
-- **OpenShell's supervisor can drop a mediated request** that arrives in the
-  same read as the synthesized `CONNECT` header, about once in ten first opens
-  after a restore, so the demo stalls about one run in six until
-  [NVIDIA/OpenShell#3745](https://github.com/NVIDIA/OpenShell/pull/3745) lands. `run.sh` reports it.
 - **A gateway can create a sandbox, but not bring it to `Ready`.** The
   synthesized template is one container, with no supervisor and no
   credentials, so no supervisor session can be established. The gateway holds
   `Provisioning`, refuses `StopSandbox` and `StartSandbox` before `Ready`, and
   after five minutes marks the sandbox `Error`. Substrate has no way to hand
-  an actor a per-sandbox secret (no per-actor file or env), and the gateway's
-  launch credentials are per sandbox, so the two-container shape of
-  `examples/helpdesk` cannot be synthesized yet.
+  an actor a per-sandbox secret, and the gateway's launch credentials are per
+  sandbox, so the two-container shape of `examples/helpdesk` cannot be
+  synthesized yet. OpenShell's isolation-backend API (RFC 0012) is the route.
 
 ## License
 

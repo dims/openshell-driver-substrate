@@ -7,15 +7,16 @@ and what each piece trusts.
 
 OpenShell's gateway creates and drives sandboxes through a `ComputeDriver`
 gRPC contract. This repository is one such driver, running as its own process
-on a Unix socket. It maps each gateway call onto Substrate's `ateapi.Control`
-API: a sandbox is an `Actor`, a workload is one `ActorTemplate`, and starting a
-sandbox is a restore of that template's golden snapshot into a micro-VM. Inside
-the VM, stock OpenShell binaries run unmodified: `openshell-sandbox` holds the
-workload, `openshell-supervisor` enforces policy and audits, and a small relay
-container makes the workload reachable through Substrate's ingress. Nothing in
-OpenShell, Substrate's guest kernel, or kata is forked. Six Substrate commits
-are required, and a seventh matters on gVisor only;
-[`upstream-branches.md`](upstream-branches.md) lists them.
+on a Unix socket. It maps each gateway call onto Substrate's `Control` API
+(`substrate.ateapi.v1`): a sandbox is an `Actor`, a workload is one
+`ActorTemplate`, and starting a sandbox is a restore of that template's golden
+snapshot into a micro-VM. Inside the VM, stock OpenShell binaries run
+unmodified: `openshell-sandbox` holds the workload, `openshell-supervisor`
+enforces policy and audits, and a small relay container makes the workload
+reachable through Substrate's ingress. Nothing in OpenShell, Substrate, the
+guest kernel or kata is forked or patched;
+[`upstream-branches.md`](upstream-branches.md) records the one gap the demo
+image works around.
 
 ## The big picture
 
@@ -42,7 +43,7 @@ flowchart TB
   subgraph substrate["Substrate control plane"]
     direction LR
     ctl["ate-controller<br/>WorkerPool → Deployment of worker pods<br/>syncer: pod ↔ Worker, drain,<br/>release the actors of a dead pod"]
-    api["ate-api-server<br/>ateapi.Control, gRPC over TLS 1.3 + bearer token<br/>ActorTemplate, Actor, Worker, EgressPolicy, Tag<br/>workflows: resume, suspend, revert, delete"]
+    api["ate-api-server<br/>Control, gRPC over TLS 1.3 + bearer token<br/>ActorTemplate, Actor, Worker, EgressPolicy, Tag<br/>workflows: resume, suspend, revert, delete"]
     pg[("postgres")]
     recon["template reconciler<br/>golden actor: boot, wait 20 s,<br/>checkpoint, tag"]
     ctl --> api
@@ -50,37 +51,37 @@ flowchart TB
     api --> recon
   end
 
-  router["atenet router, ingress<br/>CONNECT tunnel on :8081<br/>ate-target-actor: atespace/name"]
+  router["atenet router, ingress<br/>mTLS, allow-listed client SPIFFE IDs<br/>CONNECT tunnel, ate-target-actor: atespace/name"]
 
-  atelet["atelet, DaemonSet, one per node, versioned<br/>pulls images by digest, builds OCI specs, durable dirs<br/>AteomHerder: Run, Checkpoint, Restore"]
+  atelet["atelet, DaemonSet, one per node<br/>pulls images by digest, builds OCI specs, durable dirs<br/>drives the node's workers: Run, Checkpoint, Restore"]
 
   subgraph pod["worker pod"]
-    ateom["ateom-microvm<br/>cloud-hypervisor, virtiofsd, kata-agent"]
+    ateom["ateworker-microvm<br/>cloud-hypervisor, virtiofsd, kata-agent"]
   end
 
-  subgraph vm["micro-VM"]
+  subgraph vm["micro-VM, address 169.254.17.2"]
     direction LR
     relay["relay container, plain<br/>0.0.0.0:8081 → 127.0.0.1:8080"]
-    sbx["sandbox container<br/>openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay"]
-    sup["supervisor container<br/>openshell-supervisor, isolation-backend role<br/>OPA policy, egress proxy, TLS CA, OCSF audit"]
+    sbx["sandbox container<br/>sandbox-entry.sh → openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay at 127.0.0.53"]
+    sup["supervisor container<br/>openshell-supervisor, isolation-backend role<br/>listens on 169.254.17.2:17777<br/>OPA policy, policy DNS, egress proxy, TLS CA, OCSF audit"]
     relay -- "loopback" --> sbx
-    sbx <-- "boundary, TLS on 127.0.0.1:17777" --> sup
+    sbx -- "dials the boundary: TLS to 169.254.17.2:17777" --> sup
   end
 
   store[("object store, rustfs in kind, GCS on GKE<br/>golden and per-actor snapshots")]
   egress["atenet egress<br/>terminates the actor's CONNECT<br/>allows the actor's EgressPolicy only"]
-  model["model endpoint, ollama on the host<br/>the one allow-listed destination"]
+  model["model endpoint, ollama in the cluster<br/>the one allow-listed host"]
 
   cli --> gw
   gw -- "compute_driver.proto" --> driver
   driver -- "CreateActorTemplate, CreateActor, ResumeActor,<br/>SuspendActor, DeleteActor, GetActor, ListActors" --> api
-  kate -- "ateapi.Control" --> api
+  kate -- "Control" --> api
   api -- "Restore, Checkpoint" --> atelet
   ctl -. "creates, replaces" .-> pod
   atelet -- "RunWorkload, RestoreWorkload, CheckpointWorkload" --> ateom
-  ateom -- "restore ≈ 350 ms" --> sbx
+  ateom -- "restore ≈ 330 ms" --> sbx
   ateom <-- "snapshot files" --> store
-  cli -- "CONNECT through a port-forward" --> router
+  cli -- "kubectl-ate proxy actor" --> router
   router --> relay
   sup -- "allowed connections, atunnel" --> egress
   egress --> model
@@ -101,7 +102,7 @@ Three trust domains meet here:
 | Domain | Runs | Trusts |
 |---|---|---|
 | OpenShell gateway and this driver | outside the cluster, or as a pod | `ate-api-server` over TLS with a bearer token whose audience is `api.ate-system.svc` |
-| Substrate control plane and node agents | namespace `ate-system`, one atelet per node, one ateom per worker pod | Kubernetes RBAC, image digests, the object store |
+| Substrate control plane and node agents | namespace `ate-system`, one atelet per node, one ateworker per worker pod | Kubernetes RBAC, image digests, the object store |
 | The guest | one micro-VM per actor | its own kernel and cloud-hypervisor; inside it, the sandbox trusts only the key embedded in its bootstrap |
 
 ## Components
@@ -128,18 +129,19 @@ variables), binds the socket, and serves `ComputeDriverServer`.
 | ComputeDriver call | What the driver does |
 |---|---|
 | `get_capabilities` | Names itself `substrate`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false. |
-| `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest. A bare tag fails atelet's pull cache later, so it is refused here. |
+| `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (a bare tag fails atelet's pull cache later) and resource limits that parse as Kubernetes quantities. |
 | `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` is a retried create and is fine), `ResumeActor`. |
 | `start_sandbox` | `ResumeActor`. |
 | `stop_sandbox` | `SuspendActor`: checkpoint, free the worker, keep the snapshot. |
-| `delete_sandbox` | `DeleteActor` with `any_state: true`. The template stays; other actors may share it. |
+| `suspend_sandbox` | Unimplemented; the driver does not advertise suspend-resume, `stop_sandbox` is the suspend. |
+| `delete_sandbox` | `DeleteActor`; Substrate deletes from any state. The template stays; other actors may share it. |
 | `get_sandbox`, `list_sandboxes` | `GetActor`, `ListActors` walked to the last page (1000 per page). |
 | `watch_sandboxes` | Substrate has no watch RPC. The driver polls `ListActors` every 2 s, diffs against the last snapshot, and emits changed and deleted sandboxes. It stops when the gateway drops the stream. |
 | `ensure_workspace` | `CreateAtespace` for the one configured atespace. The trait carries workspace identity only on create, so one atespace serves every workspace. |
 | `delete_workspace` | No-op. |
 | `authenticate_sandbox` | Unimplemented. |
 
-One `ateapi.Control` channel is dialed lazily and reused. An interceptor adds
+One `Control` channel is dialed lazily and reused. An interceptor adds
 `Authorization: Bearer` from a token file read on every client build, so a
 rotated projected token needs no restart. TLS is on when a CA bundle is
 configured; a client certificate is optional and must come as a pair.
@@ -151,8 +153,8 @@ is written against the gateway's phase rules and pinned by a table test:
 |---|---|---|
 | RUNNING | `Ready=True` (ContainerRunning) | Ready |
 | RESUMING, REVERTING | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
-| SUSPENDING, PAUSING | `Suspended=False` only | Provisioning |
-| SUSPENDED, PAUSED | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
+| SUSPENDING | `Suspended=False` only | Provisioning |
+| SUSPENDED | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
 
@@ -161,11 +163,13 @@ is written against the gateway's phase rules and pinned by a table test:
 Everything the golden snapshot depends on goes into the template, and nothing
 else: the image, the command, the environment (`spec.environment`, then
 `spec.template.environment` over it, then `OPENSHELL_ENDPOINT` over both so a
-caller cannot redirect the gateway address), the sandbox config name, and the
-snapshot location. The template is encoded with prost, its metadata blanked,
-and hashed; the name is `oshl-` plus the first eight bytes of the SHA-256. Two
-sandboxes with the same inputs share one template and one golden snapshot.
-Any change to what the template contains gets a new one.
+caller cannot redirect the gateway address), the worker selector, and the
+resource limits (the sandbox template's `cpu_limit` and `memory_limit` as
+Kubernetes quantities, or the driver's defaults). The template is encoded with
+prost, its metadata blanked, and hashed; the name is `oshl-` plus the first
+eight bytes of the SHA-256. Two sandboxes with the same inputs share one
+template and one golden snapshot. Any change to what the template contains
+gets a new one.
 
 Nothing per sandbox may be in a template. A snapshot freezes process memory,
 so a per-sandbox value baked into it would come back identical in every actor
@@ -174,12 +178,12 @@ that reason, and a test asserts it. That is also why the gateway path cannot
 reach Ready today; see [Credentials](#credentials).
 
 The synthesized shape is one container: capabilities dropped (`openshell-sandbox`
-refuses to run with any capability in its bounding set), a durable-dir volume
-at `/tmp` (its Landlock probe writes there and the stock image has no `/tmp`),
-full snapshots on pause and commit, cold boot on first resume, sandbox class
-micro-VM. The helpdesk example uses a hand-written three-container template
-instead, because it needs a supervisor and a relay; the two shapes differ only
-in what they contain, not in how Substrate treats them.
+refuses to run with any capability in its bounding set), memory snapshots, and
+a worker selector whose pool decides the sandbox class (micro-VM in the
+harness). Substrate mounts a tmpfs at `/tmp`, where the Landlock probe writes.
+The helpdesk example uses a hand-written three-container template instead,
+because it needs a supervisor and a relay; the two shapes differ only in what
+they contain, not in how Substrate treats them.
 
 `ensure_ready` creates the template, tolerates `AlreadyExists`, then polls
 `GetActorTemplate` every 2 s until `status.goldenSnapshotStatus.goldenTag` is
@@ -192,9 +196,9 @@ set, or `error_message` is set (FailedPrecondition), or 180 s pass
   `Worker`, `EgressPolicy`, `Tag`) in postgres and runs the workflows: resume
   picks a Worker and asks its node's atelet to restore; suspend asks for a
   checkpoint and clears the assignment; revert puts a crashed or running actor
-  back at its last external snapshot; delete tears down from any state when
-  asked. It speaks gRPC over TLS with the `servicedns` trust bundle and a
-  bearer token; it needs no client certificate.
+  back at its last external snapshot; delete tears down from any state. It
+  speaks gRPC over TLS with the `servicedns` trust bundle and a bearer token;
+  it needs no client certificate.
 - **template reconciler**, inside ate-api-server, gives a new template its
   golden snapshot: it creates one golden actor, resumes it from cold boot,
   waits a fixed 20 s (`goldenSnapshotWarmup`), suspends it, and tags the
@@ -204,71 +208,85 @@ set, or `error_message` is set (FailedPrecondition), or 180 s pass
   runs the syncer: a new pod registers as a Worker, a terminating pod marks
   its Worker `DRAINING`, a vanished pod deletes its Worker, which releases the
   actors bound to it into `CRASHED`.
-- **atelet** is a DaemonSet, one per node and versioned per node. It pulls
-  images by digest into a cache, builds the OCI specs (capabilities as the
-  template says; with the commits in [`upstream-branches.md`](upstream-branches.md),
-  also the image's `USER` and, for micro-VM, `no_new_privileges` and the
-  low-port sysctl), lays out durable dirs, and drives the node's ateoms
-  through `AteomHerder`: Run, Checkpoint, Restore.
-- **ateom-microvm** is the worker pod's process: it launches cloud-hypervisor,
-  serves the rootfs layers over virtiofsd, talks to the kata-agent in the
-  guest to start containers, and checkpoints or restores the whole VM. A
-  worker hosts as many actors as its capacity fits; the helpdesk template asks
-  for a worker's whole CPU, so its pool of two gives two concurrent actors.
+- **atelet** is a DaemonSet, one per node. It pulls images by digest into a
+  cache, builds the OCI specs (capabilities as the template says, the image's
+  `USER` and `WORKDIR`, and on micro-VM the sysctl that lifts the guest's
+  privileged-port limit), writes the actor's `/etc/resolv.conf` and
+  `/etc/hosts` into the rootfs base layer, lays out durable dirs, and drives
+  the node's workers: Run, Checkpoint, Restore.
+- **ateworker-microvm** is the worker pod's process: it launches
+  cloud-hypervisor, serves the rootfs layers over virtiofsd, talks to the
+  kata-agent in the guest to start containers, and checkpoints or restores the
+  whole VM. A worker hosts as many actors as its capacity fits; the helpdesk
+  template asks for a worker's whole CPU, so its pool of two gives two
+  concurrent actors.
 - **object store**: rustfs in kind, GCS on GKE. A snapshot is `base-id`,
-  `config.json`, `memory-ranges`, `rootfs-upper.tar`, `durable-dir.tar`,
-  `state.json`. A restore is about 350 ms.
-- **atenet** is one binary in two roles. The router is ingress: an HTTP
-  `CONNECT` on service port 8081 with an `ate-target-actor: atespace/name`
-  header opens a TCP tunnel to any port on the actor. The egress terminates
-  the actor's outbound `CONNECT`s and allows only what the actor's
-  `EgressPolicy` names, 403 otherwise.
+  `config.json`, `memory-ranges`, one rootfs upper tar per container, one tar
+  per durable dir, and `state.json`. A restore is about 330 ms.
+- **atenet** is one binary in two roles. The router is ingress, mTLS only: a
+  client presents a certificate the podidentity CA issued for an allow-listed
+  SPIFFE ID, and an HTTP `CONNECT` with an `ate-target-actor: atespace/name`
+  header opens a TCP tunnel to any port on the actor; `kubectl-ate proxy actor`
+  does the certificate work and forwards a local port. The egress terminates
+  the actor's outbound `CONNECT`s and allows only the hosts and ports the
+  actor's `EgressPolicy` names, 403 otherwise.
 
 ### Inside the micro-VM
 
-One guest, one network namespace, three containers from the helpdesk template:
+One guest, one network namespace with the address `169.254.17.2`, three
+containers from the helpdesk template:
 
-- **sandbox**: `openshell-sandbox` is PID 1 of the workload's container. It
-  reads its bootstrap and unlinks it, refuses to run unless it is non-root,
+- **sandbox**: `sandbox-entry.sh` is the container's first process. As root it
+  points `/etc/resolv.conf` at the sandbox's DNS relay, waits for the
+  supervisor's listener, and hands off with `setpriv` to uid 65532 with every
+  capability dropped and `no_new_privs` set. `openshell-sandbox` then reads
+  its bootstrap and unlinks it, refuses to run unless it is non-root,
   capability-free and `no_new_privs`, and probes the kernel for Landlock,
-  seccomp user notification, socket virtualization and a DNS relay bind.
-  Then it listens for its supervisor on `127.0.0.1:17777` over TLS. It forks
-  the workload under seccomp and Landlock and brokers the workload's network
-  calls.
-- **supervisor**: `openshell-supervisor --role isolation-backend` finds the
-  boundary through its runtime descriptor, authenticates with its token pair,
-  loads the Rego policy and data into Open Policy Agent (OPA), installs a
-  TLS-interception certificate authority (CA) the workload trusts, starts the
-  workload through the sandbox, decides every connection, proxies the allowed
-  ones, and writes Open Cybersecurity Schema Framework (OCSF) audit lines.
+  seccomp user notification, socket virtualization, loopback confinement and
+  a DNS relay bind. Then it dials its supervisor at `169.254.17.2:17777` and
+  serves TLS over that connection. It forks the workload under seccomp and
+  Landlock and brokers the workload's network calls.
+- **supervisor**: `openshell-supervisor --role isolation-backend` listens
+  where its runtime descriptor says, authenticates the sandbox's token pair,
+  loads the Rego policy and data into Open Policy Agent (OPA), answers the
+  workload's DNS for the hosts the policy names, installs a TLS-interception
+  certificate authority (CA) the workload trusts, starts the workload through
+  the sandbox, decides every connection, proxies the allowed ones, and writes
+  Open Cybersecurity Schema Framework (OCSF) audit lines.
 - **relay**: plain `asyncio` in a plain container. The sandbox's broker refuses
   `accept(2)` from a non-loopback peer, so Substrate's router cannot reach the
   agent directly. The relay accepts on the actor's address and connects over
   loopback. It stands in for the gateway's loopback service endpoint.
 
-The boundary channel is TCP on loopback, not a Unix socket: containers of one
-actor share the guest network namespace, but a Unix socket on a shared
-durable dir is not shared across them (`connect(2)` gives `ECONNREFUSED`).
+The boundary channel runs from the sandbox to the supervisor. OpenShell
+refuses a boundary listener on a loopback address and a supervisor peer whose
+address is the sandbox's own, and the two containers share one network
+namespace, so the supervisor is the listener, on the actor's address, and the
+sandbox dials it (`RuntimeInitiatedTlsTcp`). A Unix socket on a shared durable
+dir is no alternative: it is not shared across the containers (`connect(2)`
+gives `ECONNREFUSED`).
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant A as ateom-microvm
+  participant A as ateworker-microvm
   participant K as kata-agent
-  participant SB as sandbox container<br/>openshell-sandbox
+  participant SB as sandbox container<br/>sandbox-entry.sh, openshell-sandbox
   participant SU as supervisor container<br/>openshell-supervisor
   participant RL as relay container
   participant WL as workload<br/>python3 agent.py
 
   A->>K: create containers from the OCI specs
-  K->>SB: start /openshell-sandbox --bootstrap /.openshell/channel/sandbox/bootstrap.json
+  K->>SB: start sandbox-entry.sh /openshell-sandbox --bootstrap /.openshell/channel/sandbox/bootstrap.json
   K->>SU: start openshell-supervisor --role isolation-backend<br/>--backend-descriptor-file, --auth-bundle-file, --policy-rules, --policy-data
   K->>RL: start python3 relay.py
+  SU->>SU: read runtime-descriptor.json and auth.json (JWT pair, no expiry)
+  SU->>SU: listen TLS on 169.254.17.2:17777 · "Runtime-initiated Sandbox Protocol listener ready"
+  SB->>SB: nameserver 127.0.0.53; wait for the listener; setpriv → uid 65532, no_new_privs
   SB->>SB: read bootstrap.json, then unlink it
-  Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp,<br/>seccomp notification, socket virtualization + DNS relay bind
-  SB->>SB: listen TLS on 127.0.0.1:17777 · "Boundary control listener ready"
-  SU->>SU: read runtime-descriptor.json and auth.json (JWT pair, 1 h)
-  SU->>SB: dial the boundary, present the sandbox token
+  Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp, seccomp notification,<br/>socket virtualization, DNS relay bind, loopback confinement
+  SB->>SU: dial the boundary, serve TLS on the connection
+  SU->>SB: present the sandbox token
   SB-->>SU: verified against the embedded key · "Isolation boundary attached"
   SU->>SU: load policy.rego + data.yaml into OPA
   SU->>SU: create CA in /run/openshell-supervisor-ca · "Landlock ruleset built"
@@ -292,7 +310,7 @@ stateDiagram-v2
   RUNNING --> CRASHED: worker pod gone, syncer releases the actor
   CRASHED --> REVERTING: RevertActor (kubectl-ate revert)
   REVERTING --> SUSPENDED: back at the last external snapshot
-  RUNNING --> DELETING: DeleteActor any_state (delete_sandbox)
+  RUNNING --> DELETING: DeleteActor (delete_sandbox)
   SUSPENDED --> DELETING: DeleteActor
   CRASHED --> DELETING: DeleteActor
   DELETING --> [*]
@@ -334,24 +352,24 @@ sequenceDiagram
   participant D as openshell-driver-substrate
   participant API as ate-api-server
   participant R as template reconciler
-  participant W as atelet → ateom-microvm
+  participant W as atelet → ateworker-microvm
   participant S as object store
 
   GW->>D: ValidateSandboxCreate(sandbox)
   D-->>GW: ok, or FailedPrecondition when the image has no @sha256 digest
   GW->>D: CreateSandbox(sandbox)
-  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, command, env,<br/>gateway endpoint, sandbox config
+  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, command, env,<br/>gateway endpoint, worker selector, limits
   D->>API: CreateActorTemplate(name, spec)
   alt template is new
     API->>R: reconcile
     R->>API: create golden actor, ResumeActor
     API->>W: Restore from cold boot
     W->>W: boot the micro-VM, start the containers
-    Note over R,W: sandbox clears its 7 gates, supervisor attaches,<br/>workload launched
+    Note over R,W: sandbox clears its gates, supervisor attaches,<br/>workload launched
     R->>R: wait 20 s (goldenSnapshotWarmup)
     R->>API: SuspendActor
     API->>W: Checkpoint
-    W->>S: memory-ranges, rootfs-upper.tar, durable-dir.tar, state.json
+    W->>S: memory ranges, rootfs uppers, durable dirs, state.json
     R->>API: tag the snapshot in atespace ate-golden
   else template exists
     API-->>D: AlreadyExists, same name means same inputs
@@ -366,7 +384,7 @@ sequenceDiagram
   API->>API: pick a free Worker
   API->>W: Restore
   W->>S: fetch snapshot
-  W-->>API: RUNNING (≈ 350 ms)
+  W-->>API: RUNNING (≈ 330 ms)
   D-->>GW: CreateSandboxResponse
   loop watch_sandboxes: ListActors every 2 s, diffed
     D-->>GW: DriverSandbox with conditions
@@ -375,9 +393,9 @@ sequenceDiagram
 ```
 
 The first `create_sandbox` for a workload pays for the golden snapshot: about
-30 s in all, a few seconds of boot, the fixed 20 s warm-up, and the checkpoint. Every later one, and every later
-actor of the same template, is a restore. The gateway's five-minute
-provisioning ceiling is comfortably above this.
+30 s in all, a few seconds of boot, the fixed 20 s warm-up, and the checkpoint.
+Every later one, and every later actor of the same template, is a restore. The
+gateway's five-minute provisioning ceiling is comfortably above this.
 
 ### Reaching the agent, and the two egress layers
 
@@ -388,26 +406,29 @@ sequenceDiagram
   participant RT as atenet router
   participant RL as relay
   participant WL as agent.py<br/>in the sandbox
-  participant SB as sandbox broker<br/>seccomp notify
-  participant SU as supervisor<br/>OPA + proxy
+  participant SB as sandbox broker<br/>seccomp notify, DNS relay
+  participant SU as supervisor<br/>policy DNS, OPA, proxy
   participant EG as atenet egress
   participant M as model
 
-  C->>RT: CONNECT alice:8081, proxy-header ate-target-actor: atespace/alice
+  C->>RT: kubectl-ate proxy actor alice 18081:8081 · mTLS, CONNECT, ate-target-actor: atespace/alice
   RT->>RL: TCP to the actor's address :8081
   Note over RT,WL: the broker refuses accept(2) from a non-loopback peer,<br/>so the relay connects to the agent over 127.0.0.1
   RL->>WL: POST /chat
-  WL->>SB: connect(2) to 172.18.0.1:11434 · intercepted
-  SB->>SU: who, where: /usr/local/bin/python3.12 → host:port
-  alt not in data.yaml network_policies
-    SU-->>SB: deny
-    SB-->>WL: EACCES · "network_broker: denied (syscall=42)"
-  else allowed for this binary, host and port
+  WL->>SB: resolve ollama.<atespace>.svc.cluster.local at 127.0.0.53
+  SB->>SU: the query
+  alt the host is not in data.yaml network_policies
+    SU-->>SB: refused · OCSF NET:REFUSE [policy_dns_ineligible]
+    SB-->>WL: the name does not resolve, the connect fails with EACCES
+  else the host is allowed
+    SU-->>SB: the address · "Policy DNS mapped ..."
+    WL->>SB: connect(2) to it · intercepted
+    SB->>SU: who, where: /usr/local/bin/python3.12 → host:11434
     SU-->>SB: allow · OCSF NET:OPEN ALLOWED [policy:model engine:opa]
-    SU->>EG: HTTP CONNECT 172.18.0.1:11434 (atunnel)
+    SU->>EG: HTTP CONNECT ollama.<atespace>.svc.cluster.local:11434 (atunnel)
     alt no EgressPolicy on the actor
       EG-->>SU: 403 · the agent sees RemoteDisconnected
-    else EgressPolicy allows 172.18.0.1/32
+    else EgressPolicy allows http to that host on 11434
       EG->>M: TCP tunnel
       SU->>M: POST /v1/chat/completions · OCSF HTTP:POST ALLOWED
       M-->>WL: reply
@@ -417,16 +438,17 @@ sequenceDiagram
 ```
 
 Ingress is Substrate's router, the relay, then loopback into the sandbox.
-Egress is decided twice, in order. First OpenShell: the sandbox intercepts
-the workload's `connect(2)` with seccomp user notification and asks the
+Egress is decided twice, in order. First OpenShell: the supervisor's policy
+DNS answers only for the hosts `data.yaml` names, the sandbox intercepts the
+workload's `connect(2)` with seccomp user notification and asks the
 supervisor, whose shipped policy allows a connection only when `data.yaml`
 names the destination host, port, and the binary making the call; a denied
 call fails with `EACCES` inside the sandbox and the broker logs it. Then
 Substrate: the supervisor's allowed connection leaves the actor as an HTTP
-`CONNECT` to atenet egress, which allows only the CIDRs or hostnames in the
-actor's `EgressPolicy` and answers 403 otherwise. Without both allowances
-the model is unreachable, which is the point: neither the workload nor the
-supervisor can widen its own reach.
+`CONNECT` to atenet egress, which allows only the hosts and ports in the
+actor's `EgressPolicy` (DNS names, never addresses) and answers 403 otherwise.
+Without both allowances the model is unreachable, which is the point: neither
+the workload nor the supervisor can widen its own reach.
 
 ### Suspend and resume
 
@@ -436,33 +458,33 @@ sequenceDiagram
   participant OP as kubectl-ate or gateway
   participant API as ate-api-server
   participant AT as atelet
-  participant AM as ateom-microvm
+  participant AM as ateworker-microvm
   participant S as object store
 
   OP->>API: SuspendActor(alice)
   Note over OP,API: RUNNING → SUSPENDING
   API->>AT: Checkpoint
   AT->>AM: CheckpointWorkload
-  AM->>AM: pause the VM, dump guest memory, tar rootfs upper and durable dirs
-  AM->>S: base-id, config.json, memory-ranges, rootfs-upper.tar, durable-dir.tar, state.json
+  AM->>AM: pause the VM, dump guest memory, tar the rootfs uppers and durable dirs
+  AM->>S: base-id, config.json, memory-ranges, rootfs-upper-*.tar, durable-dir-*.tar, state.json
   AM->>AM: tear the VM down · "Actor checkpointed"
-  AT->>AT: resetActorDirs (needs CAP_DAC_OVERRIDE for files uid 65532 created)
-  API->>API: SUSPENDED · worker assignment cleared, worker shows 0/1
-  Note over OP,S: nothing runs, the snapshot is the only copy
+  AT->>AT: resetActorDirs (CAP_DAC_OVERRIDE for files uid 65532 created)
+  API->>API: SUSPENDED · worker assignment cleared, worker shows 0/1000
+  Note over OP,S: --mode sync returns after the upload; the default returns once the node holds the snapshot
   OP->>API: ResumeActor(alice)
   API->>API: SUSPENDED → RESUMING · pick a free Worker, maybe another pod
   API->>AT: Restore
   AT->>AM: RestoreWorkload
   AM->>S: fetch the snapshot
-  AM->>AM: cloud-hypervisor restore, virtiofs lowers, tap · "Actor restored in ≈ 350 ms"
+  AM->>AM: cloud-hypervisor restore, virtiofs lowers, tap · "Actor restored in ≈ 330 ms"
   API->>API: RUNNING
   Note over OP,S: process memory is back: turns and booted as they were
 ```
 
-A checkpoint pauses the VM, writes guest memory plus the rootfs upper layer
+A checkpoint pauses the VM, writes guest memory plus the rootfs upper layers
 and the durable dirs to the object store, and tears the VM down. The worker is
 free at once. A resume picks any free worker, possibly on a different pod,
-fetches the snapshot, and restores in about 350 ms. Process memory is exactly
+fetches the snapshot, and restores in about 330 ms. Process memory is exactly
 as it was: the agent's chat history and its `booted` timestamp included.
 
 ### A host dies
@@ -475,10 +497,10 @@ sequenceDiagram
   participant CTL as ate-controller syncer
   participant API as ate-api-server
   participant DEP as worker Deployment
-  participant AM as new ateom-microvm
+  participant AM as new ateworker-microvm
 
   OP->>K8S: delete pod --grace-period=0 --force
-  Note over OP,CTL: a plain delete gives 3600 s of grace and ateom waits<br/>for the guest, so the actor stays RUNNING on a DRAINING worker
+  Note over OP,CTL: a plain delete gives 3600 s of grace and ateworker waits<br/>for the guest, so the actor stays RUNNING on a DRAINING worker
   K8S-->>CTL: pod gone
   CTL->>API: DeleteWorker(worker)
   API->>API: drain, then release bound actors:<br/>"Releasing actor from a worker whose pod is gone"
@@ -497,7 +519,7 @@ sequenceDiagram
 
 A worker pod that vanishes takes its actor to `CRASHED`, and the Deployment
 replaces the pod within seconds. A plain `kubectl delete pod` does not model
-this: the pool's grace period is an hour and ateom waits for the guest
+this: the pool's grace period is an hour and ateworker waits for the guest
 workloads, so the actor stays `RUNNING` on a `DRAINING` worker. Recovery is
 revert then resume, and everything since the last suspend is lost. A gateway
 that suspends idle sandboxes bounds that loss to the idle window.
@@ -512,15 +534,14 @@ flowchart LR
 
   key["signing.key.pem<br/>Ed25519, any key is a trust anchor"]:::file
   gen["bootstrap-gen<br/>BOOTSTRAP_CHILD_ENV → workload env"]
-  bs["bootstrap.json · server.crt · server.key<br/>BoundaryConfig: listener 127.0.0.1:17777,<br/>verification key, child_env"]:::file
-  rd["runtime-descriptor.json<br/>SandboxRuntimeDescriptor: where the boundary is,<br/>its TLS trust anchor"]:::file
-  ab["auth.json<br/>SupervisorAuthBundle: gateway and sandbox JWTs,<br/>expire in one hour"]:::file
-  pkg["build.sh<br/>dirs 0777, files 0666 → bootstrap.tar"]
-  simg["helpdesk-sandbox image<br/>python:3.12-slim + /openshell-sandbox<br/>+ agent.py, relay.py + bootstrap.tar"]:::img
+  bs["bootstrap.json · server.crt · server.key<br/>BoundaryConfig: dial 169.254.17.2:17777,<br/>verification key, provisioning evidence, child_env"]:::file
+  rd["runtime-descriptor.json<br/>SandboxRuntimeDescriptor: listen on 169.254.17.2:17777,<br/>the boundary's TLS trust anchor"]:::file
+  ab["auth.json<br/>SupervisorAuthBundle: gateway and sandbox JWTs,<br/>no expiry"]:::file
+  pkg["build.sh<br/>owner 65532, dirs 0700, files 0600 → bootstrap.tar"]
+  simg["helpdesk-sandbox image<br/>python:3.12-slim + /openshell-sandbox<br/>+ agent.py, relay.py, sandbox-entry.sh + bootstrap.tar"]:::img
   fimg["openshell-bootstrap-files image<br/>/supervisor/{runtime-descriptor.json, auth.json,<br/>policy.rego, data.yaml}"]:::img
   sbx["sandbox container<br/>reads and unlinks its bootstrap,<br/>so it must sit on the writable rootfs"]:::vol
   sup["supervisor container<br/>image volume at /.openshell, read-only is fine"]:::vol
-  note["Substrate discards image file ownership,<br/>so the tree is world-writable instead of owned by 65532"]
 
   key --> gen
   gen --> bs
@@ -530,17 +551,18 @@ flowchart LR
   rd --> fimg
   ab --> fimg
   fimg --> sup
-  pkg -.- note
 ```
 
 OpenShell's sandbox and supervisor authenticate to each other with a pair of
 Ed25519-signed JWTs and TLS material bound to one session id. In a normal
 deployment the gateway mints them per sandbox and refreshes them. Here
-`harness/bootstrap-gen` mints them with a local key, valid for one hour,
-OpenShell's maximum, and the helpdesk images carry them: the sandbox's half
-baked into the writable rootfs (it consumes its bootstrap), the supervisor's
-half as a read-only image volume. `SandboxLaunchAuthentication` validates
-against the key it embeds, so any key is an accepted trust anchor.
+`harness/bootstrap-gen` mints them with a local key and no expiry (a gateway
+would refresh them; this harness has nothing to refresh from, and a snapshot
+can sit for days), and the helpdesk images carry them: the sandbox's half
+baked into the writable rootfs, owned by the sandbox user (it consumes its
+bootstrap), the supervisor's half as a read-only image volume.
+`SandboxLaunchAuthentication` validates against the key it embeds, so any key
+is an accepted trust anchor.
 
 This is where the gateway path stops. The gateway's credentials are per
 sandbox, a template is shared, and a snapshot freezes memory, so there is no
@@ -549,18 +571,18 @@ first boot. The synthesized one-container template therefore has no supervisor,
 no supervisor session forms, and the gateway holds the sandbox at Provisioning.
 Two ways out, both outside this repository: a per-actor secret or file source
 in Substrate, written before first boot and not into the golden snapshot; or
-an OpenShell bootstrap that fetches its own per-sandbox credentials after
-restore, so the snapshot holds nothing per sandbox.
+OpenShell's isolation-backend API, where the driver registers a backend and
+the supervisor opens the boundary through it.
 
 ## What a snapshot is, and what it is not
 
-A snapshot is the whole VM: guest memory, the rootfs upper layer, the durable
+A snapshot is the whole VM: guest memory, the rootfs upper layers, the durable
 dirs. It is not a health check. A container that died inside the VM before the
 snapshot comes back dead in every restore, and Substrate reports the actor
 `RUNNING` all the same. The golden snapshot is taken at a fixed 20 s, whether
 or not the supervisor has attached by then. Read the worker pod's log:
-`Boundary control listener ready`, `Isolation boundary attached` and
-`PROC:LAUNCH` are the signs of a healthy golden actor.
+`Runtime-initiated Sandbox Protocol listener ready`, `Isolation boundary
+attached` and `PROC:LAUNCH` are the signs of a healthy golden actor.
 
 Templates and their golden snapshots are never garbage-collected. The
 driver's content-hash naming keeps their number equal to the number of
