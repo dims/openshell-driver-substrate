@@ -1,0 +1,62 @@
+# The model endpoint, in the cluster so the actors reach it by DNS name: a
+# Substrate egress rule names hosts, never addresses. CPU inference of a small
+# model. Render with harness/scripts/render.sh.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: ${ATESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ollama
+  template:
+    metadata:
+      labels:
+        app: ollama
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.40.14
+          ports:
+            - containerPort: 11434
+          env:
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_KEEP_ALIVE
+              value: "24h"
+          # The server pulls the model once it listens; the probe gates on it.
+          lifecycle:
+            postStart:
+              exec:
+                command: ["sh", "-c", "until ollama pull ${MODEL_NAME}; do sleep 2; done"]
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "ollama list | grep -q '^${MODEL_NAME}'"]
+            periodSeconds: 5
+            failureThreshold: 120
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+      volumes:
+        - name: models
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: ${ATESPACE}
+spec:
+  selector:
+    app: ollama
+  ports:
+    - port: ${MODEL_PORT}
+      targetPort: 11434

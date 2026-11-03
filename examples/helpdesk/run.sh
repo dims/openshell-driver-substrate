@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # The demo: two agents, one actor's life, one host's death, one deletion.
-# Needs build.sh's out/helpdesk.env and a cluster from the root README.
+# Needs build.sh's out/helpdesk.env and a cluster from harness/scripts/kind-up.sh.
 # After each beat, `under` prints what Substrate and OpenShell logged for it.
 set -o errexit -o nounset -o pipefail
 export ATESPACE=${ATESPACE:-ate-openshell-microvm}
-export BUCKET_NAME=${BUCKET_NAME:-ate-snapshots}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "${HERE}/../.." && pwd)
 set -o allexport; . "${REPO}/out/helpdesk.env"; set +o allexport
@@ -12,6 +11,9 @@ export TEMPLATE=helpdesk-$(TEMPLATE=x "${REPO}/harness/scripts/render.sh" "${HER
 WORK=$(mktemp -d)
 T0=$(date +%s)
 SINCE=
+# Local ports of the router proxies, one per actor.
+declare -A PORT=([alice]=18081 [bob]=18082)
+MODEL_LOCAL_PORT=18434
 
 beat()  { SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ); printf '\n\033[1;33m== %s\033[0m  (+%ss)\n' "$*" "$(( $(date +%s) - T0 ))"; }
 actors() { kubectl-ate get actors -a "${ATESPACE}"; }
@@ -22,9 +24,11 @@ until_state() {  # actor state [seconds]
     [[ $(state "$1") == "$2" ]] && return 0; sleep 1
   done; echo "$1 did not reach $2" >&2; return 1
 }
-ask() {  # actor path [curl args]: through atenet-router's CONNECT tunnel to the relay
-  curl -fsS --max-time 90 -p -x http://127.0.0.1:8001 \
-    --proxy-header "ate-target-actor: ${ATESPACE}/$1" "${@:3}" "http://$1:8081$2"; echo
+proxy() {  # actor: a local port to the relay through atenet-router, which takes mTLS; kubectl-ate holds the client certificate
+  kubectl-ate proxy actor -a "${ATESPACE}" "$1" "${PORT[$1]}:8081" > "${WORK}/proxy-$1.log" 2>&1 &
+}
+ask() {  # actor path [curl args]
+  curl -fsS --max-time 90 "${@:3}" "http://127.0.0.1:${PORT[$1]}$2"; echo
 }
 until_up() {  # actor: a 502 from the router is not up
   local i; for ((i = 0; i < 60; i++)); do ask "$1" /status >/dev/null 2>&1 && return 0; sleep 1; done
@@ -35,18 +39,13 @@ chat()  {  # actor message: the answer must carry a reply, not the app's error J
   echo "${out}"; jq -e '.reply' <<<"${out}" >/dev/null || { echo "$1 gave no reply" >&2; return 1; }
 }
 allow_egress() {  # actor: Substrate's own egress gate, the model host only
-  grpcurl -cacert "${WORK}/ca.crt" -authority api.ate-system.svc \
-    -H "authorization: Bearer $(cat "${WORK}/token")" \
-    -import-path "${REPO}/proto" -proto ateapi.proto \
-    -d "{\"actor\":{\"atespace\":\"${ATESPACE}\",\"name\":\"$1\"},
-         \"egress_policy\":{\"metadata\":{\"atespace\":\"${ATESPACE}\",\"name\":\"default\"},
-                            \"rules\":[{\"cidrs\":{\"cidrs\":[\"${MODEL_HOST}/32\"]}}]}}" \
-    127.0.0.1:8443 ateapi.Control/CreateActorEgressPolicy >/dev/null
+  "${REPO}/harness/scripts/render.sh" "${HERE}/egress-policy.yaml.tmpl" > "${WORK}/egress-policy.yaml"
+  kubectl-ate create egress-policy -a "${ATESPACE}" "$1" -f "${WORK}/egress-policy.yaml" >/dev/null
 }
 under() {  # pattern [namespace selector source]: matching log lines since the beat began
   sleep 1
   kubectl logs -n "${2:-${ATESPACE}}" -l "${3:-ate.dev/worker-pool}" --since-time="${SINCE}" --tail=-1 2>/dev/null |
-    jq -r --arg src "${4:-ateom}" '
+    jq -R -r --arg src "${4:-ateworker}" 'fromjson? |
       if .message then
         "  \(.labels."ate.actor.name" // "-" | if test("^[0-9a-f]{8}-") then "golden" else . end)/\(.labels."ate.actor.container.name" // "actor")\t\(.message | sub("^\\S+Z ";""))"
       elif .msg then
@@ -61,24 +60,20 @@ free=$(kubectl-ate get workers -o json |
 cleanup() {
   local rc=$?
   if (( rc == 0 )); then
-    for a in alice bob; do kubectl-ate delete actor -a "${ATESPACE}" --any-state "$a" >/dev/null 2>&1 || true; done
+    for a in alice bob; do kubectl-ate delete actor -a "${ATESPACE}" "$a" >/dev/null 2>&1 || true; done
   else
-    printf "\nkept alice and bob for inspection: kubectl-ate delete actor -a %s --any-state <name>\n" "${ATESPACE}" >&2
+    printf "\nkept alice and bob for inspection: kubectl-ate delete actor -a %s <name>\n" "${ATESPACE}" >&2
   fi
   kill $(jobs -p) 2>/dev/null; rm -rf "${WORK}"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-kubectl port-forward -n ate-system svc/atenet-router 8001:8081 >/dev/null 2>&1 &
-kubectl port-forward -n ate-system svc/api 8443:443 >/dev/null 2>&1 &
-kubectl create token ate-client -n ate-system --audience api.ate-system.svc --duration=1h > "${WORK}/token"
-kubectl get clustertrustbundle servicedns.podcert.ate.dev:identity:primary-bundle \
-  -o jsonpath='{.spec.trustBundle}' > "${WORK}/ca.crt"
+kubectl -n "${ATESPACE}" port-forward svc/ollama "${MODEL_LOCAL_PORT}:${MODEL_PORT}" >/dev/null 2>&1 &
 sleep 2
 MODEL=${CHILD_ENV##*HELPDESK_MODEL=}; MODEL=${MODEL%%,*}  # load the model before the timed beats compete with snapshot I/O
-curl -fsS --max-time 120 -o /dev/null "http://${MODEL_HOST}:${MODEL_PORT}/v1/chat/completions" -H 'Content-Type: application/json' \
+curl -fsS --max-time 120 -o /dev/null "http://127.0.0.1:${MODEL_LOCAL_PORT}/v1/chat/completions" -H 'Content-Type: application/json' \
   -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Say OK.\"}],\"max_tokens\":5}" ||
-  { echo "the model host ${MODEL_HOST}:${MODEL_PORT} did not answer a chat for ${MODEL} within 120 s" >&2; exit 1; }
+  { echo "the model service ${MODEL_HOST}:${MODEL_PORT} did not answer a chat for ${MODEL} within 120 s" >&2; exit 1; }
 
 beat "1  Template and golden snapshot"
 if kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" >/dev/null 2>&1; then
@@ -101,6 +96,7 @@ beat "2  Two agents restored from that one snapshot"
 for a in alice bob; do
   kubectl-ate create actor "$a" -a "${ATESPACE}" --template "${TEMPLATE}" >/dev/null
   kubectl-ate resume actor -a "${ATESPACE}" "$a" >/dev/null
+  proxy "$a"
 done
 for a in alice bob; do until_state "$a" ACTOR_STATE_RUNNING; until_up "$a"; allow_egress "$a"; done
 actors
@@ -116,7 +112,7 @@ chat alice "User foo reports their database is timing out. Give me a three-step 
 under 'OCSF HTTP'
 
 beat "5  Suspend alice: a snapshot is written and her worker is free"
-kubectl-ate suspend actor -a "${ATESPACE}" alice >/dev/null; until_state alice ACTOR_STATE_SUSPENDED
+kubectl-ate suspend actor -a "${ATESPACE}" --mode sync alice >/dev/null; until_state alice ACTOR_STATE_SUSPENDED
 kubectl-ate get workers
 under 'checkpoint'
 
@@ -148,7 +144,7 @@ ask alice /status
 under 'Actor restored'
 
 beat "10 Delete alice; bob and the template stay"
-kubectl-ate delete actor -a "${ATESPACE}" --any-state alice >/dev/null
+kubectl-ate delete actor -a "${ATESPACE}" alice >/dev/null
 actors
 chat bob "In one sentence, what does a helpdesk triage agent do?"
 

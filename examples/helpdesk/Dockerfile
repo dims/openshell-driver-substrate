@@ -5,9 +5,10 @@ ARG SANDBOX_IMAGE
 FROM ${SANDBOX_IMAGE} AS sandbox
 FROM python:3.12-slim
 COPY --from=sandbox /openshell-sandbox /openshell-sandbox
-COPY agent.py relay.py /opt/helpdesk/
+COPY agent.py relay.py sandbox-entry.sh /opt/helpdesk/
 ADD bootstrap.tar /
-USER 65532:65532
-ENTRYPOINT ["/openshell-sandbox"]
+# No USER: sandbox-entry.sh becomes 65532 itself, with no_new_privs set, which
+# Substrate's micro-VM containers do not get from the runtime.
+ENTRYPOINT ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
 # The gateway path sends no command, so the image names its own bootstrap.
 CMD ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]

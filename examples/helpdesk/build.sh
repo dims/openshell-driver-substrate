@@ -3,23 +3,40 @@
 #
 #   REGISTRY=localhost:5001 examples/helpdesk/build.sh
 #
-# The tokens last one hour, so run run.sh within the hour. MODEL_* name an
-# OpenAI-compatible endpoint the kind node can reach; it goes into the
-# workload's environment and is the only host the sandbox policy allows.
+# The OpenShell sandbox and supervisor images are the release Cargo.toml pins,
+# mirrored from ghcr.io into REGISTRY so a template can name them by that
+# registry's digest. MODEL_HOST is the DNS name of an OpenAI-compatible
+# endpoint the actor can reach; it goes into the workload's environment and is
+# the only host the sandbox policy allows.
 set -o errexit -o nounset -o pipefail
 # Same inputs, same digests: BuildKit stamps the build time into the image and
 # records file mtimes, and a new digest means a new template. See --provenance below.
 export SOURCE_DATE_EPOCH=0
 REGISTRY=${REGISTRY:?e.g. localhost:5001}
-MODEL_HOST=${MODEL_HOST:-172.18.0.1}   # the host, seen from a kind node
+ATESPACE=${ATESPACE:-ate-openshell-microvm}
+MODEL_HOST=${MODEL_HOST:-ollama.${ATESPACE}.svc.cluster.local}
 MODEL_PORT=${MODEL_PORT:-11434}
 MODEL_NAME=${MODEL_NAME:-qwen2.5:1.5b}
+OPENSHELL_VERSION=${OPENSHELL_VERSION:-0.1.7}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "${HERE}/../.." && pwd)
 OUT=${REPO}/out
 CTX=${OUT}/helpdesk
 mkdir -p "${OUT}" "${CTX}/files/supervisor"
+
+# The registry's digest of a tag, which is what atelet's pull cache wants.
+# Docker's RepoDigests report the upstream index digest for a mirrored tag,
+# so the registry is asked directly.
+CRANE="go run github.com/google/go-containerregistry/cmd/crane@latest"
+digest() { echo "$1@$(${CRANE} digest "$1")"; }
+
+# Stock OpenShell images, this platform's manifest only, mirrored into the registry.
+PLATFORM=linux/$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+for img in sandbox supervisor; do
+  ${CRANE} copy --platform "${PLATFORM}" "ghcr.io/nvidia/openshell/${img}:${OPENSHELL_VERSION}" \
+    "${REGISTRY}/openshell-${img}:${OPENSHELL_VERSION}" >/dev/null
+done
 
 # Credentials (root README steps 4 and 5). Reused while under 30 minutes old
 # and minted for the same model settings; a mint means a new template.
@@ -36,18 +53,18 @@ else
     cargo run -q --manifest-path "${REPO}/Cargo.toml" -p bootstrap-gen -- "${OUT}"
 fi
 
-# The sandbox unlinks its bootstrap after reading it, so it must sit on the
-# writable rootfs, not an image volume. Substrate discards image file
-# ownership, so the tree is world-writable rather than owned by 65532.
+# The sandbox unlinks its bootstrap after reading it, so it sits on the
+# writable rootfs, owned by the sandbox user, not on an image volume.
 rm -rf "${OUT}/bake"; mkdir -p "${OUT}/bake/.openshell/channel/sandbox"
 cp "${OUT}"/{bootstrap.json,server.crt,server.key} "${OUT}/bake/.openshell/channel/sandbox/"
-chmod -R a+rwX "${OUT}/bake/.openshell"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 -cf "${CTX}/bootstrap.tar" -C "${OUT}/bake" .
+tar --sort=name --owner=65532 --group=65532 --numeric-owner --mtime=@0 --mode='u=rwX,go=' \
+  -cf "${CTX}/bootstrap.tar" -C "${OUT}/bake" .
 
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
-cp "${HERE}"/{Dockerfile,agent.py,relay.py} "${CTX}/"
+cp "${HERE}"/{Dockerfile,agent.py,relay.py,sandbox-entry.sh} "${CTX}/"
 find "${CTX}" -maxdepth 1 -type f -exec touch -d @0 {} +
-docker build -q --provenance=false --sbom=false --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:dev" \
+docker build -q --provenance=false --sbom=false \
+  --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:${OPENSHELL_VERSION}" \
   -t "${REGISTRY}/helpdesk-sandbox:dev" "${CTX}" >/dev/null
 docker push -q "${REGISTRY}/helpdesk-sandbox:dev" >/dev/null
 
@@ -64,10 +81,9 @@ find "${CTX}/files" -type f -exec touch -d @0 {} +
 docker build -q --provenance=false --sbom=false -t "${REGISTRY}/openshell-bootstrap-files:dev" "${CTX}/files" >/dev/null
 docker push -q "${REGISTRY}/openshell-bootstrap-files:dev" >/dev/null
 
-digest() { docker inspect --format '{{index .RepoDigests 0}}' "$1"; }
 cat > "${OUT}/helpdesk.env" <<ENV
 SANDBOX_IMAGE=$(digest "${REGISTRY}/helpdesk-sandbox:dev")
-SUPERVISOR_IMAGE=$(digest "${REGISTRY}/openshell-supervisor:dev")
+SUPERVISOR_IMAGE=$(digest "${REGISTRY}/openshell-supervisor:${OPENSHELL_VERSION}")
 BOOTSTRAP_FILES_IMAGE=$(digest "${REGISTRY}/openshell-bootstrap-files:dev")
 MODEL_HOST=${MODEL_HOST}
 MODEL_PORT=${MODEL_PORT}

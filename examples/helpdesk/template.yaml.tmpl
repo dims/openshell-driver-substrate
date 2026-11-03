@@ -1,22 +1,23 @@
 metadata:
   atespace: ${ATESPACE}
   name: ${TEMPLATE}
+# The pool these labels select decides the sandbox class (micro-VM).
 workerSelector:
   matchLabels:
     workload: openshell-microvm
 containers:
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
-    command: ["/openshell-sandbox"]
+    # Starts as root, sets no_new_privs and becomes 65532; see sandbox-entry.sh.
+    command: ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
     args: ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
     securityContext:
       capabilities:
         drop: ["ALL"]
+        add: ["SETUID", "SETGID", "SETPCAP"]
     volumeMounts:
       - name: socket-dir
         mountPath: "/run/openshell"
-      - name: tmp
-        mountPath: "/tmp"
       - name: supervisor-ca
         mountPath: "/run/openshell-supervisor-ca"
   - name: supervisor
@@ -48,24 +49,15 @@ containers:
 # worker hosts as many actors as fit, and beat 8 kills one worker.
 resources:
   limits:
-    - name: cpu
-      quantity: "2"
-    - name: memory
-      quantity: 1Gi
+    cpuMillicores: 2000
+    memoryBytes: 1073741824
 volumes:
   - name: bootstrap
     image:
       reference: "${BOOTSTRAP_FILES_IMAGE}"
   - name: socket-dir
     durableDir: {}
-  - name: tmp
-    durableDir: {}
   - name: supervisor-ca
     durableDir: {}
 snapshotConfig:
-  onPause: SNAPSHOT_CONTENT_SCOPE_FULL
-  onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: "gs://${BUCKET_NAME}/${ATESPACE}/"
-sandboxConfig:
-  sandboxClass: SANDBOX_CLASS_MICROVM
-  configName: microvm
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
