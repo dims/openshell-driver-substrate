@@ -15,6 +15,7 @@ rules:
             prefix: "Bearer "
             actorJwt:
               audiences: ["${LAUNCH_AUDIENCE}"]
+              expirationSeconds: 600
   - tlsPassthrough:
       hostnames: ["${GATEWAY_HOST}"]
       ports:
