@@ -102,8 +102,10 @@ pub mod ateapi {
     tonic::include_proto!("substrate.ateapi.v1");
 }
 
+pub mod bundle;
 pub mod configfile;
 pub mod fragment;
+pub mod launch;
 pub mod template;
 
 const DRIVER_NAME: &str = "substrate";
@@ -156,6 +158,8 @@ pub struct SubstrateComputeConfig {
     pub template_fragment: Option<ateapi::ActorTemplate>,
     /// Egress rules every sandbox's actor gets before its first resume.
     pub egress_rules: Vec<ateapi::EgressRule>,
+    /// The gateway the supervisors dial, put into every bundle.
+    pub gateway: Option<launch::Gateway>,
 }
 
 impl Default for SubstrateComputeConfig {
@@ -178,6 +182,7 @@ impl Default for SubstrateComputeConfig {
             api_bearer_token_path: None,
             template_fragment: None,
             egress_rules: Vec::new(),
+            gateway: None,
         }
     }
 }
@@ -245,6 +250,8 @@ impl From<SubstrateDriverError> for Status {
 pub struct SubstrateComputeDriver {
     config: Arc<SubstrateComputeConfig>,
     channel: Arc<Mutex<Option<Channel>>>,
+    /// Where the launch endpoint reads from; None without the endpoint.
+    bundles: Option<Arc<launch::BundleStore>>,
 }
 
 impl std::fmt::Debug for SubstrateComputeDriver {
@@ -261,7 +268,41 @@ impl SubstrateComputeDriver {
         Self {
             config: Arc::new(config),
             channel: Arc::new(Mutex::new(None)),
+            bundles: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_bundles(mut self, store: Arc<launch::BundleStore>) -> Self {
+        self.bundles = Some(store);
+        self
+    }
+
+    /// Store the bundle the launcher inside the actor fetches. Nothing to do
+    /// without the launch endpoint, or without launch authentication, which
+    /// a caller that is not a gateway does not send.
+    async fn store_bundle(
+        &self,
+        name: &str,
+        sandbox: &DriverSandbox,
+        launch_authentication: &[u8],
+        resume: bool,
+    ) -> Result<(), Status> {
+        let Some(store) = &self.bundles else {
+            return Ok(());
+        };
+        if launch_authentication.is_empty() {
+            return Ok(());
+        }
+        let gateway = self.config.gateway.as_ref().ok_or_else(|| {
+            Status::failed_precondition("the configuration names no [gateway] for the bundle")
+        })?;
+        let bundle = bundle::build(sandbox, launch_authentication, resume, gateway)
+            .map_err(Status::failed_precondition)?;
+        store
+            .put(name, bundle)
+            .await
+            .map_err(|e| Status::internal(format!("storing the bundle of {name}: {e}")))
     }
 
     #[must_use]
@@ -592,6 +633,7 @@ fn require_actor_name(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
 fn validate_substrate_sandbox(
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
+    main_process: bool,
 ) -> Result<(), Status> {
     let spec = sandbox
         .spec
@@ -613,10 +655,9 @@ fn validate_substrate_sandbox(
             "Substrate sandbox images must be pinned by digest (image@sha256:<digest>)",
         ));
     }
-    // The container command is the image's own openshell-sandbox. The
-    // workload's command comes from its bootstrap, which the gateway path
-    // has no way to write yet.
-    if !spec.command.is_empty() {
+    // The container command is the image's own. The workload's command
+    // travels in the bundle, so without the launch endpoint it would be lost.
+    if !main_process && !spec.command.is_empty() {
         return Err(Status::failed_precondition(
             "the substrate driver does not take a sandbox command",
         ));
@@ -779,7 +820,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        validate_substrate_sandbox(&sandbox, &self.config)?;
+        validate_substrate_sandbox(&sandbox, &self.config, self.bundles.is_some())?;
         Ok(Response::new(ValidateSandboxCreateResponse {}))
     }
 
@@ -830,7 +871,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        validate_substrate_sandbox(&sandbox, &self.config)?;
+        validate_substrate_sandbox(&sandbox, &self.config, self.bundles.is_some())?;
         let actor_name = require_actor_name(&sandbox.id, &sandbox.name)?;
         let atespace = self.config.atespace.clone();
 
@@ -910,6 +951,13 @@ impl ComputeDriver for SubstrateComputeDriver {
                 Err(status) => return Err(status),
             }
         }
+        let launch_authentication = sandbox
+            .spec
+            .as_ref()
+            .map(|s| s.launch_authentication.clone())
+            .unwrap_or_default();
+        self.store_bundle(&actor_name, &sandbox, &launch_authentication, false)
+            .await?;
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(actor_ref),
@@ -925,6 +973,12 @@ impl ComputeDriver for SubstrateComputeDriver {
     ) -> Result<Response<StartSandboxResponse>, Status> {
         let req = request.into_inner();
         let actor_name = require_actor_name(&req.sandbox_id, &req.name)?;
+        // A start brings a new generation's credentials; the launcher inside
+        // the actor picks them up after the restore.
+        if let Some(sandbox) = &req.sandbox {
+            self.store_bundle(&actor_name, sandbox, &req.launch_authentication, req.resume)
+                .await?;
+        }
         let mut client = self.control_client().await?;
         client
             .resume_actor(ateapi::ResumeActorRequest {
@@ -969,7 +1023,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .delete_actor(ateapi::DeleteActorRequest {
                 actor: Some(ateapi::ObjectRef {
                     atespace: self.config.atespace.clone(),
-                    name: actor_name,
+                    name: actor_name.clone(),
                 }),
                 options: None,
             })
@@ -979,6 +1033,12 @@ impl ComputeDriver for SubstrateComputeDriver {
             Err(status) if status.code() == tonic::Code::NotFound => false,
             Err(other) => return Err(other),
         };
+        if let Some(bundles) = &self.bundles {
+            bundles
+                .remove(&actor_name)
+                .await
+                .map_err(|e| Status::internal(format!("bundle of {actor_name}: {e}")))?;
+        }
         Ok(Response::new(DeleteSandboxResponse { deleted }))
     }
 
@@ -1221,7 +1281,9 @@ mod tests {
                 ..Default::default()
             }
         };
-        assert!(validate_substrate_sandbox(&sandbox("img@sha256:abc", |_| {}), &config).is_ok());
+        assert!(
+            validate_substrate_sandbox(&sandbox("img@sha256:abc", |_| {}), &config, false).is_ok()
+        );
         for (what, sb) in [
             ("tag", sandbox("img:latest", |_| {})),
             (
@@ -1243,7 +1305,10 @@ mod tests {
                 }),
             ),
         ] {
-            assert!(validate_substrate_sandbox(&sb, &config).is_err(), "{what}");
+            assert!(
+                validate_substrate_sandbox(&sb, &config, false).is_err(),
+                "{what}"
+            );
         }
     }
 

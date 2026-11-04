@@ -6,11 +6,15 @@
 //! same out-of-process pattern its in-tree Docker/Podman/Kubernetes
 //! drivers use) to hand it Substrate as a compute backend.
 
+use std::future::IntoFuture;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
-use openshell_driver_substrate::{SubstrateComputeConfig, SubstrateComputeDriver, configfile};
+use openshell_driver_substrate::{
+    SubstrateComputeConfig, SubstrateComputeDriver, configfile, launch,
+};
 
 #[derive(Parser)]
 #[command(name = "openshell-driver-substrate")]
@@ -103,9 +107,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => configfile::Loaded {
             template_fragment: None,
             egress_rules: Vec::new(),
+            launch: None,
+            gateway: None,
         },
     };
-    let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
+    let atespace = args.atespace.clone();
+    let mut driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
         api_endpoint: args.api_endpoint,
         atespace: args.atespace,
         worker_selector,
@@ -118,8 +125,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_bearer_token_path: args.api_bearer_token_path,
         template_fragment: loaded.template_fragment,
         egress_rules: loaded.egress_rules,
+        gateway: loaded.gateway,
         ..Default::default()
     });
+    if let Some(settings) = loaded.launch {
+        let store = Arc::new(launch::BundleStore::open(
+            settings.state_dir.join("bundles"),
+        )?);
+        let ca = match &settings.jwks_ca_file {
+            Some(path) => Some(std::fs::read(path)?),
+            None => None,
+        };
+        let verifier = launch::ActorJwtVerifier::new(
+            settings.issuer,
+            settings.audience,
+            settings.jwks_url,
+            ca.as_deref(),
+        )?;
+        let service = Arc::new(launch::LaunchService {
+            atespace,
+            store: store.clone(),
+            verifier,
+        });
+        let listener = tokio::net::TcpListener::bind(&settings.listen).await?;
+        tracing::info!(listen = %settings.listen, "serving the launch endpoint");
+        tokio::spawn(axum::serve(listener, launch::router(service)).into_future());
+        driver = driver.with_bundles(store);
+    }
 
     if let Some(parent) = args.bind_socket.parent() {
         std::fs::create_dir_all(parent)?;

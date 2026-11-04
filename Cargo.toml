@@ -30,7 +30,10 @@ path = "src/main.rs"
 # The compute-driver proto types, driver_utils, resource_admission and
 # extension_protocol. The driver registers out of process (ComputeDriverServer
 # over a socket), so no gateway code or fork is needed.
-openshell-core = { workspace = true }
+openshell-core = { workspace = true, features = ["jwt"] }
+# The boundary and descriptor types the bundles are built from.
+openshell-sandbox-backend = { workspace = true }
+openshell-isolation-interface = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "fs", "net", "time", "sync"] }
@@ -49,6 +52,12 @@ serde_yaml_ng = "0.10"
 toml = "1"
 # Server reflection on the socket, so grpcurl needs no proto files.
 tonic-reflection = "=0.14.6"
+# The launch endpoint: HTTP on the tonic stack's hyper, actor JWTs verified
+# against the IdP's keys, fetched over TLS with the CA the file names.
+axum = "0.8"
+jsonwebtoken = "10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json"] }
+serde_json = "1"
 # Already in the graph through openshell-core; declared here for the template name.
 sha2 = "0.10"
 tokio-stream = "0.1"

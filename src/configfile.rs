@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{ateapi, fragment, template};
+use crate::{ateapi, fragment, launch, template};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,11 +21,42 @@ struct File {
     /// An EgressPolicy in YAML; its rules go on every sandbox's actor before
     /// the first resume.
     egress_policy_file: Option<PathBuf>,
+    /// The launch endpoint. Without it the driver hands out no bundles and
+    /// sandboxes run with whatever credentials their image carries.
+    launch: Option<LaunchSettings>,
+    /// The gateway the supervisors dial, put into every bundle.
+    gateway: Option<GatewaySettings>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchSettings {
+    /// Where the endpoint listens, such as `0.0.0.0:17790`.
+    pub listen: String,
+    /// Bundles are kept under this directory until their sandbox is deleted.
+    pub state_dir: PathBuf,
+    /// The actor JWT issuer and the audience the egress rule asks for.
+    pub issuer: String,
+    pub audience: String,
+    /// The IdP's JWKS URL, and the CA that signs its certificate.
+    pub jwks_url: String,
+    pub jwks_ca_file: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GatewaySettings {
+    /// What the supervisors dial, `host:port`.
+    endpoint: String,
+    tls_ca_file: Option<PathBuf>,
+    tls_server_name: Option<String>,
 }
 
 pub struct Loaded {
     pub template_fragment: Option<ateapi::ActorTemplate>,
     pub egress_rules: Vec<ateapi::EgressRule>,
+    pub launch: Option<LaunchSettings>,
+    pub gateway: Option<launch::Gateway>,
 }
 
 /// Read a TOML file; paths in it are relative to its directory.
@@ -63,9 +94,27 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
         }
         None => Vec::new(),
     };
+    let launch = file.launch.map(|mut launch| {
+        launch.state_dir = dir.join(&launch.state_dir);
+        launch.jwks_ca_file = launch.jwks_ca_file.map(|p| dir.join(p));
+        launch
+    });
+    let gateway = match file.gateway {
+        Some(gateway) => Some(launch::Gateway {
+            endpoint: gateway.endpoint,
+            tls_ca_pem: match gateway.tls_ca_file {
+                Some(name) => Some(read(&name)?.1),
+                None => None,
+            },
+            tls_server_name: gateway.tls_server_name,
+        }),
+        None => None,
+    };
     Ok(Loaded {
         template_fragment,
         egress_rules,
+        launch,
+        gateway,
     })
 }
 
@@ -78,9 +127,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("driver.toml"),
-            "template_file = \"template.yaml\"\negress_policy_file = \"egress.yaml\"\n",
+            "template_file = \"template.yaml\"\negress_policy_file = \"egress.yaml\"\n\n[launch]\nlisten = \"127.0.0.1:0\"\nstate_dir = \"state\"\nissuer = \"https://idp.ate-system.svc\"\naudience = \"driver\"\njwks_url = \"https://idp.ate-system.svc/openid/v1/jwks\"\n\n[gateway]\nendpoint = \"gateway.example:17670\"\ntls_ca_file = \"gateway-ca.pem\"\n",
         )
         .unwrap();
+        std::fs::write(dir.path().join("gateway-ca.pem"), "PEM").unwrap();
         std::fs::write(
             dir.path().join("template.yaml"),
             "containers:\n- name: sandbox\n  image: placeholder@sha256:p\n",
@@ -94,6 +144,8 @@ mod tests {
         let loaded = load(&dir.path().join("driver.toml")).unwrap();
         assert_eq!(loaded.template_fragment.unwrap().containers.len(), 1);
         assert_eq!(loaded.egress_rules.len(), 1);
+        assert_eq!(loaded.launch.unwrap().state_dir, dir.path().join("state"));
+        assert_eq!(loaded.gateway.unwrap().tls_ca_pem.as_deref(), Some("PEM"));
 
         std::fs::write(dir.path().join("driver.toml"), "templte_file = \"x\"\n").unwrap();
         assert!(load(&dir.path().join("driver.toml")).is_err());
