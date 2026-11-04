@@ -14,9 +14,8 @@ snapshot into a micro-VM. Inside the VM, stock OpenShell binaries run
 unmodified: `openshell-sandbox` holds the workload, `openshell-supervisor`
 enforces policy and audits, and a small relay container makes the workload
 reachable through Substrate's ingress. Nothing in OpenShell, Substrate, the
-guest kernel or kata is forked or patched;
-[`upstream-branches.md`](upstream-branches.md) records the one gap the demo
-image works around.
+guest kernel or kata is forked or patched; the one gap the demo image works
+around, `no_new_privs`, is in the README's known gaps.
 
 ## The big picture
 
@@ -128,16 +127,16 @@ variables), binds the socket, and serves `ComputeDriverServer`.
 
 | ComputeDriver call | What the driver does |
 |---|---|
-| `get_capabilities` | Names itself `substrate`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false. |
-| `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (a bare tag fails atelet's pull cache later) and resource limits that parse as Kubernetes quantities. |
-| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` is a retried create and is fine), `ResumeActor`. |
+| `get_capabilities` | Checks the gateway's extension metadata, names itself `substrate`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false; CPU and memory limits are supported, GPUs are not. |
+| `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (ate-api-server rejects an unpinned image; the check saves a round trip) and resource limits that parse as Kubernetes quantities; rejects `spec.command`, GPU requests and `user_namespaces`. |
+| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `ResumeActor`. |
 | `start_sandbox` | `ResumeActor`. |
-| `stop_sandbox` | `SuspendActor`: checkpoint, free the worker, keep the snapshot. |
+| `stop_sandbox` | `SuspendActor` with synchronous durability: checkpoint, upload, free the worker, keep the snapshot. |
 | `suspend_sandbox` | Unimplemented; the driver does not advertise suspend-resume, `stop_sandbox` is the suspend. |
 | `delete_sandbox` | `DeleteActor`; Substrate deletes from any state. The template stays; other actors may share it. |
-| `get_sandbox`, `list_sandboxes` | `GetActor`, `ListActors` walked to the last page (1000 per page). |
+| `get_sandbox`, `list_sandboxes` | `GetActor`; `ListActors` walked to the last page (1000 per page), keeping the actors of `oshl-` templates. |
 | `watch_sandboxes` | Substrate has no watch RPC. The driver polls `ListActors` every 2 s, diffs against the last snapshot, and emits changed and deleted sandboxes. It stops when the gateway drops the stream. |
-| `ensure_workspace` | `CreateAtespace` for the one configured atespace. The trait carries workspace identity only on create, so one atespace serves every workspace. |
+| `ensure_workspace` | `GetAtespace`, then `CreateAtespace` when it is missing, for the one configured atespace. The trait carries workspace identity only on create, so one atespace serves every workspace. |
 | `delete_workspace` | No-op. |
 | `authenticate_sandbox` | Unimplemented. |
 
@@ -153,7 +152,7 @@ is written against the gateway's phase rules and pinned by a table test:
 |---|---|---|
 | RUNNING | `Ready=True` (ContainerRunning) | Ready |
 | RESUMING, REVERTING | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
-| SUSPENDING | `Suspended=False` only | Provisioning |
+| SUSPENDING | `Suspended=False` (PodTerminating, the reason the gateway reads as a stop in flight) | Provisioning |
 | SUSPENDED | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
@@ -161,7 +160,7 @@ is written against the gateway's phase rules and pinned by a table test:
 ### Template synthesis, `src/template.rs`
 
 Everything the golden snapshot depends on goes into the template, and nothing
-else: the image, the command, the environment (`spec.environment`, then
+else: the image, the environment (`spec.environment`, then
 `spec.template.environment` over it, then `OPENSHELL_ENDPOINT` over both so a
 caller cannot redirect the gateway address), the worker selector, and the
 resource limits (the sandbox template's `cpu_limit` and `memory_limit` as
@@ -187,8 +186,8 @@ they contain, not in how Substrate treats them.
 
 `ensure_ready` creates the template, tolerates `AlreadyExists`, then polls
 `GetActorTemplate` every 2 s until `status.goldenSnapshotStatus.goldenTag` is
-set, or `error_message` is set (FailedPrecondition), or 180 s pass
-(DeadlineExceeded).
+set, or `error_message` is set (FailedPrecondition; the template is deleted so
+the next create rebuilds it), or 180 s pass (DeadlineExceeded).
 
 ### Substrate control plane
 
@@ -236,10 +235,11 @@ set, or `error_message` is set (FailedPrecondition), or 180 s pass
 One guest, one network namespace with the address `169.254.17.2`, three
 containers from the helpdesk template:
 
-- **sandbox**: `sandbox-entry.sh` is the container's first process. As root it
-  points `/etc/resolv.conf` at the sandbox's DNS relay, waits for the
-  supervisor's listener, and hands off with `setpriv` to uid 65532 with every
-  capability dropped and `no_new_privs` set. `openshell-sandbox` then reads
+- **sandbox**: `sandbox-entry.sh` is the container's first process, already
+  the image's uid 65532 with no capability. It points `/etc/resolv.conf` at
+  the sandbox's DNS relay (the image's `/etc` belongs to that user), waits for
+  the supervisor's listener, and hands off with `setpriv --no-new-privs`, a
+  `prctl` any process may make for itself. `openshell-sandbox` then reads
   its bootstrap and unlinks it, refuses to run unless it is non-root,
   capability-free and `no_new_privs`, and probes the kernel for Landlock,
   seccomp user notification, socket virtualization, loopback confinement and
@@ -281,15 +281,15 @@ sequenceDiagram
   K->>SU: start openshell-supervisor --role isolation-backend<br/>--backend-descriptor-file, --auth-bundle-file, --policy-rules, --policy-data
   K->>RL: start python3 relay.py
   SU->>SU: read runtime-descriptor.json and auth.json (JWT pair, no expiry)
-  SU->>SU: listen TLS on 169.254.17.2:17777 · "Runtime-initiated Sandbox Protocol listener ready"
-  SB->>SB: nameserver 127.0.0.53; wait for the listener; setpriv → uid 65532, no_new_privs
+  SU->>SU: listen on 169.254.17.2:17777 · "Runtime-initiated Sandbox Protocol listener ready"
+  SB->>SB: nameserver 127.0.0.53; wait for the listener; setpriv --no-new-privs (uid 65532 from the image)
   SB->>SB: read bootstrap.json, then unlink it
   Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp, seccomp notification,<br/>socket virtualization, DNS relay bind, loopback confinement
   SB->>SU: dial the boundary, serve TLS on the connection
   SU->>SB: present the sandbox token
   SB-->>SU: verified against the embedded key · "Isolation boundary attached"
   SU->>SU: load policy.rego + data.yaml into OPA
-  SU->>SU: create CA in /run/openshell-supervisor-ca · "Landlock ruleset built"
+  SB->>SB: create /run/openshell-supervisor-ca for the CA, build the Landlock ruleset · "Landlock ruleset built"
   SU->>SB: start_agent(python3 /opt/helpdesk/agent.py, child_env)
   SB->>WL: fork, apply seccomp + Landlock, exec · "PROC:LAUNCH python3"
   WL->>WL: listen 0.0.0.0:8080 inside the sandbox
@@ -356,9 +356,9 @@ sequenceDiagram
   participant S as object store
 
   GW->>D: ValidateSandboxCreate(sandbox)
-  D-->>GW: ok, or FailedPrecondition when the image has no @sha256 digest
+  D-->>GW: ok, or InvalidArgument when the image has no @sha256 digest
   GW->>D: CreateSandbox(sandbox)
-  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, command, env,<br/>gateway endpoint, worker selector, limits
+  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, env,<br/>gateway endpoint, worker selector, limits
   D->>API: CreateActorTemplate(name, spec)
   alt template is new
     API->>R: reconcile

@@ -80,7 +80,7 @@ synthesis), `main.rs` (the socket server).
 src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
-docs/                 architecture and the upstream branch index
+docs/                 architecture
 examples/helpdesk/    the demo: a Python agent under OpenShell, ten beats
 harness/
   bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle the binaries require
@@ -102,6 +102,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
 `ate-api-server` and is ignored by default.
 
+`proto/ateapi.proto` is a verbatim copy of Substrate's
+`api/ateapi/v1/ateapi.proto` at the commit in `proto/upstream-rev`; CI diffs
+the two. To move the pin, which usually means driver changes in the same
+commit:
+
+```sh
+echo <substrate commit> > proto/upstream-rev
+curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat proto/upstream-rev)/api/ateapi/v1/ateapi.proto" -o proto/ateapi.proto
+```
+
 Bumping the OpenShell pin in `Cargo.toml` is not a one-line change:
 `harness/bootstrap-gen` builds `BoundaryConfig`, `SandboxRuntimeDescriptor`
 and `SupervisorAuthBundle` by hand, and those types move between releases.
@@ -113,42 +123,46 @@ Budget bootstrap-gen work with every bump.
 
 ### 0. A host
 
-A Linux host with **`/dev/kvm`** (nested virtualisation if the host is itself
+A Linux host with **`/dev/kvm`** (nested virtualization if the host is itself
 a VM), Ubuntu 24.04 on amd64 or arm64. Each micro-VM worker takes 2 GiB; the
 pool below makes two. 16 GB of RAM is the floor, 32 GB is comfortable, and the
 clone, the builds and the images want about 30 GB of free disk. Everything
-cloned or pulled is public; no credentials are needed.
+cloned or pulled is public; no credentials are needed. Run every step as the
+same user; the walkthrough below assumes root, which is where `prep-host.sh`
+installs Rust.
 
 ```sh
-sudo harness/scripts/prep-host.sh      # packages, Docker, Go, kind, kubectl, Rust; idempotent
+harness/scripts/prep-host.sh      # packages, Docker, Go, kind, kubectl, Rust; idempotent
 ```
 
 A host firewall that drops forwarded traffic leaves the kind node with no
-egress, and the install then looks like a slow registry for twenty minutes.
-`kind-up.sh` checks the node's egress before installing anything, and runs
-`POST_KIND_HOOK` after the cluster exists so a site script can open the kind
-bridge. `ufw` in its default configuration is fine.
+egress, and the install then looks like a slow registry. `kind-up.sh` checks
+the node's egress before installing anything, and runs `POST_KIND_HOOK` after
+the cluster exists so a site script can open the kind bridge. `ufw` in its
+default configuration is fine.
 
 ### 1. Substrate on kind
 
 ```sh
 harness/scripts/kind-up.sh
-export PATH=$HOME/openshell-substrate/bin:$PATH   # kubectl-ate, ahead of any older copy
+export PATH=${WORK:-$HOME/openshell-substrate}/bin:$PATH   # kubectl-ate, ahead of any older copy
 ```
 
-One command, about eight minutes: it clones Substrate at `SUBSTRATE_REF`
-(default `upstream/main`) under `WORK` (default `$HOME/openshell-substrate`),
-builds `kubectl-ate`, creates the kind cluster and its registry at
-`localhost:5001`, installs `ate-system` with the micro-VM class
-(`ate-setup --kind deploy ate-system --sandbox-classes=microvm`), creates the
-pool of two micro-VM workers and the atespace `ate-openshell-microvm`, and
-deploys Ollama with `qwen2.5:1.5b` in that atespace as the model endpoint.
-Steps already done are skipped. Knobs: `ATESPACE`, `MODEL_NAME`, `MODEL_PORT`.
+One command: it clones Substrate at `SUBSTRATE_REF` (default `upstream/main`)
+under `WORK` (default `$HOME/openshell-substrate`, which holds the clone,
+`bin/` and `logs/`), builds `kubectl-ate`, creates the kind cluster and its
+registry at `localhost:5001`, installs `ate-system` with the micro-VM class
+(`ate-setup --kind deploy ate-system --sandbox-classes=microvm`, with the
+bundled credential provider and `atenet-client` on the router's ingress
+allowlist), creates the pool of two micro-VM workers and the atespace
+`ate-openshell-microvm`, and deploys Ollama with `qwen2.5:1.5b` in that
+atespace as the model endpoint. Steps already done are skipped. The install
+log is `$WORK/logs/install.log`. Knobs: `WORK`, `SUBSTRATE_REF`, `ATESPACE`,
+`MODEL_NAME`, `MODEL_PORT`, `POST_KIND_HOOK`.
 
-Substrate needs no patch: everything the demo once carried is in `main`
-([`docs/upstream-branches.md`](docs/upstream-branches.md)). One gap stays:
-micro-VM containers run without `no_new_privileges`, and `SecurityContext` has
-no field for it, so the helpdesk image sets it itself (step 2).
+Substrate, OpenShell and kata run unmodified. One gap stays: micro-VM
+containers run without `no_new_privileges`, and `SecurityContext` has no field
+for it, so the helpdesk image sets it itself (step 2).
 
 ### 2. Build the example
 
@@ -157,11 +171,13 @@ REGISTRY=localhost:5001 examples/helpdesk/build.sh
 ```
 
 This mirrors the release's `sandbox` and `supervisor` images from
-`ghcr.io/nvidia/openshell` into the registry (this platform's manifest), mints
-the credentials, builds the two helpdesk images and writes their digests to
-`out/helpdesk.env`. Templates reference images by digest; a bare tag fails
-atelet's pull cache, and Docker's own `RepoDigests` name the upstream index
-for a mirrored tag, so the digests come from the registry.
+`ghcr.io/nvidia/openshell` into the registry, mints the credentials, builds
+the two helpdesk images and writes their digests to `out/helpdesk.env`. Only
+this platform's manifest is mirrored, so build on the architecture the
+cluster runs. Substrate's API requires image digests, and Docker's own
+`RepoDigests` name the upstream index for a mirrored tag, so the digests come
+from the registry. Knobs: `REGISTRY` (required), `ATESPACE`, `MODEL_HOST`,
+`MODEL_PORT`, `MODEL_NAME`, `OPENSHELL_VERSION`.
 
 ### 3. Run it
 
@@ -172,7 +188,14 @@ examples/helpdesk/soak.sh 10    # the same, ten times in a row
 
 [`examples/helpdesk`](examples/helpdesk) explains the beats and what each one
 proves. The two agents are reached with `kubectl-ate proxy actor`, which holds
-the client certificate atenet-router requires.
+the client certificate atenet-router requires. `soak.sh` keeps one log per
+run under `SOAK_LOGS` (default `$HOME/openshell-substrate/logs/soak-<time>`).
+
+To tear everything down:
+
+```sh
+kind delete cluster && docker rm -f kind-registry && rm -rf "${WORK:-$HOME/openshell-substrate}" out
+```
 
 ### 4. Drive it from a gateway
 
@@ -183,6 +206,7 @@ same name.
 
 ```sh
 kubectl port-forward -n ate-system svc/api 8443:443 &
+mkdir -p creds
 kubectl create token ate-client -n ate-system \
   --audience api.ate-system.svc --duration=24h > creds/token
 kubectl get clustertrustbundle servicedns.podcert.ate.dev:identity:primary-bundle \
@@ -225,20 +249,18 @@ five minutes; see [Known gaps](#known-gaps).
 
 ### The gates
 
-`run_boundary` calls `qualify_runtime()` unconditionally; a failed gate ends
-the sandbox. The golden warm-up also runs `openshell-sandbox capability-probe`
-once; its JSON report is in the worker pod's log, and a passing run says
-`"qualified":true`.
+`openshell-sandbox` runs `qualify_runtime()` before anything else; a failed
+gate ends the sandbox, and the worker pod log names it.
 
 | # | Gate | What it needs |
 |---|---|---|
-| 1 | non-root UID **and** GID | an image `USER`, which Substrate honors, or `sandbox-entry.sh` dropping to 65532 |
-| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]`, and `setpriv --bounding-set=-all` after the start-up work |
-| 3 | `no_new_privs == 1` | `sandbox-entry.sh`: `setpriv --no-new-privs`; Substrate has no field for it |
+| 1 | non-root UID **and** GID | the image's `USER 65532:65532`, which Substrate honors |
+| 2 | all five capability sets empty | `capabilities.drop: ["ALL"]`; a non-root process holds none |
+| 3 | `no_new_privs == 1` | `sandbox-entry.sh` runs `setpriv --no-new-privs`, which needs no privilege; Substrate has no field for it |
 | 4 | same-UID task-memory probe | nothing; stock kata passes |
-| 5 | Landlock allow/deny | a writable `/tmp`; Substrate mounts a tmpfs there |
+| 5 | Landlock allow/deny, ABI ≥ 3 | a writable `/tmp`; Substrate mounts a tmpfs there, and the guest kernel has Landlock |
 | 6 | seccomp notification | nothing; stock kata passes |
-| 7 | socket virtualization, DNS relay bind on `127.0.0.53:53`, loopback confinement, Landlock ABI ≥ 3 | nothing; Substrate lifts the guest's privileged-port limit |
+| 7 | socket virtualization, DNS relay bind on `127.0.0.53:53`, loopback confinement | nothing; Substrate lifts the guest's privileged-port limit |
 
 ### The boundary channel
 
@@ -257,9 +279,10 @@ is the pair.
 The sandbox answers the workload's DNS at `127.0.0.53` and its broker refuses
 any other nameserver. Substrate writes the actor gateway into `/etc/resolv.conf`
 in the rootfs base layer and keeps the actor's own edits, so `sandbox-entry.sh`
-writes `nameserver 127.0.0.53` on the first boot and the golden snapshot
-carries it. The supervisor's policy DNS then resolves only the hosts the
-policy names; a refused name shows as `NET:REFUSE ... policy_dns_ineligible`.
+replaces the file with `nameserver 127.0.0.53` on the first boot and the golden
+snapshot carries it; the image's `/etc` belongs to the sandbox user so no root
+is needed. The supervisor's policy DNS then resolves only the hosts the policy
+names; a refused name shows as `NET:REFUSE ... policy_dns_ineligible`.
 
 ### Two transient conditions
 
@@ -289,10 +312,10 @@ sandbox and started the workload.
 
 ## Known gaps
 
-- **`no_new_privileges` has no `SecurityContext` field.** Micro-VM containers
-  run without it, so the sandbox image sets it itself. A change adding
-  `allowPrivilegeEscalation` (Kubernetes shape) is on the `dims/substrate`
-  fork, branch `allow-privilege-escalation`, pending a pull request.
+- **`no_new_privileges` has no `SecurityContext` field.** Neither runtime sets
+  it, by upstream's choice (parity with a Kubernetes container that allows
+  privilege escalation), so the sandbox image's entry script sets it with an
+  unprivileged `setpriv --no-new-privs`.
 - **`Linux.Seccomp`, `Process.ApparmorProfile` and `SelinuxLabel` are not
   forwarded** to the kata agent. `Linux.Sysctl` is, but an ActorTemplate cannot
   set it.
@@ -308,8 +331,22 @@ sandbox and started the workload.
   `Provisioning`, refuses `StopSandbox` and `StartSandbox` before `Ready`, and
   after five minutes marks the sandbox `Error`. Substrate has no way to hand
   an actor a per-sandbox secret, and the gateway's launch credentials are per
-  sandbox, so the two-container shape of `examples/helpdesk` cannot be
-  synthesized yet. OpenShell's isolation-backend API (RFC 0012) is the route.
+  sandbox (`start_sandbox` ignores `launch_authentication` and `generation_id`
+  for the same reason), so the two-container shape of `examples/helpdesk`
+  cannot be synthesized yet. OpenShell's isolation-backend API (RFC 0012) is
+  the route.
+- **The driver reports a sandbox's id as its name.** Substrate metadata has no
+  labels to hold the gateway's name, so a gateway that looks a sandbox up by
+  name misses after the first watch event.
+- **`spec.command` is rejected; `spec.environment` reaches the sandbox
+  process, not the workload.** The container command must be the image's own
+  `openshell-sandbox`, and the workload's command and environment come from
+  its bootstrap. GPU requests and `user_namespaces` are rejected too.
+- **A crashed sandbox stays `Error`.** `stop_sandbox` on a `CRASHED` actor
+  fails, because `SuspendActor` needs `RUNNING`; an operator reverts it with
+  `kubectl-ate revert actor`. The driver also does not retry Substrate's
+  `Aborted` (a concurrent update), and it acknowledges only the default
+  resource-admission policy.
 
 ## License
 
