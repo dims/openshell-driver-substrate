@@ -11,7 +11,11 @@ set -o allexport
 # shellcheck source=/dev/null  # MODEL_HOST, MODEL_PORT and CHILD_ENV come from the env file
 . "${REPO}/out/helpdesk.env"
 set +o allexport
-TEMPLATE_HASH=$(TEMPLATE=x "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | sha256sum | cut -c1-8)
+template() {  # the driver's fragment with the name and the pool the demo gives it
+  printf 'metadata:\n  atespace: %s\n  name: %s\nworkerSelector:\n  matchLabels:\n    workload: openshell-microvm\n' "${ATESPACE}" "${TEMPLATE}"
+  "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl"
+}
+TEMPLATE_HASH=$(TEMPLATE=x template | sha256sum | cut -c1-8)
 export TEMPLATE=helpdesk-${TEMPLATE_HASH}
 TMP=$(mktemp -d)
 T0=$(date +%s)
@@ -102,7 +106,7 @@ beat "1  Template and golden snapshot"
 if kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" >/dev/null 2>&1; then
   echo "  ${TEMPLATE} exists; reusing its golden snapshot"
 else
-  "${REPO}/harness/scripts/render.sh" "${HERE}/template.yaml.tmpl" | kubectl-ate create actor-template -f - >/dev/null; created=1
+  template | kubectl-ate create actor-template -f - >/dev/null; created=1
   for ((i = 0; ; i++)); do
     kubectl-ate get actor-template -a "${ATESPACE}" "${TEMPLATE}" -o json |
       jq -e '.status.goldenSnapshotStatus.goldenTag.name' >/dev/null 2>&1 && break

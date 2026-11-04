@@ -1,12 +1,7 @@
-metadata:
-  atespace: ${ATESPACE}
-  name: ${TEMPLATE}
-# The pool these labels select decides the sandbox class (micro-VM).
-workerSelector:
-  matchLabels:
-    workload: openshell-microvm
+# The driver's template fragment: what every helpdesk actor is made of. The
+# driver adds the name, the atespace and the worker selector; run.sh prepends
+# the same for kubectl-ate. The sandbox container's image is the request's.
 containers:
-  # Supervisor and sandbox in one container: sandbox-entry.sh starts both.
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
     command: ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
@@ -15,12 +10,33 @@ containers:
       capabilities:
         drop: ["ALL"]
     volumeMounts:
-      - name: supervisor-files
-        mountPath: "/opt/supervisor-files"
       - name: socket-dir
         mountPath: "/run/openshell"
       - name: supervisor-ca
         mountPath: "/run/openshell-supervisor-ca"
+  # The supervisor binary rides the sandbox image; its own container keeps
+  # the actor's resolver, which its policy DNS needs for upstream lookups.
+  - name: supervisor
+    image: "${SANDBOX_IMAGE}"
+    command: ["/openshell-supervisor"]
+    env:
+      - name: OPENSHELL_ADMITTED_ISOLATION_BACKEND
+        value: "openshell-sandbox"
+    args: ["--role","isolation-backend","--sandbox-id","test-sandbox-1",
+           "--backend-descriptor-file","/opt/supervisor-files/supervisor/runtime-descriptor.json",
+           "--auth-bundle-file","/opt/supervisor-files/supervisor/auth.json",
+           "--policy-rules","/opt/supervisor-files/supervisor/policy.rego",
+           "--policy-data","/opt/supervisor-files/supervisor/data.yaml",
+           "--log-level","info","--",
+           "python3","/opt/helpdesk/agent.py"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: supervisor-files
+        mountPath: "/opt/supervisor-files"
+      - name: socket-dir
+        mountPath: "/run/openshell"
   # Not part of the sandbox. See relay.py.
   - name: relay
     image: "${SANDBOX_IMAGE}"
