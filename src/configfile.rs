@@ -17,15 +17,15 @@ struct File {
     /// An ActorTemplate fragment in YAML with protojson field names: the
     /// containers, volumes, resources and snapshot config every sandbox gets.
     /// The request's image goes into the container named `sandbox`.
-    template_file: Option<PathBuf>,
+    template_file: PathBuf,
     /// An EgressPolicy in YAML; its rules go on every sandbox's actor before
-    /// the first resume.
-    egress_policy_file: Option<PathBuf>,
-    /// The launch endpoint. Without it the driver hands out no bundles and
-    /// sandboxes run with whatever credentials their image carries.
-    launch: Option<LaunchSettings>,
+    /// the first resume. They must let the actor reach the launch endpoint,
+    /// with the actor JWT put on the request, and the gateway.
+    egress_policy_file: PathBuf,
+    /// The launch endpoint the launchers poll.
+    launch: LaunchSettings,
     /// The gateway the supervisors dial, put into every bundle.
-    gateway: Option<GatewaySettings>,
+    gateway: GatewaySettings,
 }
 
 #[derive(Deserialize)]
@@ -53,10 +53,10 @@ struct GatewaySettings {
 }
 
 pub struct Loaded {
-    pub template_fragment: Option<ateapi::ActorTemplate>,
+    pub template_fragment: template::Fragment,
     pub egress_rules: Vec<ateapi::EgressRule>,
-    pub launch: Option<LaunchSettings>,
-    pub gateway: Option<launch::Gateway>,
+    pub launch: LaunchSettings,
+    pub gateway: launch::Gateway,
 }
 
 /// Read a TOML file; paths in it are relative to its directory.
@@ -70,55 +70,33 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
         Ok((p, text))
     };
 
-    let template_fragment = match file.template_file {
-        Some(name) => {
-            let (p, text) = read(&name)?;
-            let fragment: ateapi::ActorTemplate =
-                fragment::from_yaml("substrate.ateapi.v1.ActorTemplate", &text)
-                    .map_err(|e| format!("{}: {e}", p.display()))?;
-            template::check_fragment(&fragment).map_err(|e| format!("{}: {e}", p.display()))?;
-            Some(fragment)
-        }
-        None => None,
-    };
-    let egress_rules = match file.egress_policy_file {
-        Some(name) => {
-            let (p, text) = read(&name)?;
-            let policy: ateapi::EgressPolicy =
-                fragment::from_yaml("substrate.ateapi.v1.EgressPolicy", &text)
-                    .map_err(|e| format!("{}: {e}", p.display()))?;
-            if policy.rules.is_empty() {
-                return Err(format!("{}: no rules", p.display()));
-            }
-            policy.rules
-        }
-        None => Vec::new(),
-    };
-    let launch = file.launch.map(|mut launch| {
-        launch.state_dir = dir.join(&launch.state_dir);
-        launch.jwks_ca_file = dir.join(&launch.jwks_ca_file);
-        launch
-    });
-    if launch.is_some() && file.gateway.is_none() {
-        return Err(format!(
-            "{}: [launch] needs [gateway], the one the bundles name",
-            path.display()
-        ));
+    let (p, text) = read(&file.template_file)?;
+    let template_fragment: ateapi::ActorTemplate =
+        fragment::from_yaml("substrate.ateapi.v1.ActorTemplate", &text)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+    let template_fragment =
+        template::Fragment::new(template_fragment).map_err(|e| format!("{}: {e}", p.display()))?;
+    let (p, text) = read(&file.egress_policy_file)?;
+    let policy: ateapi::EgressPolicy =
+        fragment::from_yaml("substrate.ateapi.v1.EgressPolicy", &text)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+    if policy.rules.is_empty() {
+        return Err(format!("{}: no rules", p.display()));
     }
-    let gateway = match file.gateway {
-        Some(gateway) => Some(launch::Gateway {
-            endpoint: gateway.endpoint,
-            tls_ca_pem: match gateway.tls_ca_file {
-                Some(name) => Some(read(&name)?.1),
-                None => None,
-            },
-            tls_server_name: gateway.tls_server_name,
-        }),
-        None => None,
+    let mut launch = file.launch;
+    launch.state_dir = dir.join(&launch.state_dir);
+    launch.jwks_ca_file = dir.join(&launch.jwks_ca_file);
+    let gateway = launch::Gateway {
+        endpoint: file.gateway.endpoint,
+        tls_ca_pem: match file.gateway.tls_ca_file {
+            Some(name) => Some(read(&name)?.1),
+            None => None,
+        },
+        tls_server_name: file.gateway.tls_server_name,
     };
     Ok(Loaded {
         template_fragment,
-        egress_rules,
+        egress_rules: policy.rules,
         launch,
         gateway,
     })
@@ -148,18 +126,17 @@ mod tests {
         )
         .unwrap();
         let loaded = load(&dir.path().join("driver.toml")).unwrap();
-        assert_eq!(loaded.template_fragment.unwrap().containers.len(), 1);
+        assert_eq!(loaded.template_fragment.containers.len(), 1);
         assert_eq!(loaded.egress_rules.len(), 1);
-        let launch = loaded.launch.unwrap();
-        assert_eq!(launch.state_dir, dir.path().join("state"));
-        assert_eq!(launch.jwks_ca_file, dir.path().join("idp-ca.pem"));
-        assert_eq!(loaded.gateway.unwrap().tls_ca_pem.as_deref(), Some("PEM"));
+        assert_eq!(loaded.launch.state_dir, dir.path().join("state"));
+        assert_eq!(loaded.launch.jwks_ca_file, dir.path().join("idp-ca.pem"));
+        assert_eq!(loaded.gateway.tls_ca_pem.as_deref(), Some("PEM"));
 
         std::fs::write(dir.path().join("driver.toml"), "templte_file = \"x\"\n").unwrap();
         assert!(load(&dir.path().join("driver.toml")).is_err());
         std::fs::write(
             dir.path().join("driver.toml"),
-            "[launch]\nlisten = \"127.0.0.1:0\"\nstate_dir = \"state\"\nissuer = \"i\"\naudience = \"a\"\njwks_url = \"u\"\njwks_ca_file = \"idp-ca.pem\"\n",
+            "template_file = \"template.yaml\"\negress_policy_file = \"egress.yaml\"\n\n[launch]\nlisten = \"127.0.0.1:0\"\nstate_dir = \"state\"\nissuer = \"i\"\naudience = \"a\"\njwks_url = \"u\"\njwks_ca_file = \"idp-ca.pem\"\n",
         )
         .unwrap();
         assert!(

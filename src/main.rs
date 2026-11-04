@@ -6,9 +6,8 @@
 //! same out-of-process pattern its in-tree Docker/Podman/Kubernetes
 //! drivers use) to hand it Substrate as a compute backend.
 
-use std::future::{Future, IntoFuture};
+use std::future::IntoFuture;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -70,10 +69,10 @@ struct Args {
     #[arg(long, env = "SUBSTRATE_API_BEARER_TOKEN_PATH")]
     api_bearer_token_path: Option<PathBuf>,
 
-    /// Configuration file (TOML): the ActorTemplate fragment and the egress
-    /// policy every sandbox gets.
+    /// Configuration file (TOML): the ActorTemplate fragment, the egress
+    /// policy, the launch endpoint and the gateway.
     #[arg(long, env = "SUBSTRATE_DRIVER_CONFIG")]
-    config: Option<PathBuf>,
+    config: PathBuf,
 
     #[arg(long, env = "OPENSHELL_LOG_LEVEL", default_value = "info")]
     log_level: String,
@@ -99,62 +98,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if worker_selector.is_empty() {
         return Err("--worker-selector needs at least one key=value".into());
     }
-    let loaded = match &args.config {
-        Some(path) => configfile::load(path)?,
-        None => configfile::Loaded {
-            template_fragment: None,
-            egress_rules: Vec::new(),
-            launch: None,
-            gateway: None,
-        },
-    };
-    let atespace = args.atespace.clone();
-    let mut driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
-        api_endpoint: args.api_endpoint,
-        atespace: args.atespace,
-        worker_selector,
-        template_ready_timeout_secs: args.template_ready_timeout_secs,
-        api_tls_ca_path: args.api_tls_ca,
-        api_client_cert_path: args.api_tls_cert,
-        api_client_key_path: args.api_tls_key,
-        api_tls_server_name: args.api_tls_server_name,
-        api_bearer_token_path: args.api_bearer_token_path,
-        template_fragment: loaded.template_fragment,
-        egress_rules: loaded.egress_rules,
-        gateway: loaded.gateway,
-        ..Default::default()
+    let loaded = configfile::load(&args.config)?;
+    let store = Arc::new(launch::BundleStore::open(
+        loaded.launch.state_dir.join("bundles"),
+    )?);
+    let verifier = launch::ActorJwtVerifier::new(
+        loaded.launch.issuer,
+        loaded.launch.audience,
+        loaded.launch.jwks_url,
+        &std::fs::read(&loaded.launch.jwks_ca_file)?,
+    )?;
+    let service = Arc::new(launch::LaunchService {
+        atespace: args.atespace.clone(),
+        store: store.clone(),
+        verifier,
     });
-    // Pending without the endpoint, so one select serves both cases.
-    let mut launch_server: Pin<Box<dyn Future<Output = std::io::Result<()>>>> =
-        Box::pin(std::future::pending());
-    if let Some(settings) = loaded.launch {
-        let store = Arc::new(launch::BundleStore::open(
-            settings.state_dir.join("bundles"),
-        )?);
-        let verifier = launch::ActorJwtVerifier::new(
-            settings.issuer,
-            settings.audience,
-            settings.jwks_url,
-            &std::fs::read(&settings.jwks_ca_file)?,
-        )?;
-        let service = Arc::new(launch::LaunchService {
-            atespace,
-            store: store.clone(),
-            verifier,
-        });
-        let listener = tokio::net::TcpListener::bind(&settings.listen).await?;
-        tracing::info!(listen = %settings.listen, "serving the launch endpoint");
-        launch_server = Box::pin(axum::serve(listener, launch::router(service)).into_future());
-        driver = driver.with_bundles(store);
-        match driver.reap_orphan_bundles().await {
-            Ok(0) => {}
-            Ok(n) => tracing::info!(
-                count = n,
-                "removed the bundles of actors that no longer exist"
-            ),
-            Err(status) => {
-                tracing::warn!(%status, "could not check the bundles against Substrate; keeping them");
-            }
+    let launch_listener = tokio::net::TcpListener::bind(&loaded.launch.listen).await?;
+    tracing::info!(listen = %loaded.launch.listen, "serving the launch endpoint");
+
+    let driver = SubstrateComputeDriver::new(
+        SubstrateComputeConfig {
+            api_endpoint: args.api_endpoint,
+            atespace: args.atespace,
+            worker_selector,
+            template_ready_timeout_secs: args.template_ready_timeout_secs,
+            api_tls_ca_path: args.api_tls_ca,
+            api_client_cert_path: args.api_tls_cert,
+            api_client_key_path: args.api_tls_key,
+            api_tls_server_name: args.api_tls_server_name,
+            api_bearer_token_path: args.api_bearer_token_path,
+            template_fragment: loaded.template_fragment,
+            egress_rules: loaded.egress_rules,
+            gateway: loaded.gateway,
+            ..Default::default()
+        },
+        store,
+    );
+    match driver.reap_orphan_bundles().await {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(
+            count = n,
+            "removed the bundles of actors that no longer exist"
+        ),
+        Err(status) => {
+            tracing::warn!(%status, "could not check the bundles against Substrate; keeping them");
         }
     }
 
@@ -183,6 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(reflection().build_v1()?)
         .add_service(reflection().build_v1alpha()?)
         .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener));
+    let launch_server = axum::serve(launch_listener, launch::router(service)).into_future();
     tokio::select! {
         result = grpc_server => result?,
         result = launch_server => {

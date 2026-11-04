@@ -33,6 +33,71 @@ const READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Every template this driver makes is named `oshl-` plus a hash.
 pub const NAME_PREFIX: &str = "oshl-";
 
+/// The fragment's container that takes the request's image.
+pub const SANDBOX_CONTAINER: &str = "sandbox";
+
+/// The configuration file's ActorTemplate fragment, checked once: the driver
+/// names and places the template, no container may add a capability, and a
+/// container named `sandbox` takes the request's image.
+#[derive(Debug, Clone)]
+pub struct Fragment(ateapi::ActorTemplate);
+
+impl Fragment {
+    pub fn new(fragment: ateapi::ActorTemplate) -> Result<Self, String> {
+        if fragment.metadata.is_some() {
+            return Err("metadata is the driver's".to_string());
+        }
+        if fragment.worker_selector.is_some() {
+            return Err("workerSelector is the driver's (--worker-selector)".to_string());
+        }
+        if fragment.status.is_some() {
+            return Err("status is read-only".to_string());
+        }
+        if !fragment
+            .containers
+            .iter()
+            .any(|c| c.name == SANDBOX_CONTAINER)
+        {
+            return Err(format!("no container named {SANDBOX_CONTAINER}"));
+        }
+        for c in &fragment.containers {
+            let adds = c
+                .security_context
+                .as_ref()
+                .and_then(|s| s.capabilities.as_ref())
+                .is_some_and(|caps| !caps.add.is_empty());
+            if adds {
+                return Err(format!(
+                    "container {}: capabilities.add is not allowed",
+                    c.name
+                ));
+            }
+        }
+        Ok(Self(fragment))
+    }
+}
+
+impl std::ops::Deref for Fragment {
+    type Target = ateapi::ActorTemplate;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Default for Fragment {
+    /// One `sandbox` container, the request's image with its own entrypoint.
+    fn default() -> Self {
+        Self(ateapi::ActorTemplate {
+            containers: vec![ateapi::Container {
+                name: SANDBOX_CONTAINER.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+}
+
 /// Everything the golden snapshot depends on.
 struct Inputs {
     image: String,
@@ -74,8 +139,8 @@ pub fn resources_for(
         .filter(|q| !q.is_empty());
     let fragment = config
         .template_fragment
+        .resources
         .as_ref()
-        .and_then(|t| t.resources.as_ref())
         .and_then(|r| r.limits.as_ref());
     let fallback = |from_fragment: Option<i64>, default: i64| {
         from_fragment.filter(|v| *v > 0).unwrap_or(default)
@@ -177,7 +242,11 @@ pub fn name_for(
 }
 
 /// Build an `ActorTemplate` from the sandbox spec and driver config. Pure:
-/// does not touch the cluster.
+/// does not touch the cluster. The fragment's containers, every one with
+/// `drop: ALL` (openshell-sandbox refuses to run with any capability in its
+/// bounding set, and Substrate grants a few by default), the `sandbox`
+/// container with the request's image; the fragment's volumes, snapshot
+/// config and golden egress policy; the limits merged in `resources_for`.
 pub fn synthesize(
     name: &str,
     atespace: &str,
@@ -185,7 +254,17 @@ pub fn synthesize(
     config: &SubstrateComputeConfig,
 ) -> Result<ateapi::ActorTemplate, TemplateError> {
     let inputs = inputs_for(sandbox, config)?;
-    let mut template = ateapi::ActorTemplate {
+    let fragment = &config.template_fragment;
+    let mut containers = fragment.containers.clone();
+    for c in &mut containers {
+        c.security_context = Some(drop_all());
+    }
+    let i = containers
+        .iter()
+        .position(|c| c.name == SANDBOX_CONTAINER)
+        .expect("Fragment::new requires a sandbox container");
+    containers[i].image = inputs.image;
+    Ok(ateapi::ActorTemplate {
         metadata: Some(ateapi::ResourceMetadata {
             atespace: atespace.to_string(),
             name: name.to_string(),
@@ -194,40 +273,25 @@ pub fn synthesize(
         worker_selector: Some(ateapi::Selector {
             match_labels: config.worker_selector.clone(),
         }),
-        containers: vec![ateapi::Container {
-            name: "sandbox".to_string(),
-            image: inputs.image.clone(),
-            // The image's own entrypoint: openshell-sandbox.
-            command: vec![],
-            args: vec![],
-            env: vec![],
-            wakeup_probe: None,
-            volume_mounts: vec![],
-            // openshell-sandbox refuses to run with any capability in its
-            // bounding set; Substrate grants a few by default.
-            security_context: Some(drop_all()),
-            resources: None,
-        }],
-        volumes: vec![],
-        // Whole-memory snapshots, so a restored sandbox is the frozen
-        // process and not a fresh boot.
-        snapshot_config: Some(ateapi::SnapshotConfig {
-            storage_location: String::new(),
-            preferred_fidelity: ateapi::SnapshotFidelity::Memory as i32,
-            golden_snapshot_config: Some(ateapi::GoldenSnapshotConfig {
-                mode: ateapi::GoldenSnapshotMode::Enabled as i32,
-            }),
+        containers,
+        volumes: fragment.volumes.clone(),
+        // Whole-memory snapshots unless the fragment says otherwise, so a
+        // restored sandbox is the frozen process and not a fresh boot.
+        snapshot_config: fragment.snapshot_config.clone().or_else(|| {
+            Some(ateapi::SnapshotConfig {
+                storage_location: String::new(),
+                preferred_fidelity: ateapi::SnapshotFidelity::Memory as i32,
+                golden_snapshot_config: Some(ateapi::GoldenSnapshotConfig {
+                    mode: ateapi::GoldenSnapshotMode::Enabled as i32,
+                }),
+            })
         }),
         resources: Some(ateapi::ResourceRequirements {
             limits: Some(inputs.limits),
         }),
-        golden_egress_policy: None,
+        golden_egress_policy: fragment.golden_egress_policy.clone(),
         status: None,
-    };
-    if let Some(fragment) = &config.template_fragment {
-        apply_fragment(&mut template, fragment, &inputs);
-    }
-    Ok(template)
+    })
 }
 
 fn drop_all() -> ateapi::SecurityContext {
@@ -236,67 +300,6 @@ fn drop_all() -> ateapi::SecurityContext {
             drop: vec!["ALL".to_string()],
             ..Default::default()
         }),
-    }
-}
-
-/// What a fragment may not say: the driver names and places the template,
-/// and no container may add a capability.
-pub fn check_fragment(fragment: &ateapi::ActorTemplate) -> Result<(), String> {
-    if fragment.metadata.is_some() {
-        return Err("metadata is the driver's".to_string());
-    }
-    if fragment.worker_selector.is_some() {
-        return Err("workerSelector is the driver's (--worker-selector)".to_string());
-    }
-    if fragment.status.is_some() {
-        return Err("status is read-only".to_string());
-    }
-    for c in &fragment.containers {
-        let adds = c
-            .security_context
-            .as_ref()
-            .and_then(|s| s.capabilities.as_ref())
-            .is_some_and(|caps| !caps.add.is_empty());
-        if adds {
-            return Err(format!(
-                "container {}: capabilities.add is not allowed",
-                c.name
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The fragment's containers replace the synthesized one, every one with
-/// `drop: ALL`; the container named `sandbox`, or else the first, takes the
-/// request's image. Volumes, snapshot config and the golden egress policy
-/// come from the fragment when it sets them; the limits were merged in
-/// `resources_for`.
-fn apply_fragment(
-    template: &mut ateapi::ActorTemplate,
-    fragment: &ateapi::ActorTemplate,
-    inputs: &Inputs,
-) {
-    if !fragment.containers.is_empty() {
-        let mut containers = fragment.containers.clone();
-        for c in &mut containers {
-            c.security_context = Some(drop_all());
-        }
-        let i = containers
-            .iter()
-            .position(|c| c.name == "sandbox")
-            .unwrap_or(0);
-        containers[i].image = inputs.image.clone();
-        template.containers = containers;
-    }
-    if !fragment.volumes.is_empty() {
-        template.volumes = fragment.volumes.clone();
-    }
-    if fragment.snapshot_config.is_some() {
-        template.snapshot_config = fragment.snapshot_config.clone();
-    }
-    if fragment.golden_egress_policy.is_some() {
-        template.golden_egress_policy = fragment.golden_egress_policy.clone();
     }
 }
 
@@ -554,8 +557,10 @@ mod tests {
         ));
     }
 
-    fn fragment(yaml: &str) -> ateapi::ActorTemplate {
-        crate::fragment::from_yaml("substrate.ateapi.v1.ActorTemplate", yaml).unwrap()
+    fn fragment(yaml: &str) -> Result<Fragment, String> {
+        Fragment::new(
+            crate::fragment::from_yaml("substrate.ateapi.v1.ActorTemplate", yaml).unwrap(),
+        )
     }
 
     const SHAPE: &str = "containers:\n- name: relay\n  image: relay@sha256:r\n- name: sandbox\n  image: placeholder@sha256:p\n  env:\n  - name: FOO\n    value: bar\n  volumeMounts:\n  - name: data\n    mountPath: /data\nvolumes:\n- name: data\n  durableDir: {}\nresources:\n  limits:\n    cpuMillicores: 2000\n    memoryBytes: 2147483648\n";
@@ -563,7 +568,7 @@ mod tests {
     #[test]
     fn fragment_shapes_the_template_and_the_driver_keeps_its_say() {
         let config = SubstrateComputeConfig {
-            template_fragment: Some(fragment(SHAPE)),
+            template_fragment: fragment(SHAPE).unwrap(),
             ..SubstrateComputeConfig::default()
         };
         let sb = sandbox("img@sha256:abc", &[("CALLER", "x")]);
@@ -626,10 +631,14 @@ mod tests {
                 "capabilities.add",
                 "containers:\n- name: sandbox\n  securityContext:\n    capabilities:\n      add: [NET_ADMIN]\n",
             ),
+            (
+                "no sandbox container",
+                "containers:\n- name: relay\n  image: relay@sha256:r\n",
+            ),
         ] {
-            assert!(check_fragment(&fragment(yaml)).is_err(), "{what}");
+            assert!(fragment(yaml).is_err(), "{what}");
         }
-        assert!(check_fragment(&fragment(SHAPE)).is_ok());
+        assert!(fragment(SHAPE).is_ok());
     }
 
     #[test]

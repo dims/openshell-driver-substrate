@@ -151,12 +151,12 @@ pub struct SubstrateComputeConfig {
     pub api_bearer_token_path: Option<std::path::PathBuf>,
     /// The ActorTemplate fragment from the configuration file: the
     /// containers, volumes, resources and snapshot config every sandbox
-    /// gets. None synthesizes one container from the request alone.
-    pub template_fragment: Option<ateapi::ActorTemplate>,
+    /// gets.
+    pub template_fragment: template::Fragment,
     /// Egress rules every sandbox's actor gets before its first resume.
     pub egress_rules: Vec<ateapi::EgressRule>,
     /// The gateway the supervisors dial, put into every bundle.
-    pub gateway: Option<launch::Gateway>,
+    pub gateway: launch::Gateway,
 }
 
 impl Default for SubstrateComputeConfig {
@@ -176,9 +176,9 @@ impl Default for SubstrateComputeConfig {
             api_client_key_path: None,
             api_tls_server_name: None,
             api_bearer_token_path: None,
-            template_fragment: None,
+            template_fragment: template::Fragment::default(),
             egress_rules: Vec::new(),
-            gateway: None,
+            gateway: launch::Gateway::default(),
         }
     }
 }
@@ -199,8 +199,6 @@ pub enum SubstrateDriverError {
         #[source]
         source: tonic::transport::Error,
     },
-    #[error("Substrate RPC failed: {0}")]
-    Rpc(#[from] Status),
     #[error(transparent)]
     Template(#[from] template::TemplateError),
     #[error("failed to read credential file {path}: {source}")]
@@ -220,7 +218,6 @@ impl From<SubstrateDriverError> for Status {
                 Status::failed_precondition(err.to_string())
             }
             SubstrateDriverError::Connect { .. } => Status::unavailable(err.to_string()),
-            SubstrateDriverError::Rpc(status) => status.clone(),
             SubstrateDriverError::Template(template::TemplateError::InvalidSpec(_)) => {
                 Status::invalid_argument(err.to_string())
             }
@@ -246,14 +243,13 @@ impl From<SubstrateDriverError> for Status {
 pub struct SubstrateComputeDriver {
     config: Arc<SubstrateComputeConfig>,
     channel: Arc<Mutex<Option<Channel>>>,
-    /// Where the launch endpoint reads from; None without the endpoint.
-    bundles: Option<Arc<launch::BundleStore>>,
+    /// Where the launch endpoint reads from.
+    bundles: Arc<launch::BundleStore>,
     /// The actors the gateway stopped or suspended, marked before the
     /// checkpoint, cleared before the next resume and by the delete. Any other
     /// suspension is Substrate's own and is reported as a wait, so the
     /// gateway keeps the sandbox's credentials for the supervisor's return.
-    /// A cache of the store's `.stopped` markers, so a restart keeps the
-    /// set; in memory alone without a store.
+    /// A cache of the store's `.stopped` markers, so a restart keeps the set.
     stopped: Arc<std::sync::Mutex<HashSet<String>>>,
     /// One lock per actor around a stop, a start and the suspend of an actor
     /// resumed behind the gateway's stop, so they do not interleave.
@@ -270,12 +266,12 @@ impl std::fmt::Debug for SubstrateComputeDriver {
 
 impl SubstrateComputeDriver {
     #[must_use]
-    pub fn new(config: SubstrateComputeConfig) -> Self {
+    pub fn new(config: SubstrateComputeConfig, bundles: Arc<launch::BundleStore>) -> Self {
         Self {
             config: Arc::new(config),
             channel: Arc::new(Mutex::new(None)),
-            bundles: None,
-            stopped: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            stopped: Arc::new(std::sync::Mutex::new(bundles.stopped().clone())),
+            bundles,
             locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
@@ -290,11 +286,9 @@ impl SubstrateComputeDriver {
     }
 
     fn mark_stopped(&self, name: &str, stopped: bool) -> Result<(), Status> {
-        if let Some(store) = &self.bundles {
-            store
-                .set_stopped(name, stopped)
-                .map_err(|e| Status::internal(format!("stopped marker of {name}: {e}")))?;
-        }
+        self.bundles
+            .set_stopped(name, stopped)
+            .map_err(|e| Status::internal(format!("stopped marker of {name}: {e}")))?;
         let mut set = self
             .stopped
             .lock()
@@ -314,22 +308,11 @@ impl SubstrateComputeDriver {
             .clone()
     }
 
-    #[must_use]
-    pub fn with_bundles(mut self, store: Arc<launch::BundleStore>) -> Self {
-        self.stopped = Arc::new(std::sync::Mutex::new(store.stopped().clone()));
-        self.bundles = Some(store);
-        self
-    }
-
     async fn names(&self) -> HashMap<String, String> {
-        match &self.bundles {
-            Some(store) => store.names().await,
-            None => HashMap::new(),
-        }
+        self.bundles.names().await
     }
 
-    /// Store the bundle the launcher inside the actor fetches. Nothing to do
-    /// without the launch endpoint.
+    /// Store the bundle the launcher inside the actor fetches.
     async fn store_bundle(
         &self,
         name: &str,
@@ -337,23 +320,17 @@ impl SubstrateComputeDriver {
         launch_authentication: &[u8],
         actor_uid: &str,
     ) -> Result<(), Status> {
-        let Some(store) = &self.bundles else {
-            return Ok(());
-        };
-        let gateway = self.config.gateway.as_ref().ok_or_else(|| {
-            Status::failed_precondition("the configuration names no [gateway] for the bundle")
-        })?;
-        let bundle = bundle::build(sandbox, launch_authentication, gateway, actor_uid)
-            .map_err(Status::failed_precondition)?;
-        store
+        let bundle = bundle::build(
+            sandbox,
+            launch_authentication,
+            &self.config.gateway,
+            actor_uid,
+        )
+        .map_err(Status::failed_precondition)?;
+        self.bundles
             .put(name, bundle)
             .await
             .map_err(|e| Status::internal(format!("storing the bundle of {name}: {e}")))
-    }
-
-    #[must_use]
-    pub fn config(&self) -> &SubstrateComputeConfig {
-        &self.config
     }
 
     /// Dial (or reuse) the `ate-api-server` channel and return a fresh
@@ -590,16 +567,13 @@ impl SubstrateComputeDriver {
     /// Drop the bundles and marks of actors that no longer exist: a delete the
     /// driver did not see through, or a cluster rebuilt under the same store.
     pub async fn reap_orphan_bundles(&self) -> Result<usize, Status> {
-        let Some(store) = &self.bundles else {
-            return Ok(0);
-        };
         let mut client = self.control_client().await?;
         let live: HashSet<String> = list_driver_actors(&mut client, &self.config.atespace)
             .await?
             .into_iter()
             .filter_map(|a| a.metadata.map(|m| m.name))
             .collect();
-        let orphans = reap_orphans(store, &live)
+        let orphans = reap_orphans(&self.bundles, &live)
             .await
             .map_err(|e| Status::internal(format!("reaping bundles: {e}")))?;
         for name in &orphans {
@@ -825,14 +799,11 @@ fn require_actor_name(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
     }
 }
 
-/// With the launch endpoint on, a sandbox runs only on the bundle its
-/// gateway signs, so a create or start without launch authentication would
-/// wait in Provisioning until the gateway's deadline.
-fn require_launch_authentication(
-    launch_endpoint: bool,
-    launch_authentication: &[u8],
-) -> Result<(), Status> {
-    if launch_endpoint && launch_authentication.is_empty() {
+/// A sandbox runs only on the bundle its gateway signs, so a create or start
+/// without launch authentication would wait in Provisioning until the
+/// gateway's deadline.
+fn require_launch_authentication(launch_authentication: &[u8]) -> Result<(), Status> {
+    if launch_authentication.is_empty() {
         return Err(Status::failed_precondition(
             "the gateway sent no launch authentication; its launch signer must be configured",
         ));
@@ -845,7 +816,6 @@ fn require_launch_authentication(
 fn validate_substrate_sandbox(
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
-    main_process: bool,
 ) -> Result<(), Status> {
     let spec = sandbox
         .spec
@@ -865,13 +835,6 @@ fn validate_substrate_sandbox(
     if !template.image.contains("@sha256:") {
         return Err(Status::invalid_argument(
             "Substrate sandbox images must be pinned by digest (image@sha256:<digest>)",
-        ));
-    }
-    // The container command is the image's own. The workload's command
-    // travels in the bundle, so without the launch endpoint it would be lost.
-    if !main_process && !spec.command.is_empty() {
-        return Err(Status::failed_precondition(
-            "the substrate driver does not take a sandbox command",
         ));
     }
     if spec
@@ -1033,7 +996,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        validate_substrate_sandbox(&sandbox, &self.config, self.bundles.is_some())?;
+        validate_substrate_sandbox(&sandbox, &self.config)?;
         Ok(Response::new(ValidateSandboxCreateResponse {}))
     }
 
@@ -1093,14 +1056,14 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner()
             .sandbox
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
-        validate_substrate_sandbox(&sandbox, &self.config, self.bundles.is_some())?;
+        validate_substrate_sandbox(&sandbox, &self.config)?;
         let actor_name = require_actor_name(&sandbox.id, &sandbox.name)?;
         let launch_authentication = sandbox
             .spec
             .as_ref()
             .map(|s| s.launch_authentication.clone())
             .unwrap_or_default();
-        require_launch_authentication(self.bundles.is_some(), &launch_authentication)?;
+        require_launch_authentication(&launch_authentication)?;
         let atespace = self.config.atespace.clone();
 
         let template_name =
@@ -1205,7 +1168,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             Some(_) => &req.launch_authentication,
             None => &[],
         };
-        require_launch_authentication(self.bundles.is_some(), launch_authentication)?;
+        require_launch_authentication(launch_authentication)?;
         let lock = self.actor_lock(&actor_name);
         let _held = lock.lock().await;
         let mut client = self.control_client().await?;
@@ -1272,12 +1235,10 @@ impl ComputeDriver for SubstrateComputeDriver {
             Err(status) if status.code() == tonic::Code::NotFound => false,
             Err(other) => return Err(other),
         };
-        if let Some(bundles) = &self.bundles {
-            bundles
-                .remove(&actor_name)
-                .await
-                .map_err(|e| Status::internal(format!("bundle of {actor_name}: {e}")))?;
-        }
+        self.bundles
+            .remove(&actor_name)
+            .await
+            .map_err(|e| Status::internal(format!("bundle of {actor_name}: {e}")))?;
         self.mark_stopped(&actor_name, false)?;
         Ok(Response::new(DeleteSandboxResponse { deleted }))
     }
@@ -1434,15 +1395,22 @@ impl ComputeDriver for SubstrateComputeDriver {
 mod tests {
     use super::*;
 
+    /// A driver on an empty bundle store; the directory lives as long as it.
+    fn driver(config: SubstrateComputeConfig) -> (tempfile::TempDir, SubstrateComputeDriver) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = launch::BundleStore::open(dir.path().to_path_buf()).unwrap();
+        (dir, SubstrateComputeDriver::new(config, Arc::new(store)))
+    }
+
     #[tokio::test]
     async fn load_tls_config_none_when_unconfigured() {
-        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig::default());
+        let (_dir, driver) = driver(SubstrateComputeConfig::default());
         assert!(driver.load_tls_config().await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn auth_interceptor_none_when_no_token_path() {
-        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig::default());
+        let (_dir, driver) = driver(SubstrateComputeConfig::default());
         let interceptor = driver.load_auth_interceptor().await.unwrap();
         assert!(interceptor.bearer.is_none());
     }
@@ -1454,7 +1422,7 @@ mod tests {
         let token_path = dir.path().join("token");
         let mut f = std::fs::File::create(&token_path).unwrap();
         writeln!(f, "eyJhbGciOiJSUzI1NiJ9.payload.sig").unwrap();
-        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
+        let (_dir, driver) = driver(SubstrateComputeConfig {
             api_bearer_token_path: Some(token_path),
             ..Default::default()
         });
@@ -1468,7 +1436,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let token_path = dir.path().join("token");
         std::fs::write(&token_path, "   \n  \n").unwrap();
-        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
+        let (_dir, driver) = driver(SubstrateComputeConfig {
             api_bearer_token_path: Some(token_path),
             ..Default::default()
         });
@@ -1498,7 +1466,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_tls_config_rejects_tls_settings_without_a_ca() {
-        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
+        let (_dir, driver) = driver(SubstrateComputeConfig {
             api_tls_server_name: Some("api.ate-system.svc".to_string()),
             ..Default::default()
         });
@@ -1508,7 +1476,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_tls_config_rejects_half_mtls_pair() {
-        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
+        let (_dir, driver) = driver(SubstrateComputeConfig {
             api_tls_ca_path: Some("/nonexistent/ca.pem".into()),
             api_client_cert_path: Some("/nonexistent/cert.pem".into()),
             api_client_key_path: None,
@@ -1526,13 +1494,29 @@ mod tests {
     }
 
     #[test]
-    fn launch_authentication_is_required_with_the_launch_endpoint() {
-        assert!(require_launch_authentication(false, b"").is_ok());
-        assert!(require_launch_authentication(true, b"signed").is_ok());
+    fn launch_authentication_is_required() {
+        assert!(require_launch_authentication(b"signed").is_ok());
         assert_eq!(
-            require_launch_authentication(true, b"").unwrap_err().code(),
+            require_launch_authentication(b"").unwrap_err().code(),
             tonic::Code::FailedPrecondition
         );
+    }
+
+    #[tokio::test]
+    async fn capabilities_name_the_driver_and_its_extension() {
+        use openshell_core::extension_protocol::{ExtensionFamily, gateway_metadata};
+        let (_dir, driver) = driver(SubstrateComputeConfig::default());
+        let caps = driver
+            .get_capabilities(Request::new(GetCapabilitiesRequest {
+                gateway: Some(gateway_metadata(ExtensionFamily::Compute)),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(caps.driver_name, "substrate");
+        assert!(caps.extension.is_some());
+        assert!(caps.resource_capabilities.is_some());
+        assert!(caps.resource_admission_policy.starts_with("v1:"));
     }
 
     #[test]
@@ -1555,15 +1539,9 @@ mod tests {
                 ..Default::default()
             }
         };
-        assert!(
-            validate_substrate_sandbox(&sandbox("img@sha256:abc", |_| {}), &config, false).is_ok()
-        );
+        assert!(validate_substrate_sandbox(&sandbox("img@sha256:abc", |_| {}), &config).is_ok());
         for (what, sb) in [
             ("tag", sandbox("img:latest", |_| {})),
-            (
-                "command",
-                sandbox("img@sha256:abc", |s| s.command = vec!["sh".to_string()]),
-            ),
             (
                 "gpu",
                 sandbox("img@sha256:abc", |s| {
@@ -1579,10 +1557,7 @@ mod tests {
                 }),
             ),
         ] {
-            assert!(
-                validate_substrate_sandbox(&sb, &config, false).is_err(),
-                "{what}"
-            );
+            assert!(validate_substrate_sandbox(&sb, &config).is_err(), "{what}");
         }
     }
 
