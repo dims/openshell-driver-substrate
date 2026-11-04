@@ -45,7 +45,7 @@ if ! command -v openshell >/dev/null; then
   curl -fsSL -o "$DIR/$tgz" "$base/$tgz"
   curl -fsSL "$base/openshell-checksums-sha256.txt" | grep " $tgz\$" | sed "s| .*| $DIR/$tgz|" | sha256sum -c --quiet -
   tar -xzf "$DIR/$tgz" -C "$WORK/bin" --no-same-owner
-  find "$WORK/bin" -maxdepth 2 -type f -name openshell -exec mv -f {} "$WORK/bin/openshell" \;
+  find "$WORK/bin" -mindepth 2 -type f -name openshell -exec mv -f {} "$WORK/bin/openshell" \;
 fi
 openshell --version
 
@@ -93,10 +93,24 @@ kubectl -n "$ATESPACE" create configmap openshell-gateway-config --from-file=gat
 kubectl -n "$ATESPACE" create configmap openshell-driver-config --from-file=driver.toml="$DIR/driver.toml" --from-file=template.yaml="$DIR/template.yaml" --from-file=egress-policy.yaml="$DIR/egress-policy.yaml" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 step "access policy"
-render "$REPO/harness/gateway/access-policy.yaml.tmpl" > "$DIR/access-policy.yaml"
-if kubectl-ate get access-policy -a "$ATESPACE" >/dev/null 2>&1; then
-  kubectl-ate update access-policy -a "$ATESPACE" -f "$DIR/access-policy.yaml" >/dev/null
+MEMBER=user:system:serviceaccount:${ATESPACE}:openshell-driver
+if kubectl-ate get access-policy -a "$ATESPACE" -o json > "$DIR/access-policy.current.json" 2>/dev/null; then
+  # An update replaces the policy and needs its uid and version; keep what is there.
+  python3 - "$DIR/access-policy.current.json" "$MEMBER" > "$DIR/access-policy.json" <<'MERGE'
+import json, sys
+policy, member = json.load(open(sys.argv[1])), sys.argv[2]
+bindings = policy.setdefault("bindings", [])
+editor = next((b for b in bindings if b.get("role") == "editor"), None)
+if editor is None:
+    editor = {"role": "editor", "members": []}
+    bindings.append(editor)
+if member not in editor.setdefault("members", []):
+    editor["members"].append(member)
+json.dump(policy, sys.stdout)
+MERGE
+  kubectl-ate update access-policy -a "$ATESPACE" -f "$DIR/access-policy.json" >/dev/null
 else
+  render "$REPO/harness/gateway/access-policy.yaml.tmpl" > "$DIR/access-policy.yaml"
   kubectl-ate create access-policy -a "$ATESPACE" -f "$DIR/access-policy.yaml" >/dev/null
 fi
 
