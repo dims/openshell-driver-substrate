@@ -3,11 +3,12 @@
 #
 #   examples/helpdesk/soak.sh 10
 #
-# Each run's output goes to SOAK_LOGS (default $HOME/openshell-substrate/logs/soak-<utc time>).
+# Each run's output goes to SOAK_LOGS (default $WORK/logs/soak-<utc time>, with
+# WORK as in harness/scripts/kind-up.sh).
 set -o nounset -o pipefail
 N=${1:-10}
 HERE=$(cd "$(dirname "$0")" && pwd)
-LOGS=${SOAK_LOGS:-$HOME/openshell-substrate/logs/soak-$(date -u +%Y%m%dT%H%M%SZ)}
+LOGS=${SOAK_LOGS:-${WORK:-$HOME/openshell-substrate}/logs/soak-$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "$LOGS"
 for ((i = 1; i <= N; i++)); do
   start=$(date +%s)

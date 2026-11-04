@@ -9,6 +9,7 @@
 # endpoint the actor can reach; it goes into the workload's environment and is
 # the only host the sandbox policy allows.
 set -o errexit -o nounset -o pipefail
+shopt -s inherit_errexit
 # Same inputs, same digests: BuildKit stamps the build time into the image and
 # records file mtimes, and a new digest means a new template. See --provenance below.
 export SOURCE_DATE_EPOCH=0
@@ -23,42 +24,45 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "${HERE}/../.." && pwd)
 OUT=${REPO}/out
 CTX=${OUT}/helpdesk
-mkdir -p "${OUT}" "${CTX}/files/supervisor"
+for t in docker cargo go openssl; do command -v "$t" >/dev/null || { echo "$t is not on PATH" >&2; exit 1; }; done
+mkdir -p "${OUT}/bin" "${CTX}/files/supervisor"
 
-# The registry's digest of a tag, which is what atelet's pull cache wants.
-# Docker's RepoDigests report the upstream index digest for a mirrored tag,
-# so the registry is asked directly.
-CRANE="go run github.com/google/go-containerregistry/cmd/crane@latest"
-digest() { echo "$1@$(${CRANE} digest "$1")"; }
+# crane asks the registry for a tag's digest, which is what the template must
+# name: Docker's RepoDigests report the upstream index digest for a mirrored tag.
+GOBIN=${OUT}/bin go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+CRANE=${OUT}/bin/crane
+digest() { echo "$1@$("${CRANE}" digest "$1")"; }
 
 # Stock OpenShell images, this platform's manifest only, mirrored into the registry.
 PLATFORM=linux/$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
 for img in sandbox supervisor; do
-  ${CRANE} copy --platform "${PLATFORM}" "ghcr.io/nvidia/openshell/${img}:${OPENSHELL_VERSION}" \
+  "${CRANE}" copy --platform "${PLATFORM}" "ghcr.io/nvidia/openshell/${img}:${OPENSHELL_VERSION}" \
     "${REGISTRY}/openshell-${img}:${OPENSHELL_VERSION}" >/dev/null
 done
 
-# Credentials (root README steps 4 and 5). Reused while under 30 minutes old
-# and minted for the same model settings; a mint means a new template.
+# Credentials, minted once per model setting and kept in out/: a mint means
+# new digests, a new template and a new golden snapshot. `rm -rf out` mints again.
 CHILD_ENV="OPENAI_BASE_URL=http://${MODEL_HOST}:${MODEL_PORT}/v1,HELPDESK_MODEL=${MODEL_NAME}"
-if [[ -n $(find "${OUT}/bootstrap.json" -mmin -30 2>/dev/null) ]] &&
-   grep -qxF "CHILD_ENV=${CHILD_ENV}" "${OUT}/helpdesk.env" 2>/dev/null; then
+if [[ -f ${OUT}/bootstrap.json ]] && grep -qxF "CHILD_ENV=${CHILD_ENV}" "${OUT}/helpdesk.env" 2>/dev/null; then
   echo "reusing the credentials in ${OUT}"
 else
-  [[ -f "${OUT}/signing.key.pem" ]] || {
+  [[ -f ${OUT}/signing.key.pem ]] || (
+    umask 077
     openssl genpkey -algorithm ed25519 -out "${OUT}/signing.key.pem"
     openssl pkey -in "${OUT}/signing.key.pem" -pubout -out "${OUT}/signing.pub.pem"
-  }
+  )
   BOOTSTRAP_CHILD_ENV="${CHILD_ENV}" \
     cargo run -q --manifest-path "${REPO}/Cargo.toml" -p bootstrap-gen -- "${OUT}"
 fi
 
 # The sandbox unlinks its bootstrap after reading it, so it sits on the
 # writable rootfs, owned by the sandbox user, not on an image volume.
-rm -rf "${OUT}/bake"; mkdir -p "${OUT}/bake/.openshell/channel/sandbox"
-cp "${OUT}"/{bootstrap.json,server.crt,server.key} "${OUT}/bake/.openshell/channel/sandbox/"
+BAKE=${OUT}/bake
+rm -rf "${BAKE}"; mkdir -p "${BAKE}/.openshell/channel/sandbox"
+cp "${OUT}"/{bootstrap.json,server.crt,server.key} "${BAKE}/.openshell/channel/sandbox/"
 tar --sort=name --owner=65532 --group=65532 --numeric-owner --mtime=@0 --mode='u=rwX,go=' \
-  -cf "${CTX}/bootstrap.tar" -C "${OUT}/bake" .
+  -cf "${CTX}/bootstrap.tar" -C "${BAKE}" .
+rm -rf "${BAKE}"
 
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
 cp "${HERE}"/{Dockerfile,agent.py,relay.py,sandbox-entry.sh} "${CTX}/"
@@ -70,7 +74,7 @@ docker push -q "${REGISTRY}/helpdesk-sandbox:dev" >/dev/null
 
 # The supervisor's files: descriptor, auth bundle, OpenShell's stock policy at
 # the pinned rev, data.
-REV=$(grep -oE 'rev = "[0-9a-f]{40}"' "${REPO}/Cargo.toml" | head -1 | cut -d'"' -f2)
+REV=$(grep -oE -m1 'rev = "[0-9a-f]{40}"' "${REPO}/Cargo.toml" | cut -d'"' -f2)
 curl -fsSL -o "${CTX}/files/supervisor/policy.rego" \
   "https://raw.githubusercontent.com/NVIDIA/OpenShell/${REV}/crates/openshell-supervisor-network/data/sandbox-policy.rego"
 cp "${OUT}"/{runtime-descriptor.json,auth.json} "${CTX}/files/supervisor/"
@@ -81,10 +85,13 @@ find "${CTX}/files" -type f -exec touch -d @0 {} +
 docker build -q --provenance=false --sbom=false -t "${REGISTRY}/openshell-bootstrap-files:dev" "${CTX}/files" >/dev/null
 docker push -q "${REGISTRY}/openshell-bootstrap-files:dev" >/dev/null
 
-cat > "${OUT}/helpdesk.env" <<ENV
 SANDBOX_IMAGE=$(digest "${REGISTRY}/helpdesk-sandbox:dev")
 SUPERVISOR_IMAGE=$(digest "${REGISTRY}/openshell-supervisor:${OPENSHELL_VERSION}")
 BOOTSTRAP_FILES_IMAGE=$(digest "${REGISTRY}/openshell-bootstrap-files:dev")
+cat > "${OUT}/helpdesk.env" <<ENV
+SANDBOX_IMAGE=${SANDBOX_IMAGE}
+SUPERVISOR_IMAGE=${SUPERVISOR_IMAGE}
+BOOTSTRAP_FILES_IMAGE=${BOOTSTRAP_FILES_IMAGE}
 MODEL_HOST=${MODEL_HOST}
 MODEL_PORT=${MODEL_PORT}
 CHILD_ENV=${CHILD_ENV}

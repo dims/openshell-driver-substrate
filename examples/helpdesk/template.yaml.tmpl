@@ -8,13 +8,12 @@ workerSelector:
 containers:
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
-    # Starts as root, sets no_new_privs and becomes 65532; see sandbox-entry.sh.
+    # Runs as the image's user from the start; sandbox-entry.sh sets no_new_privs.
     command: ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
     args: ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
     securityContext:
       capabilities:
         drop: ["ALL"]
-        add: ["SETUID", "SETGID", "SETPCAP"]
     volumeMounts:
       - name: socket-dir
         mountPath: "/run/openshell"

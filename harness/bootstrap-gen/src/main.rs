@@ -1,5 +1,15 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Mints the files the sandbox and supervisor need to meet without a gateway:
+//! the sandbox's bootstrap and TLS material, the supervisor's runtime
+//! descriptor and auth bundle. Identity, evidence and digests are
+//! placeholders: the two sides only check them against each other.
+
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -74,6 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         public_key_pem: public_key_pem.into_bytes(),
     };
 
+    // The sandbox checks the uid and gid; source and digest are only compared
+    // between the two copies.
     let workload_identity = ResolvedWorkloadIdentity::new(
         65532,
         65532,
@@ -112,7 +124,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         resource_claim_files: BTreeMap::new(),
         workload_identity: workload_identity.clone(),
         provisioning_evidence: provisioning_evidence.clone(),
-        // BOOTSTRAP_CHILD_ENV="A=1,B=2" reaches the workload's environment.
+        // BOOTSTRAP_CHILD_ENV="A=1,B=2" reaches the workload's environment;
+        // a value must not contain a comma.
         child_env: std::env::var("BOOTSTRAP_CHILD_ENV")
             .unwrap_or_default()
             .split(',')
@@ -158,6 +171,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_otlp_tls: None,
     };
 
+    // A self-check only: the supervisor reads auth.json and
+    // runtime-descriptor.json as written above.
     let launch_authentication = SandboxLaunchAuthentication {
         supervisor: auth_bundle.clone(),
         gateway_id: gateway_id.to_string(),
@@ -170,7 +185,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::to_vec_pretty(&boundary_config)?,
     )?;
     std::fs::write(out_dir.join("server.crt"), &tls.certificate_chain_pem)?;
-    std::fs::write(out_dir.join("server.key"), &tls.private_key_pem)?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(out_dir.join("server.key"))?
+        .write_all(tls.private_key_pem.as_bytes())?;
     std::fs::write(
         out_dir.join("runtime-descriptor.json"),
         serde_json::to_vec_pretty(&runtime_descriptor)?,

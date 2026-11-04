@@ -4,9 +4,10 @@
 #
 #   sudo harness/scripts/prep-host.sh
 #
-# Environment: GO_VERSION (default: the version Substrate's go.mod names,
-# fetched from upstream main), KIND_VERSION (default: the release Substrate pins).
+# Environment: GO_VERSION and KIND_VERSION (default: the versions Substrate's
+# go.mod files pin, read from upstream main).
 set -o errexit -o nounset -o pipefail
+shopt -s inherit_errexit
 [ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 case $(uname -m) in
@@ -14,6 +15,7 @@ case $(uname -m) in
   aarch64) ARCH=arm64 ;;
   *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
+SUBSTRATE_RAW=https://raw.githubusercontent.com/agent-substrate/substrate/main
 
 step() { printf '\n== %s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 
@@ -29,7 +31,7 @@ systemctl enable --now docker >/dev/null
 docker version --format '{{.Server.Version}}'
 
 step "go"
-GO_VERSION=${GO_VERSION:-$(curl -fsSL https://raw.githubusercontent.com/agent-substrate/substrate/main/go.mod | awk '$1 == "go" {v = $2} END {print v}')}
+GO_VERSION=${GO_VERSION:-$(curl -fsSL "$SUBSTRATE_RAW/go.mod" | awk '$1 == "go" {v = $2} END {print v}')}
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION} "; then
   curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tgz
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
@@ -38,7 +40,7 @@ ln -sf /usr/local/go/bin/go /usr/local/bin/go
 go version
 
 step "kind and kubectl"
-KIND_VERSION=${KIND_VERSION:-v0.32.0}
+KIND_VERSION=${KIND_VERSION:-$(curl -fsSL "$SUBSTRATE_RAW/hack/tools/kind/go.mod" | awk '$1 == "sigs.k8s.io/kind" {print $2}')}
 if ! kind version 2>/dev/null | grep -q "${KIND_VERSION}"; then
   curl -fsSL "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-${ARCH}" -o /usr/local/bin/kind && chmod +x /usr/local/bin/kind
 fi
@@ -49,10 +51,11 @@ fi
 kubectl version --client | head -1
 
 step "rust"
-if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
   curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null
 fi
-"$HOME/.cargo/bin/cargo" --version
+ln -sf "$HOME/.cargo/bin/cargo" "$HOME/.cargo/bin/rustc" /usr/local/bin/  # on PATH for every shell
+cargo --version
 
 step "sysctls"
 sysctl -q -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=1048576

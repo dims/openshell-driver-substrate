@@ -8,6 +8,7 @@ the agent never holds a credential, the supervisor's proxy attaches it.
 import http.server
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ MODEL = os.environ.get("HELPDESK_MODEL", "gpt-oss:20b-cloud")
 SYSTEM = ("You are a triage assistant for a hosted-service helpdesk. Answer "
           "technical operations questions briefly and actionably.")
 history = [{"role": "system", "content": SYSTEM}]
+chat_lock = threading.Lock()  # one chat at a time keeps the history in order
 booted = time.time()
 
 
@@ -80,16 +82,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not BASE:
             self._send(503, {"error": "no inference endpoint injected"})
             return
-        history.append({"role": "user", "content": ask})
-        try:
-            _, raw = fetch(f"{BASE.rstrip('/')}/chat/completions",
-                           {"model": MODEL, "messages": history}, timeout=80)
-            reply = json.loads(raw)["choices"][0]["message"]["content"]
-        except Exception as e:  # noqa: BLE001 - surface the failure to the caller
-            history.pop()
-            self._send(502, {"error": f"{type(e).__name__}: {e}"})
-            return
-        history.append({"role": "assistant", "content": reply})
+        with chat_lock:
+            history.append({"role": "user", "content": ask})
+            try:
+                _, raw = fetch(f"{BASE.rstrip('/')}/chat/completions",
+                               {"model": MODEL, "messages": history}, timeout=80)
+                reply = json.loads(raw)["choices"][0]["message"]["content"]
+            except Exception as e:  # noqa: BLE001 - report the failure to the caller
+                history.pop()
+                self._send(502, {"error": f"{type(e).__name__}: {e}"})
+                return
+            history.append({"role": "assistant", "content": reply})
         self._send(200, {"reply": reply, "turns": (len(history) - 1) // 2})
 
     def log_message(self, fmt, *args):

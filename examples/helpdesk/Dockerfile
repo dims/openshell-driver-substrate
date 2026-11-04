@@ -3,12 +3,15 @@
 # image. openshell-sandbox is a static musl binary, so any base works.
 ARG SANDBOX_IMAGE
 FROM ${SANDBOX_IMAGE} AS sandbox
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
 COPY --from=sandbox /openshell-sandbox /openshell-sandbox
 COPY agent.py relay.py sandbox-entry.sh /opt/helpdesk/
 ADD bootstrap.tar /
-# No USER: sandbox-entry.sh becomes 65532 itself, with no_new_privs set, which
-# Substrate's micro-VM containers do not get from the runtime.
+# The sandbox user owns /etc so sandbox-entry.sh can point the resolver at the
+# sandbox's DNS relay without root; the workload's Landlock policy keeps /etc
+# read-only for the workload. No setuid binary stays: nothing here needs one.
+RUN chown 65532:65532 /etc && find / -xdev -perm /6000 -type f -exec chmod a-s {} +
+USER 65532:65532
 ENTRYPOINT ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
 # The gateway path sends no command, so the image names its own bootstrap.
 CMD ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]

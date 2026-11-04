@@ -8,6 +8,8 @@ metadata:
   namespace: ${ATESPACE}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: ollama
@@ -18,7 +20,7 @@ spec:
     spec:
       containers:
         - name: ollama
-          image: ollama/ollama:0.40.14
+          image: ollama/ollama:0.40.14@sha256:ebaef4f4c5d93660e1f25f8ad085a112f51ccfb0e8458073e71793959dba91c9
           ports:
             - containerPort: 11434
           env:
@@ -27,10 +29,11 @@ spec:
             - name: OLLAMA_KEEP_ALIVE
               value: "24h"
           # The server pulls the model once it listens; the probe gates on it.
+          # A hook that fails restarts the container, which tries again.
           lifecycle:
             postStart:
               exec:
-                command: ["sh", "-c", "until ollama pull ${MODEL_NAME}; do sleep 2; done"]
+                command: ["sh", "-c", "for i in $(seq 60); do ollama pull ${MODEL_NAME} && exit 0; sleep 5; done; exit 1"]
           readinessProbe:
             exec:
               command: ["sh", "-c", "ollama list | grep -q '^${MODEL_NAME}'"]

@@ -4,3 +4,4 @@ Cargo.lock.bak
 .DS_Store
 __pycache__/
 out/
+creds/

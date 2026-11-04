@@ -13,14 +13,15 @@ TARGET = int(os.environ.get("HELPDESK_PORT", "8080"))
 
 
 async def pipe(reader, writer):
+    """Copy until EOF, then half-close so the other direction can finish."""
     try:
         while data := await reader.read(65536):
             writer.write(data)
             await writer.drain()
-    except (ConnectionError, asyncio.IncompleteReadError):
+        if writer.can_write_eof():
+            writer.write_eof()
+    except OSError:
         pass
-    finally:
-        writer.close()
 
 
 async def handle(client_r, client_w):
@@ -29,7 +30,11 @@ async def handle(client_r, client_w):
     except OSError:
         client_w.close()
         return
-    await asyncio.gather(pipe(client_r, agent_w), pipe(agent_r, client_w))
+    try:
+        await asyncio.gather(pipe(client_r, agent_w), pipe(agent_r, client_w))
+    finally:
+        agent_w.close()
+        client_w.close()
 
 
 async def main():
