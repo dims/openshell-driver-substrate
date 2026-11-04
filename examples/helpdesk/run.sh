@@ -72,7 +72,7 @@ under() {  # pattern [namespace selector source]: matching log lines since the b
       else empty end' 2>/dev/null | grep -E "$1" | cut -c1-220 | awk '!seen[$0]++' || true
 }
 free_workers() {
-  kubectl-ate get workers -o json | jq --arg pool "${POOL}" \
+  kubectl-ate get workers -o json 2>/dev/null | jq --arg pool "${POOL}" \
     '[.workers[] | select(.workerPool == $pool and .status.state == "WORKER_STATE_ACTIVE" and (.status.allocated.actors // 0) == 0)] | length'
 }
 
