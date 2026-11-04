@@ -9,8 +9,8 @@
 # Environment: WORK (default $HOME/openshell-substrate), REGISTRY (default
 # localhost:5001), ATESPACE (default ate-openshell-microvm), OPENSHELL_VERSION
 # (default 0.1.7), MODEL_HOST and MODEL_PORT (default the Ollama Service
-# kind-up.sh deploys in the atespace, 11434): the one host the egress rules
-# let a workload reach besides the gateway and the driver.
+# examples/helpdesk/model-up.sh deploys in the atespace, 11434): the one host
+# the egress rules let a workload reach besides the gateway and the driver.
 set -o errexit -o nounset -o pipefail
 shopt -s inherit_errexit
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

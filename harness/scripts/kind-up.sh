@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
-# Substrate on a kind cluster, ready for the helpdesk demo: the install with
-# the micro-VM class, the OpenShell worker pool, the atespace and the model
-# endpoint. Steps already done are skipped.
+# Substrate on a kind cluster, ready for the gateway: the install with the
+# micro-VM class, the OpenShell worker pool and the atespace. Steps already
+# done are skipped.
 #
 #   harness/scripts/kind-up.sh
 #
 # Environment: WORK (default $HOME/openshell-substrate; the Substrate clone,
 # bin/ and logs/ live under it), SUBSTRATE_REF (default upstream/main),
-# ATESPACE (default ate-openshell-microvm), MODEL_NAME (default qwen2.5:1.5b),
-# MODEL_PORT (default 11434), POST_KIND_HOOK (a script run once the cluster
-# exists, for a host firewall that blocks the kind bridge).
+# ATESPACE (default ate-openshell-microvm), POST_KIND_HOOK (a script run once
+# the cluster exists, for a host firewall that blocks the kind bridge).
 set -o errexit -o nounset -o pipefail
 shopt -s inherit_errexit
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=${WORK:-$HOME/openshell-substrate}
 SUBSTRATE_REF=${SUBSTRATE_REF:-upstream/main}
 export ATESPACE=${ATESPACE:-ate-openshell-microvm}
-export MODEL_NAME=${MODEL_NAME:-qwen2.5:1.5b}
-export MODEL_PORT=${MODEL_PORT:-11434}
 POST_KIND_HOOK=${POST_KIND_HOOK:+$(realpath "$POST_KIND_HOOK")}
 INGRESS_CLIENT_ID=spiffe://cluster.local/ns/ate-system/sa/atenet-client
 POOL=openshell-microvm
@@ -99,10 +96,5 @@ active() { kubectl-ate get workers 2>/dev/null | awk -v pool="$POOL" '$2 == pool
 workers_active() { [ "$(active)" -ge 2 ]; }
 wait_for 600 "two active workers" workers_active
 echo "workers: $(active) active"
-
-step "model endpoint"
-"$REPO/harness/scripts/render.sh" "$REPO/examples/helpdesk/ollama.yaml.tmpl" | kubectl apply -f - >/dev/null
-kubectl -n "$ATESPACE" rollout status deploy/ollama --timeout=900s >/dev/null
-echo "ollama.$ATESPACE.svc.cluster.local:$MODEL_PORT serves $MODEL_NAME"
 
 step "done"

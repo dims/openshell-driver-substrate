@@ -1,8 +1,8 @@
 # The ActorTemplate fragment the driver gives every sandbox: the request's
-# image in the sandbox container, the runtime image for the supervisor and the
-# relay, both launchers with LAUNCH_URL so the supervisor fetches this actor's
-# bundle from the driver. Rendered by gateway-up.sh into the driver's
-# ConfigMap. runtime/README.md says what the sandbox image must contain.
+# image in the sandbox container, the runtime image for the supervisor, both
+# launchers with LAUNCH_URL so the supervisor fetches this actor's bundle from
+# the driver. Rendered by gateway-up.sh into the driver's ConfigMap.
+# runtime/README.md says what the sandbox image must contain.
 containers:
   - name: sandbox
     image: "${RUNTIME_IMAGE}"  # the request's image replaces it
@@ -47,18 +47,6 @@ containers:
         mountPath: "/run/openshell"
       - name: identity
         mountPath: "/run/ate"
-  # Not part of the sandbox. See runtime/relay.py.
-  - name: relay
-    image: "${RUNTIME_IMAGE}"
-    command: ["python3", "/opt/openshell-substrate/relay.py"]
-    wakeupProbe:
-      httpGet:
-        path: /healthz
-        port: 17903
-      timeoutSeconds: 30
-    securityContext:
-      capabilities:
-        drop: ["ALL"]
 resources:
   limits:
     cpuMillicores: 2000

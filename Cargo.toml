@@ -1,17 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-[workspace]
-members = ["harness/bootstrap-gen"]
-
-# Genuine upstream OpenShell, unmodified. One rev for the driver and for
-# bootstrap-gen, so the credentials it mints match the binaries in the images.
-[workspace.dependencies]
-# No default features: they add telemetry and an HTTP client nothing here uses.
-openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c", default-features = false }
-openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
-openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
-
 [package]
 name = "openshell-driver-substrate"
 description = "Agent Substrate compute driver for OpenShell"
@@ -27,13 +16,15 @@ name = "openshell-driver-substrate"
 path = "src/main.rs"
 
 [dependencies]
-# The compute-driver proto types, driver_utils, resource_admission and
-# extension_protocol. The driver registers out of process (ComputeDriverServer
-# over a socket), so no gateway code or fork is needed.
-openshell-core = { workspace = true, features = ["jwt"] }
+# Genuine upstream OpenShell, unmodified, pinned by rev: the compute-driver
+# proto types, driver_utils, resource_admission, extension_protocol and the
+# launch authentication (jwt). No default features: they add telemetry and an
+# HTTP client nothing here uses. The driver registers out of process
+# (ComputeDriverServer over a socket), so no gateway code or fork is needed.
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c", default-features = false, features = ["jwt"] }
 # The boundary and descriptor types the bundles are built from.
-openshell-sandbox-backend = { workspace = true }
-openshell-isolation-interface = { workspace = true }
+openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
+openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
 
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "fs", "net", "time", "sync"] }

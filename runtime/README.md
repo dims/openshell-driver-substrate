@@ -1,10 +1,10 @@
 # The runtime image
 
 What runs inside every actor this driver makes, whatever the workload: the
-stock OpenShell binaries, the launcher that starts them, and the relay that
-makes the workload reachable through atenet-router. `build.sh` mirrors the
-OpenShell release images for this platform, builds the image and writes its
-digest to `out/runtime.env` as `RUNTIME_IMAGE`.
+stock OpenShell binaries and the launcher that starts them on the bundle the
+gateway minted. `build.sh` mirrors the OpenShell release images for this
+platform, builds the image and writes its digest to `out/runtime.env` as
+`RUNTIME_IMAGE`.
 
 ```sh
 REGISTRY=localhost:5001 runtime/build.sh
@@ -13,12 +13,12 @@ REGISTRY=localhost:5001 runtime/build.sh
 | In the image | Why |
 |---|---|
 | `/openshell-sandbox`, `/openshell-supervisor` | the release binaries, static musl, copied from `ghcr.io/nvidia/openshell/{sandbox,supervisor}` |
-| `/opt/openshell-substrate/launcher.py`, `relay.py` | the first process of the sandbox and supervisor containers, and the relay container |
+| `/opt/openshell-substrate/launcher.py` | the first process of the sandbox and supervisor containers |
 | `python:3.12-slim`, with `setpriv` | the launcher is Python; `setpriv --no-new-privs` sets the flag Substrate has no field for |
 | `USER 65532:65532`, `/etc` owned by that user | the identity every bundle names; the launcher rewrites `resolv.conf` without root |
 | `/.openshell/channel/sandbox`, mode 700, owned by 65532 | where the sandbox's bootstrap and TLS pair are written and consumed |
 | no setuid binary | `openshell-sandbox` refuses any privilege |
-| `GET /healthz` on 17901 (supervisor launcher), 17902 (sandbox launcher), 17903 (relay) | Substrate's wakeup probes; an activation completes only when they answer, and the golden snapshot is taken as soon as they do |
+| `GET /healthz` on 17901 (supervisor launcher) and 17902 (sandbox launcher) | Substrate's wakeup probes; an activation completes only when they answer, and the golden snapshot is taken as soon as they do |
 
 ## A workload image
 
@@ -37,45 +37,34 @@ allows no egress and knows no `/opt`. `examples/helpdesk/data.yaml.tmpl` is a
 working one. The sandbox's resolver is `127.0.0.53` with no search domains,
 so the workload uses fully qualified names.
 
+The workload is reached through the gateway: `openshell sandbox exec` runs a
+command inside the sandbox over the supervisor's SSH relay, and `openshell
+sandbox ssh-config` prints an SSH host entry for the same relay. Substrate's
+router cannot reach it: the sandbox's network broker refuses `accept(2)` from
+a non-loopback peer.
+
 ## The launcher
 
-One file, two roles, each the first process of its container
-(`harness/gateway/template.yaml.tmpl` is the fragment the driver uses).
+One file, two roles, each the first process of its container, both with
+`LAUNCH_URL`, the driver's launch endpoint (`harness/gateway/template.yaml.tmpl`
+is the fragment the driver uses).
 
-With `LAUNCH_URL` set, the supervisor role reads the actor's name and
-atespace from the `systemInfo` mount at `/run/ate`, long-polls
-`$LAUNCH_URL/v1/launch/<atespace>/<name>` (atenet-egress puts the actor JWT
-on the request), writes the supervisor's files under its own `/tmp`, lays the
-sandbox's bootstrap and TLS pair out under `/run/openshell/bundle/<generation>`
-on the shared durable dir, starts `openshell-supervisor`, and publishes the
-generation in `/run/openshell/current`. The sandbox role waits for that file,
-copies the files into the channel directory, removes them from the shared dir
-and starts `openshell-sandbox` under `setpriv --no-new-privs`. A newer
-generation, which every gateway `start` and `resume` brings, replaces both
-processes.
-
-Without `LAUNCH_URL` the supervisor role starts `openshell-supervisor` on the
-static files under `/opt/supervisor-files/supervisor` (`runtime-descriptor.json`,
-`auth.json`, `policy.rego`, `data.yaml`, an image volume in the demo) with the
-command in `WORKLOAD`, and the sandbox role starts `openshell-sandbox` on the
-bootstrap the image carries. `examples/helpdesk` is that run.
+The supervisor role reads the actor's name and atespace from the `systemInfo`
+mount at `/run/ate`, long-polls `$LAUNCH_URL/v1/launch/<atespace>/<name>`
+(atenet-egress puts the actor JWT on the request), writes the supervisor's
+files under its own `/tmp`, lays the sandbox's bootstrap and TLS pair out
+under `/run/openshell/bundle/<generation>` on the shared durable dir, starts
+`openshell-supervisor`, and publishes the generation in
+`/run/openshell/current`. The sandbox role waits for that file, copies the
+files into the channel directory, removes them from the shared dir and starts
+`openshell-sandbox` under `setpriv --no-new-privs`. A newer generation, which
+every gateway `start` and `resume` brings, replaces both processes.
 
 The supervisor listens on `169.254.17.2:17777`, the address of every Substrate
 actor, and the sandbox dials it; the launcher waits for that listener in
-`/proc/net/tcp`. Both constants also live in `src/bundle.rs` and
-`harness/bootstrap-gen`.
+`/proc/net/tcp`. The same constant lives in `src/bundle.rs`.
 
-With `LAUNCH_URL` the health endpoint answers 200 once the launcher polls;
-without it, once the child runs and, for the sandbox role, the workload
-accepts on `WORKLOAD_PORT` (8080), so the demo's golden snapshot holds a live
-workload. The sandbox container also mounts the identity volume: the bundle
-names the actor's uid in a `substrate.actor_uid` claim, and `openshell-sandbox`
-checks it against `/run/ate/actor-uid` before it opens its listener.
-
-## The relay
-
-The sandbox's network broker refuses `accept(2)` from a non-loopback peer, so
-atenet-router cannot reach the workload directly. `relay.py` runs as a plain
-third container, accepts on the actor's address (`RELAY_PORT`, 8081) and
-connects to the workload over loopback (`WORKLOAD_PORT`, 8080). It is not
-mediated by OpenShell; what reaches it is what atenet-router admits.
+The health endpoint answers 200 once the launcher polls. The sandbox
+container also mounts the identity volume: the bundle names the actor's uid
+in a `substrate.actor_uid` claim, and `openshell-sandbox` checks it against
+`/run/ate/actor-uid` before it opens its listener.

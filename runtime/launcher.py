@@ -2,26 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """The first process of the supervisor container and of the sandbox container.
 
-With LAUNCH_URL set, the supervisor role fetches the bundle the gateway minted
-for this actor from the driver's launch endpoint (the actor's name and atespace
-come from the systemInfo mount; atenet-egress puts the actor JWT on the
-request), writes the supervisor's files on its own filesystem, lays the
-sandbox's files out on the shared durable dir and starts the supervisor; a
-newer generation replaces both. The sandbox role watches that dir and runs
-openshell-sandbox on the current generation.
-
-Without LAUNCH_URL both roles use static files: the supervisor's descriptor,
-auth bundle and policy under /opt/supervisor-files/supervisor, the sandbox's
-bootstrap and TLS pair in its channel directory, and the workload command in
-WORKLOAD. That is the run without a gateway.
+The supervisor role fetches the bundle the gateway minted for this actor from
+the driver's launch endpoint (the actor's name and atespace come from the
+systemInfo mount; atenet-egress puts the actor JWT on the request), writes the
+supervisor's files on its own filesystem, lays the sandbox's files out on the
+shared durable dir and starts the supervisor; a newer generation replaces
+both. The sandbox role watches that dir and runs openshell-sandbox on the
+current generation.
 """
 import http.server
 import json
 import os
-import shlex
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -36,12 +29,10 @@ CURRENT = f"{SHARED}/current"               # the generation laid out below
 SANDBOX_BUNDLES = f"{SHARED}/bundle"        # <generation>/bootstrap.json, server.crt, server.key
 # The supervisor's tokens stay in its own container, away from the workload.
 SUPERVISOR_DIR = "/tmp/openshell-supervisor"  # <generation>/runtime-descriptor.json, auth.json
-STATIC_SUPERVISOR = "/opt/supervisor-files/supervisor"
 SANDBOX_DIR = "/.openshell/channel/sandbox"
 IDENTITY = "/run/ate"
 LISTENER = " 0211FEA9:4571 "                # 169.254.17.2:17777, little-endian hex, in /proc/net/tcp
 HEALTH_PORT = {"supervisor": 17901, "sandbox": 17902}  # the wakeup probe of each container
-WORKLOAD_PORT = int(os.environ.get("WORKLOAD_PORT", "8080"))
 child = None
 ready = False
 
@@ -93,29 +84,11 @@ def read(path):
         return f.read()
 
 
-def healthy():
-    """What the wakeup probe asks: with LAUNCH_URL, that this launcher is up
-    and polling; without it, that the child runs and, for the sandbox role,
-    that the workload accepts on its port, so the golden snapshot holds a live
-    workload."""
-    if not ready:
-        return False
-    if LAUNCH_URL:
-        return True
-    if child is None or child.poll() is not None:
-        return False
-    if ROLE != "sandbox":
-        return True
-    try:
-        socket.create_connection(("127.0.0.1", WORKLOAD_PORT), timeout=0.2).close()
-        return True
-    except OSError:
-        return False
-
-
 class Health(http.server.BaseHTTPRequestHandler):
+    """What the wakeup probe asks: that this launcher is up and polling."""
+
     def do_GET(self):
-        self.send_response(200 if healthy() else 503)
+        self.send_response(200 if ready else 503)
         self.end_headers()
 
     def log_message(self, *_):
@@ -150,7 +123,7 @@ def apply_bundle(bundle, running):
         "OPENSHELL_SANDBOX": bundle["sandbox_name"],
         "OPENSHELL_LOG_LEVEL": bundle["log_level"],
         "OPENSHELL_NETWORK_RUNTIME_CAPABILITIES": "policy-dns-transparent-tcp",
-        # The relay behind `openshell sandbox exec` and `forward`. On this
+        # The SSH relay behind `openshell sandbox exec`. On this
         # container's own filesystem: the durable dir takes no socket.
         "OPENSHELL_SSH_SOCKET_PATH": f"{SUPERVISOR_DIR}/ssh.sock",
     }
@@ -198,22 +171,6 @@ def fetch(name, atespace, generation):
 
 def supervisor_role():
     global ready
-    if not LAUNCH_URL:
-        workload = shlex.split(os.environ.get("WORKLOAD", ""))
-        if not workload:
-            log("WORKLOAD is required without LAUNCH_URL")
-            sys.exit(2)
-        start_supervisor(
-            ["--role", "isolation-backend", "--sandbox-id", "test-sandbox-1",
-             "--backend-descriptor-file", f"{STATIC_SUPERVISOR}/runtime-descriptor.json",
-             "--auth-bundle-file", f"{STATIC_SUPERVISOR}/auth.json",
-             "--policy-rules", f"{STATIC_SUPERVISOR}/policy.rego",
-             "--policy-data", f"{STATIC_SUPERVISOR}/data.yaml",
-             "--log-level", "info", "--", *workload],
-            {},
-        )
-        ready = True
-        sys.exit(child.wait())
     log(f"bundles from {LAUNCH_URL}")
     running = None
     ready = True
@@ -261,10 +218,6 @@ def sandbox_role():
     global ready
     write_private("/etc/resolv.conf.sandbox", "nameserver 127.0.0.53\n")
     os.replace("/etc/resolv.conf.sandbox", "/etc/resolv.conf")
-    if not LAUNCH_URL:
-        start_sandbox()
-        ready = True
-        sys.exit(child.wait())
     running = None
     ready = True
     while True:
@@ -294,6 +247,9 @@ signal.signal(signal.SIGTERM, on_signal)
 signal.signal(signal.SIGINT, on_signal)
 if ROLE not in HEALTH_PORT:
     log("usage: launcher.py supervisor|sandbox")
+    sys.exit(2)
+if not LAUNCH_URL:
+    log("LAUNCH_URL is required")
     sys.exit(2)
 serve_health()
 if ROLE == "supervisor":

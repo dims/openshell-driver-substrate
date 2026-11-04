@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """Helpdesk agent: chat triage with RAM-only history, plus an egress probe.
 
-History lives in a Python list so a suspend/resume proves the actor kept its
-memory. The model endpoint comes from the environment the supervisor injects;
-the agent never holds a credential, the supervisor's proxy attaches it.
+History lives in a Python list so a suspend and resume proves the actor kept
+its memory. With OPENAI_BASE_URL set the replies come from that
+OpenAI-compatible endpoint; without it the agent answers on its own, so the
+lifecycle checks need no model. With an argument it is a client for the
+server on loopback, for `openshell sandbox exec`.
 """
 import http.server
 import json
 import os
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 
 PORT = int(os.environ.get("HELPDESK_PORT", "8080"))
-# Injected by the supervisor via provider credentials. No key ever lands here.
-BASE = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENSHELL_INFERENCE_BASE", "")
-MODEL = os.environ.get("HELPDESK_MODEL", "gpt-oss:20b-cloud")
+BASE = os.environ.get("OPENAI_BASE_URL", "")
+MODEL = os.environ.get("HELPDESK_MODEL", "")
 
 SYSTEM = ("You are a triage assistant for a hosted-service helpdesk. Answer "
           "technical operations questions briefly and actionably.")
@@ -33,6 +35,15 @@ def fetch(url, data=None, timeout=30):
         body = json.dumps(data).encode()
     with urllib.request.urlopen(req, body, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8", "replace")
+
+
+def reply_to(ask):
+    """The model's answer, or the agent's own when no endpoint is configured."""
+    if not BASE:
+        return f"turn {(len(history) + 1) // 2}: you said {ask!r}"
+    _, raw = fetch(f"{BASE.rstrip('/')}/chat/completions",
+                   {"model": MODEL, "messages": history}, timeout=80)
+    return json.loads(raw)["choices"][0]["message"]["content"]
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -79,15 +90,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send(400, {"error": "body must be JSON"})
             return
-        if not BASE:
-            self._send(503, {"error": "no inference endpoint injected"})
-            return
         with chat_lock:
             history.append({"role": "user", "content": ask})
             try:
-                _, raw = fetch(f"{BASE.rstrip('/')}/chat/completions",
-                               {"model": MODEL, "messages": history}, timeout=80)
-                reply = json.loads(raw)["choices"][0]["message"]["content"]
+                reply = reply_to(ask)
             except Exception as e:  # noqa: BLE001 - report the failure to the caller
                 history.pop()
                 self._send(502, {"error": f"{type(e).__name__}: {e}"})
@@ -99,6 +105,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         print("agent " + fmt % args, flush=True)
 
 
+def client(args):
+    """status | chat <message> | egress <url>: ask the server on loopback."""
+    base = f"http://127.0.0.1:{PORT}"
+    try:
+        if args[0] == "status":
+            status, body = fetch(f"{base}/status")
+        elif args[0] == "chat":
+            status, body = fetch(f"{base}/chat", {"message": " ".join(args[1:])}, timeout=90)
+        elif args[0] == "egress":
+            status, body = fetch(f"{base}/egress?url={args[1]}")
+        else:
+            sys.exit("usage: agent.py [status | chat <message> | egress <url>]")
+    except urllib.error.HTTPError as e:
+        status, body = e.code, e.read().decode("utf-8", "replace")
+    print(body)
+    sys.exit(0 if status == 200 else 1)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        client(sys.argv[1:])
     print(f"helpdesk agent on :{PORT} base={BASE!r}", flush=True)
     http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

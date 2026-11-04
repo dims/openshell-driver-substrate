@@ -34,7 +34,7 @@ for img in sandbox supervisor; do
     "${REGISTRY}/openshell-${img}:${OPENSHELL_VERSION}" >/dev/null
 done
 
-cp "${HERE}"/{Dockerfile,launcher.py,relay.py} "${CTX}/"
+cp "${HERE}"/{Dockerfile,launcher.py} "${CTX}/"
 find "${CTX}" -maxdepth 1 -type f -exec touch -d @0 {} +
 docker build -q --provenance=false --sbom=false \
   --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:${OPENSHELL_VERSION}" \
