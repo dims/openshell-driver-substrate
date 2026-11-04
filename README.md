@@ -46,7 +46,7 @@ Substrate's actor lifecycle:
 
 | OpenShell call | What the driver does |
 |---|---|
-| `create_sandbox` | `CreateActorTemplate` (reused by content hash), `CreateActor`, `CreateActorEgressPolicy`, store the bundle, `ResumeActor` |
+| `create_sandbox` | `CreateActorTemplate` (reused by content hash), `CreateActor`, `CreateActorEgressPolicy` when rules are configured, store the bundle, `ResumeActor` |
 | `start_sandbox` | store the bundle of the new generation, `ResumeActor` |
 | `stop_sandbox`, `suspend_sandbox` | `SuspendActor` with synchronous durability; `RevertActor` for a `CRASHED` actor |
 | `delete_sandbox` | `DeleteActor`, drop the bundle |
@@ -106,7 +106,7 @@ authentication), `launch.rs` (the bundle store and the launch endpoint),
 src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
-docs/                 architecture
+docs/                 architecture, shortcomings
 examples/helpdesk/    the demo: a Python agent under OpenShell; the launcher and the templates
 harness/
   bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle for the demo without a gateway
@@ -371,47 +371,11 @@ sandbox and started the workload.
 
 ## Known gaps
 
-- **`no_new_privileges` has no `SecurityContext` field.** Neither runtime sets
-  it, by upstream's choice (parity with a Kubernetes container that allows
-  privilege escalation), so the launcher sets it with an unprivileged
-  `setpriv --no-new-privs`.
-- **`Linux.Seccomp`, `Process.ApparmorProfile` and `SelinuxLabel` are not
-  forwarded** to the kata agent. `Linux.Sysctl` is, but an ActorTemplate cannot
-  set it.
-- **A missing or full `WorkerPool` is silent.** The template's golden actor
-  waits for a worker with an empty status; `create_sandbox` fails after 180 s
-  with `deadline exceeded`.
-- **Templates are never garbage-collected.**
-- **A resume through the gateway restarts the workload.** The gateway mints a
-  new generation for every `start` and `resume`, and in OpenShell v0.1.7 a
-  dedicated supervisor has no way onto a running `openshell-sandbox`: the
-  sandbox holds its TLS identity and session id from its first bootstrap in
-  memory, the new tokens name the new generation, and only the shared-pool
-  takeover (not available to drivers) advances a session. `openshell-sandbox`
-  also answers `SuspendBoundary` with `Unimplemented`. So the launcher
-  restarts the supervisor and the sandbox for every new generation. The
-  actor itself is restored, not booted, and a Substrate-side suspend and
-  resume keeps the workload's memory, as the demo shows.
-- **A Substrate-side suspend of a gateway sandbox shows as `Provisioning`.**
-  The driver reports it as `Ready=False (DependenciesNotReady)`, so the
-  gateway keeps the sandbox's credentials and admits only `delete` until
-  Substrate resumes the actor (`kubectl-ate resume`, or whatever suspended
-  it); then the supervisor reconnects and the sandbox is `Ready` again with
-  its memory. Reported as a stop, the gateway would retire the credentials
-  and need a new generation.
-- **The old supervisor keeps retrying with retired credentials** between a
-  stop and the next start; the gateway logs a denied logon per attempt until
-  the launcher replaces it.
-- **Without the launch endpoint** (`driver-up.sh`, no `[launch]` section) a
-  sandbox's name is its id, `spec.command` is rejected, and a sandbox runs
-  with whatever credentials its image carries.
-- **The launch hop is plain HTTP inside the cluster.** The bundle travels
-  from atenet-egress to the driver's Service unencrypted; an `https` rule
-  with the trust-bundle `systemInfo` source would close that on a shared
-  network.
-- **GPU requests and `user_namespaces` are rejected.** The driver also does
-  not retry Substrate's `Aborted` (a concurrent update), and it acknowledges
-  only the default resource-admission policy.
+[`docs/shortcomings.md`](docs/shortcomings.md) lists what the driver, the
+launcher and the harness do not do, and which of it needs a change in
+OpenShell or Substrate. The two that matter most: a resume through the
+gateway restarts the workload, and only an image built like the helpdesk
+image runs.
 
 ## License
 

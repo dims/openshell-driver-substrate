@@ -18,7 +18,7 @@ sandbox's gateway-minted credentials from the driver after the restore, so
 one golden snapshot serves every sandbox and a stock gateway takes one to
 `Ready`. Nothing in OpenShell, Substrate, the guest kernel or kata is forked
 or patched; the one gap the demo image works around, `no_new_privs`, is in
-the README's known gaps.
+[shortcomings.md](shortcomings.md) with the rest.
 
 ## The big picture
 
@@ -121,8 +121,9 @@ the sandbox catalog, mints the per-sandbox launch credentials, and derives a
 sandbox's phase from the conditions the driver reports (`derive_phase`):
 `Ready=True` is Ready, `Suspended=True` without `Ready=True` is Stopped, a
 `Ready=False` with a reason on its transient allowlist is Provisioning, and
-one with any other reason is a sticky Error. It also times out provisioning at
-five minutes (`ProvisioningTimedOut`).
+one with any other reason is a sticky Error. Provisioning has 1800 s to
+reach the supervisor's first report and 300 s after it to reach Ready
+(`ProvisioningTimedOut`); after Ready there is no deadline.
 
 ### openshell-driver-substrate, this repository
 
@@ -166,6 +167,11 @@ is written against the gateway's phase rules and pinned by a table test:
 | SUSPENDING, SUSPENDED, by Substrate alone | `Ready=False` (DependenciesNotReady) | Provisioning: the gateway keeps the credentials, and the supervisor's return after a Substrate resume makes it Ready again |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
+
+The stopped mark is set when `SuspendActor` returns, so during the gateway's
+own stop the watch sees the Substrate-side row; the gateway ignores snapshots
+while Stopping. [shortcomings.md](shortcomings.md) has what that costs when a
+stop is cut short.
 
 ### Template synthesis, `src/template.rs`
 
@@ -618,10 +624,12 @@ sequenceDiagram
 
 Three things make this safe. The egress mints the actor JWT only for that
 actor's own request, so the driver knows who asks without a shared secret in
-any image. The driver hands out only that actor's bundle, over a route only
-the EgressPolicy allows. And the bundle files are owned by the sandbox user,
-mode 0600, on the writable rootfs or a durable dir, never in the golden
-snapshot; the sandbox consumes its bootstrap on read.
+any image. The driver hands out only that actor's bundle, and only to a
+caller with that actor's token. And the bundle files are mode 0600 on the
+writable rootfs or a durable dir, never in the golden snapshot; the sandbox
+consumes its bootstrap on read. The limits of this, the plain HTTP hop, the
+bearer token, one uid in both containers and the credentials inside per-actor
+snapshots, are in [shortcomings.md](shortcomings.md).
 
 The run without a gateway (`examples/helpdesk/run.sh`) has nothing to mint
 per sandbox. There `harness/bootstrap-gen` mints one bundle with a local
@@ -639,7 +647,9 @@ snapshot comes back dead in every restore, and Substrate reports the actor
 `RUNNING` all the same. The golden snapshot is taken at a fixed 20 s, whether
 or not the supervisor has attached by then. Read the worker pod's log:
 `Runtime-initiated Sandbox Protocol listener ready`, `Isolation boundary
-attached` and `PROC:LAUNCH` are the signs of a healthy golden actor.
+attached` and `PROC:LAUNCH` are the signs of a healthy golden actor. On the
+gateway path the golden actor runs only the two launchers, which have no
+bundle to fetch, so those lines appear per actor after the restore.
 
 Templates and their golden snapshots are never garbage-collected. The
 driver's content-hash naming keeps their number equal to the number of

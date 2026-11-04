@@ -251,8 +251,9 @@ pub struct SubstrateComputeDriver {
     /// The actors the gateway stopped or suspended. Any other suspension is
     /// Substrate's own and is reported as a wait, so the gateway keeps the
     /// sandbox's credentials for the supervisor's return. In memory: the
-    /// gateway holds its own Stopped and Suspended phases and ignores
-    /// snapshots in them, so a restart changes nothing it sees.
+    /// gateway holds its own Stopped and Suspended phases and ignores watch
+    /// snapshots in them, so a restart changes nothing on the watch path.
+    /// Its recovery reads after a restart do see the difference.
     stopped: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
@@ -517,9 +518,10 @@ type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>
 
 /// Project a Substrate `Actor` into the gateway-facing `DriverSandbox`
 /// shape. The actor is named by the sandbox id; the gateway's own name for
-/// it comes from the bundle when there is one, and the gateway refuses a
-/// snapshot that renames a sandbox. `spec` is `None`: the gateway already
-/// has the spec it gave us at create time.
+/// it comes from the bundle when there is one, and the gateway takes the
+/// name from every snapshot, so an actor without a bundle shows under its
+/// id. `spec` is `None`: the gateway already has the spec it gave us at
+/// create time.
 fn actor_to_driver_sandbox(
     actor: &ateapi::Actor,
     names: &HashMap<String, String>,
