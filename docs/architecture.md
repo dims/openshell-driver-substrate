@@ -169,15 +169,14 @@ is written against the gateway's phase rules and pinned by a table test:
 ### Template synthesis, `src/template.rs`
 
 Everything the golden snapshot depends on goes into the template, and nothing
-else: the image, the environment (`spec.environment`, then
-`spec.template.environment` over it, then `OPENSHELL_ENDPOINT` over both so a
-caller cannot redirect the gateway address), the worker selector, and the
-resource limits (the sandbox template's `cpu_limit` and `memory_limit` as
-Kubernetes quantities, or the driver's defaults). The template is encoded with
-prost, its metadata blanked, and hashed; the name is `oshl-` plus the first
-eight bytes of the SHA-256. Two sandboxes with the same inputs share one
-template and one golden snapshot. Any change to what the template contains
-gets a new one.
+else: the fragment, the image, the worker selector, and the resource limits
+(the sandbox template's `cpu_limit` and `memory_limit` as Kubernetes
+quantities, the fragment's, or the driver's defaults). The request's
+environment stays out: the bundle carries it to the workload. The template
+is encoded with prost, its metadata blanked, and hashed; the name is `oshl-`
+plus the first eight bytes of the SHA-256. Two sandboxes with the same inputs
+share one template and one golden snapshot. Any change to what the template
+contains gets a new one.
 
 Nothing per sandbox may be in a template. A snapshot freezes process memory,
 so a per-sandbox value baked into it would come back identical in every actor

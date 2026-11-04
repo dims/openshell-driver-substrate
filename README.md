@@ -244,8 +244,9 @@ makes the gateway's TLS pair and Ed25519 JWT keys, renders
 policy into ConfigMaps, labels the namespace for API access, gives the
 driver's ServiceAccount the `editor` role on the atespace, and installs the
 `openshell` CLI under `$WORK/bin`. Rerun it after `build.sh` or a driver
-change. Knobs: `WORK`, `REGISTRY`, `ATESPACE`, `OPENSHELL_VERSION`,
-`MODEL_HOST`, `MODEL_PORT`.
+change: the pod restarts, its database and bundles are on volumes, and the
+supervisors reconnect. Knobs: `WORK`, `REGISTRY`, `ATESPACE`,
+`OPENSHELL_VERSION`; the model host and port come from `out/helpdesk.env`.
 
 Then, with a port-forward to the gateway:
 
@@ -269,7 +270,9 @@ openshell sandbox delete alice
 The agent is reachable the demo's way too, with `kubectl-ate proxy actor`
 on the sandbox id (`openshell sandbox get alice -o json | jq -r .id`). The
 policy file matters: without one, the gateway's default Landlock rules do not
-cover `/opt/helpdesk` and the workload exits with `Permission denied`.
+cover `/opt/helpdesk` and the workload exits with `Permission denied`. The
+image must run as uid and gid 65532: the bundle names that identity and
+`openshell-sandbox` checks it.
 
 To run the driver on this host instead, against a port-forward to
 `ate-api-server` with a 24 h token, and talk to it with `grpcurl` over the
@@ -325,7 +328,9 @@ resume=...) published` when the files are in place. The driver logs `bundle
 handed out` for each delivery. A supervisor that dies logs its reason just
 before `the supervisor exited`; the SSH relay's socket, for example, must sit
 on the container's own filesystem, because a durable dir takes no Unix
-socket.
+socket. After `the supervisor exited` or `openshell-sandbox exited` the
+container is gone, nothing restarts it, and the actor stays `RUNNING` around
+it; delete the sandbox.
 
 ### DNS
 
@@ -400,6 +405,10 @@ sandbox and started the workload.
 - **Without the launch endpoint** (`driver-up.sh`, no `[launch]` section) a
   sandbox's name is its id, `spec.command` is rejected, and a sandbox runs
   with whatever credentials its image carries.
+- **The launch hop is plain HTTP inside the cluster.** The bundle travels
+  from atenet-egress to the driver's Service unencrypted; an `https` rule
+  with the trust-bundle `systemInfo` source would close that on a shared
+  network.
 - **GPU requests and `user_namespaces` are rejected.** The driver also does
   not retry Substrate's `Aborted` (a concurrent update), and it acknowledges
   only the default resource-admission policy.
