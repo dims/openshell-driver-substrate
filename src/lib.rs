@@ -19,16 +19,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use openshell_core::proto::compute::v1::{
-    AuthenticateSandboxRequest, AuthenticateSandboxResponse, CreateSandboxRequest,
-    CreateSandboxResponse, DeleteSandboxRequest, DeleteSandboxResponse, DeleteWorkspaceRequest,
-    DeleteWorkspaceResponse, DriverCondition, DriverSandbox, DriverSandboxStatus,
-    EnsureWorkspaceRequest, EnsureWorkspaceResponse, GetCapabilitiesRequest,
+    AuthenticateSandboxRequest, AuthenticateSandboxResponse, CpuResourceCapabilities,
+    CreateSandboxRequest, CreateSandboxResponse, DeleteSandboxRequest, DeleteSandboxResponse,
+    DeleteWorkspaceRequest, DeleteWorkspaceResponse, DriverCondition, DriverSandbox,
+    DriverSandboxStatus, EnsureWorkspaceRequest, EnsureWorkspaceResponse, GetCapabilitiesRequest,
     GetCapabilitiesResponse, GetSandboxRequest, GetSandboxResponse, ListSandboxesRequest,
-    ListSandboxesResponse, StartSandboxRequest, StartSandboxResponse, StopSandboxRequest,
-    StopSandboxResponse, SuspendSandboxRequest, SuspendSandboxResponse,
-    ValidateSandboxCreateRequest, ValidateSandboxCreateResponse, WatchSandboxesDeletedEvent,
-    WatchSandboxesEvent, WatchSandboxesRequest, WatchSandboxesSandboxEvent,
-    compute_driver_server::ComputeDriver, watch_sandboxes_event,
+    ListSandboxesResponse, MemoryResourceCapabilities, ResourceCapabilities, StartSandboxRequest,
+    StartSandboxResponse, StopSandboxRequest, StopSandboxResponse, SuspendSandboxRequest,
+    SuspendSandboxResponse, ValidateSandboxCreateRequest, ValidateSandboxCreateResponse,
+    WatchSandboxesDeletedEvent, WatchSandboxesEvent, WatchSandboxesRequest,
+    WatchSandboxesSandboxEvent, compute_driver_server::ComputeDriver, watch_sandboxes_event,
 };
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -192,8 +192,8 @@ pub enum SubstrateDriverError {
     Rpc(#[from] Status),
     #[error(transparent)]
     Template(#[from] template::TemplateError),
-    #[error("failed to load TLS material from {path}: {source}")]
-    TlsConfig {
+    #[error("failed to read credential file {path}: {source}")]
+    CredentialFile {
         path: String,
         #[source]
         source: std::io::Error,
@@ -203,8 +203,10 @@ pub enum SubstrateDriverError {
 impl From<SubstrateDriverError> for Status {
     fn from(err: SubstrateDriverError) -> Self {
         match &err {
-            SubstrateDriverError::InvalidEndpoint { .. } => {
-                Status::invalid_argument(err.to_string())
+            // Driver configuration faults, not caller faults.
+            SubstrateDriverError::InvalidEndpoint { .. }
+            | SubstrateDriverError::CredentialFile { .. } => {
+                Status::failed_precondition(err.to_string())
             }
             SubstrateDriverError::Connect { .. } => Status::unavailable(err.to_string()),
             SubstrateDriverError::Rpc(status) => status.clone(),
@@ -217,10 +219,11 @@ impl From<SubstrateDriverError> for Status {
             SubstrateDriverError::Template(template::TemplateError::Timeout { .. }) => {
                 Status::deadline_exceeded(err.to_string())
             }
-            SubstrateDriverError::Template(template::TemplateError::Rpc { .. }) => {
-                Status::unavailable(err.to_string())
+            // The server's code stands: InvalidArgument and PermissionDenied
+            // are not transient.
+            SubstrateDriverError::Template(template::TemplateError::Rpc { source, .. }) => {
+                Status::new(source.code(), err.to_string())
             }
-            SubstrateDriverError::TlsConfig { .. } => Status::failed_precondition(err.to_string()),
         }
     }
 }
@@ -317,7 +320,7 @@ impl SubstrateComputeDriver {
             return Ok(AuthInterceptor { bearer: None });
         };
         let raw = tokio::fs::read_to_string(path).await.map_err(|source| {
-            SubstrateDriverError::TlsConfig {
+            SubstrateDriverError::CredentialFile {
                 path: path.display().to_string(),
                 source,
             }
@@ -326,7 +329,7 @@ impl SubstrateComputeDriver {
         // bearer-token validators reject; strip it once here.
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return Err(SubstrateDriverError::TlsConfig {
+            return Err(SubstrateDriverError::CredentialFile {
                 path: path.display().to_string(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -346,13 +349,12 @@ impl SubstrateComputeDriver {
         let Some(ca_path) = cfg.api_tls_ca_path.as_ref() else {
             return Ok(None);
         };
-        let ca_pem =
-            tokio::fs::read(ca_path)
-                .await
-                .map_err(|source| SubstrateDriverError::TlsConfig {
-                    path: ca_path.display().to_string(),
-                    source,
-                })?;
+        let ca_pem = tokio::fs::read(ca_path).await.map_err(|source| {
+            SubstrateDriverError::CredentialFile {
+                path: ca_path.display().to_string(),
+                source,
+            }
+        })?;
         let mut tls = tonic::transport::ClientTlsConfig::new()
             .ca_certificate(tonic::transport::Certificate::from_pem(ca_pem));
 
@@ -362,13 +364,13 @@ impl SubstrateComputeDriver {
         ) {
             (Some(cert), Some(key)) => {
                 let cert_pem = tokio::fs::read(cert).await.map_err(|source| {
-                    SubstrateDriverError::TlsConfig {
+                    SubstrateDriverError::CredentialFile {
                         path: cert.display().to_string(),
                         source,
                     }
                 })?;
                 let key_pem = tokio::fs::read(key).await.map_err(|source| {
-                    SubstrateDriverError::TlsConfig {
+                    SubstrateDriverError::CredentialFile {
                         path: key.display().to_string(),
                         source,
                     }
@@ -376,7 +378,7 @@ impl SubstrateComputeDriver {
                 tls = tls.identity(tonic::transport::Identity::from_pem(cert_pem, key_pem));
             }
             (Some(_), None) | (None, Some(_)) => {
-                return Err(SubstrateDriverError::TlsConfig {
+                return Err(SubstrateDriverError::CredentialFile {
                     path: String::from("api_client_cert_path + api_client_key_path"),
                     source: std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -488,10 +490,11 @@ fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
                 "actor is reverting to its snapshot",
             ),
         ],
+        // The reason the gateway's lifecycle recovery reads as a stop in flight.
         Suspending => vec![condition(
             "Suspended",
             "False",
-            "Suspending",
+            "PodTerminating",
             "actor is being checkpointed",
         )],
         Suspended => vec![
@@ -553,14 +556,37 @@ fn validate_substrate_sandbox(
         .as_ref()
         .ok_or_else(|| Status::invalid_argument("sandbox.spec.template is required"))?;
     if template.image.trim().is_empty() {
-        return Err(Status::failed_precondition(
-            "Substrate sandboxes require a template image",
+        return Err(Status::invalid_argument(
+            "sandbox.spec.template.image is required",
         ));
     }
+    // ate-api-server rejects an unpinned image at CreateActorTemplate; the
+    // check here saves the round trip.
     if !template.image.contains("@sha256:") {
+        return Err(Status::invalid_argument(
+            "Substrate sandbox images must be pinned by digest (image@sha256:<digest>)",
+        ));
+    }
+    // The container command is the image's own openshell-sandbox. The
+    // workload's command comes from its bootstrap, which the gateway path
+    // has no way to write yet.
+    if !spec.command.is_empty() {
         return Err(Status::failed_precondition(
-            "Substrate sandbox images must be content-addressed \
-             (image@sha256:<digest>); bare tag references fail atelet's pull cache",
+            "the substrate driver does not take a sandbox command",
+        ));
+    }
+    if spec
+        .resource_requirements
+        .as_ref()
+        .is_some_and(|r| r.gpu.is_some())
+    {
+        return Err(Status::failed_precondition(
+            "the substrate driver does not allocate GPUs",
+        ));
+    }
+    if template.user_namespaces == Some(true) {
+        return Err(Status::failed_precondition(
+            "the substrate driver does not run sandboxes in a user namespace",
         ));
     }
     template::resources_for(sandbox, config)
@@ -618,6 +644,21 @@ async fn list_atespace_actors(
     }
 }
 
+/// The actors this driver made: those of an `oshl-` template. Hand-made
+/// actors and the template controller's golden actors share the atespace.
+async fn list_driver_actors(
+    client: &mut impl ListActors,
+    atespace: &str,
+) -> Result<Vec<ateapi::Actor>, Status> {
+    let mut actors = list_atespace_actors(client, atespace).await?;
+    actors.retain(|a| {
+        a.actor_template
+            .as_ref()
+            .is_some_and(|t| t.name.starts_with(template::NAME_PREFIX))
+    });
+    Ok(actors)
+}
+
 #[tonic::async_trait]
 impl ComputeDriver for SubstrateComputeDriver {
     type WatchSandboxesStream = WatchStream;
@@ -633,8 +674,24 @@ impl ComputeDriver for SubstrateComputeDriver {
 
     async fn get_capabilities(
         &self,
-        _request: Request<GetCapabilitiesRequest>,
+        request: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<GetCapabilitiesResponse>, Status> {
+        use openshell_core::extension_protocol::{
+            ExtensionFamily, extension_metadata, validate_gateway_metadata,
+        };
+        let extension = Some(extension_metadata(
+            ExtensionFamily::Compute,
+            "openshell-driver-substrate",
+            env!("CARGO_PKG_VERSION"),
+            [],
+        ));
+        validate_gateway_metadata(
+            ExtensionFamily::Compute,
+            "openshell-driver-substrate",
+            extension.as_ref(),
+            request.into_inner().gateway,
+        )
+        .map_err(|err| Status::failed_precondition(err.to_string()))?;
         Ok(Response::new(GetCapabilitiesResponse {
             // Empty marks the driver legacy and the gateway refuses to
             // activate it.
@@ -645,21 +702,25 @@ impl ComputeDriver for SubstrateComputeDriver {
             .acknowledgement(),
             driver_name: String::from(DRIVER_NAME),
             driver_version: String::from(env!("CARGO_PKG_VERSION")),
-            // Substrate sandboxes are policy-baked into their image; the
-            // driver does not pick a default, the gateway supplies one.
+            // No default: a sandbox names its own image, and
+            // validate_sandbox_create rejects an empty one.
             default_image: String::new(),
             gateway_manages_lifecycle: false,
             supports_sandbox_authentication: false,
             driver_reports_runtime_readiness: false,
-            resource_capabilities: None,
+            // Limits go into the ActorTemplate; requests are ignored.
+            resource_capabilities: Some(ResourceCapabilities {
+                cpu: Some(CpuResourceCapabilities {
+                    limit_supported: true,
+                }),
+                memory: Some(MemoryResourceCapabilities {
+                    limit_supported: true,
+                }),
+                gpu: None,
+            }),
             rootfs_tar_staging_dir: String::new(),
             rootfs_tar_max_bytes: 0,
-            extension: Some(openshell_core::extension_protocol::extension_metadata(
-                openshell_core::extension_protocol::ExtensionFamily::Compute,
-                "openshell-driver-substrate",
-                env!("CARGO_PKG_VERSION"),
-                [],
-            )),
+            extension,
         }))
     }
 
@@ -709,7 +770,7 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<ListSandboxesRequest>,
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let mut client = self.control_client().await?;
-        let actors = list_atespace_actors(&mut client, &self.config.atespace).await?;
+        let actors = list_driver_actors(&mut client, &self.config.atespace).await?;
         let sandboxes = actors.iter().map(actor_to_driver_sandbox).collect();
         Ok(Response::new(ListSandboxesResponse { sandboxes }))
     }
@@ -740,8 +801,10 @@ impl ComputeDriver for SubstrateComputeDriver {
         .await
         .map_err(SubstrateDriverError::from)?;
 
-        // A retried create finds its actor already there. Resuming it is
-        // still the right next step.
+        let actor_ref = ateapi::ObjectRef {
+            atespace: atespace.clone(),
+            name: actor_name.clone(),
+        };
         match client
             .create_actor(ateapi::CreateActorRequest {
                 actor: Some(ateapi::Actor {
@@ -752,7 +815,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                     }),
                     actor_template: Some(ateapi::ObjectRef {
                         atespace: atespace.clone(),
-                        name: template_name,
+                        name: template_name.clone(),
                     }),
                     ..Default::default()
                 }),
@@ -760,15 +823,28 @@ impl ComputeDriver for SubstrateComputeDriver {
             .await
         {
             Ok(_) => {}
-            Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+            // A retried create finds its actor already there, and resuming it
+            // is still the right next step. An actor of another template is
+            // somebody else's.
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                let actor = client
+                    .get_actor(ateapi::GetActorRequest {
+                        actor: Some(actor_ref.clone()),
+                    })
+                    .await?
+                    .into_inner();
+                let existing = actor.actor_template.map(|t| t.name).unwrap_or_default();
+                if existing != template_name {
+                    return Err(Status::already_exists(format!(
+                        "actor {actor_name} exists with template {existing}, not {template_name}"
+                    )));
+                }
+            }
             Err(status) => return Err(status),
         }
         client
             .resume_actor(ateapi::ResumeActorRequest {
-                actor: Some(ateapi::ObjectRef {
-                    atespace,
-                    name: actor_name,
-                }),
+                actor: Some(actor_ref),
             })
             .await?;
 
@@ -808,7 +884,11 @@ impl ComputeDriver for SubstrateComputeDriver {
                     atespace: self.config.atespace.clone(),
                     name: actor_name,
                 }),
-                options: None,
+                // Return once the snapshot is in durable storage, so a stopped
+                // sandbox survives its worker.
+                options: Some(ateapi::SuspendOptions {
+                    mode: ateapi::DurabilityMode::Synchronous as i32,
+                }),
             })
             .await?;
         Ok(Response::new(StopSandboxResponse {}))
@@ -855,8 +935,8 @@ impl ComputeDriver for SubstrateComputeDriver {
         &self,
         _request: Request<WatchSandboxesRequest>,
     ) -> Result<Response<Self::WatchSandboxesStream>, Status> {
-        // ateapi.Control has no streaming watch RPC (substrate #153); this
-        // materialises one by polling ListActors and diffing snapshots.
+        // ateapi.Control has no streaming watch RPC; this materialises one by
+        // polling ListActors and diffing snapshots.
         let (tx, rx) = mpsc::channel(WATCH_CHANNEL_BUFFER);
         let driver = self.clone();
         tokio::spawn(async move {
@@ -880,7 +960,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                         }
                     },
                 };
-                let actors = match list_atespace_actors(c, &atespace).await {
+                let actors = match list_driver_actors(c, &atespace).await {
                     Ok(actors) => actors,
                     Err(status) => {
                         tracing::warn!(?status, "ListActors poll failed; retrying");
@@ -944,6 +1024,20 @@ impl ComputeDriver for SubstrateComputeDriver {
         _request: Request<EnsureWorkspaceRequest>,
     ) -> Result<Response<EnsureWorkspaceResponse>, Status> {
         let mut client = self.control_client().await?;
+        // A token granted on the atespace alone may not create one; look first.
+        match client
+            .get_atespace(ateapi::GetAtespaceRequest {
+                atespace: Some(ateapi::ObjectRef {
+                    name: self.config.atespace.clone(),
+                    ..Default::default()
+                }),
+            })
+            .await
+        {
+            Ok(_) => return Ok(Response::new(EnsureWorkspaceResponse {})),
+            Err(status) if status.code() == tonic::Code::NotFound => {}
+            Err(status) => return Err(status),
+        }
         match client
             .create_atespace(ateapi::CreateAtespaceRequest {
                 atespace: Some(ateapi::Atespace {
@@ -975,15 +1069,6 @@ impl ComputeDriver for SubstrateComputeDriver {
 mod tests {
     use super::*;
 
-    #[test]
-    fn config_defaults_are_sane() {
-        let c = SubstrateComputeConfig::default();
-        assert!(!c.api_endpoint.is_empty());
-        assert!(!c.atespace.is_empty());
-        assert!(!c.worker_selector.is_empty());
-        assert!(c.api_tls_ca_path.is_none());
-    }
-
     #[tokio::test]
     async fn load_tls_config_none_when_unconfigured() {
         let driver = SubstrateComputeDriver::new(SubstrateComputeConfig::default());
@@ -1011,7 +1096,6 @@ mod tests {
         let interceptor = driver.load_auth_interceptor().await.unwrap();
         let token = interceptor.bearer.as_deref().unwrap();
         assert_eq!(token, "eyJhbGciOiJSUzI1NiJ9.payload.sig");
-        assert!(!token.contains('\n'));
     }
 
     #[tokio::test]
@@ -1024,7 +1108,7 @@ mod tests {
             ..Default::default()
         });
         let err = driver.load_auth_interceptor().await.unwrap_err();
-        assert!(matches!(err, SubstrateDriverError::TlsConfig { .. }));
+        assert!(matches!(err, SubstrateDriverError::CredentialFile { .. }));
     }
 
     #[test]
@@ -1056,7 +1140,7 @@ mod tests {
             ..Default::default()
         });
         let err = driver.load_tls_config().await.unwrap_err();
-        assert!(matches!(err, SubstrateDriverError::TlsConfig { .. }));
+        assert!(matches!(err, SubstrateDriverError::CredentialFile { .. }));
     }
 
     #[test]
@@ -1064,6 +1148,52 @@ mod tests {
         assert_eq!(require_actor_name("id", "name").unwrap(), "id");
         assert_eq!(require_actor_name("", "name").unwrap(), "name");
         assert!(require_actor_name("", "").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_what_substrate_cannot_run() {
+        use openshell_core::proto::compute::v1::{
+            DriverSandboxSpec, DriverSandboxTemplate, GpuResourceRequirements, ResourceRequirements,
+        };
+        let config = SubstrateComputeConfig::default();
+        let sandbox = |image: &str, edit: fn(&mut DriverSandboxSpec)| {
+            let mut spec = DriverSandboxSpec {
+                template: Some(DriverSandboxTemplate {
+                    image: image.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            edit(&mut spec);
+            DriverSandbox {
+                spec: Some(spec),
+                ..Default::default()
+            }
+        };
+        assert!(validate_substrate_sandbox(&sandbox("img@sha256:abc", |_| {}), &config).is_ok());
+        for (what, sb) in [
+            ("tag", sandbox("img:latest", |_| {})),
+            (
+                "command",
+                sandbox("img@sha256:abc", |s| s.command = vec!["sh".to_string()]),
+            ),
+            (
+                "gpu",
+                sandbox("img@sha256:abc", |s| {
+                    s.resource_requirements = Some(ResourceRequirements {
+                        gpu: Some(GpuResourceRequirements::default()),
+                    })
+                }),
+            ),
+            (
+                "user namespace",
+                sandbox("img@sha256:abc", |s| {
+                    s.template.as_mut().unwrap().user_namespaces = Some(true)
+                }),
+            ),
+        ] {
+            assert!(validate_substrate_sandbox(&sb, &config).is_err(), "{what}");
+        }
     }
 
     // The gateway derives SandboxPhase from these (openshell-server

@@ -80,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::new(&args.log_level))
         .init();
 
-    let worker_selector = args
+    let worker_selector: std::collections::BTreeMap<String, String> = args
         .worker_selector
         .split(',')
         .filter(|kv| !kv.is_empty())
@@ -90,6 +90,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("--worker-selector: {kv:?} is not key=value"))
         })
         .collect::<Result<_, _>>()?;
+    if worker_selector.is_empty() {
+        return Err("--worker-selector needs at least one key=value".into());
+    }
     let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
         api_endpoint: args.api_endpoint,
         atespace: args.atespace,
@@ -106,6 +109,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(parent) = args.bind_socket.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    // A stale socket from an earlier run is removed; a live one is not.
+    if tokio::net::UnixStream::connect(&args.bind_socket)
+        .await
+        .is_ok()
+    {
+        return Err(format!("{} is already served", args.bind_socket.display()).into());
     }
     let _ = std::fs::remove_file(&args.bind_socket);
     let listener = tokio::net::UnixListener::bind(&args.bind_socket)?;

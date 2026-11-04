@@ -77,13 +77,17 @@ async fn wait_for(driver: &SubstrateComputeDriver, id: &str, kind: &str) -> bool
 #[ignore = "needs SUBSTRATE_LIVE_* and a running ate-api-server"]
 async fn capabilities() {
     let Some(live) = live() else { return };
+    use openshell_core::extension_protocol::{ExtensionFamily, gateway_metadata};
     let caps = SubstrateComputeDriver::new(live.config)
-        .get_capabilities(Request::new(GetCapabilitiesRequest { gateway: None }))
+        .get_capabilities(Request::new(GetCapabilitiesRequest {
+            gateway: Some(gateway_metadata(ExtensionFamily::Compute)),
+        }))
         .await
         .expect("get_capabilities")
         .into_inner();
     assert_eq!(caps.driver_name, "substrate");
     assert!(caps.extension.is_some());
+    assert!(caps.resource_capabilities.is_some());
     assert!(caps.resource_admission_policy.starts_with("v1:"));
 }
 

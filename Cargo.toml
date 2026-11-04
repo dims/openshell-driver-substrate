@@ -7,7 +7,8 @@ members = ["harness/bootstrap-gen"]
 # Genuine upstream OpenShell, unmodified. One rev for the driver and for
 # bootstrap-gen, so the credentials it mints match the binaries in the images.
 [workspace.dependencies]
-openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
+# No default features: they add telemetry and an HTTP client nothing here uses.
+openshell-core = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c", default-features = false }
 openshell-sandbox-backend = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
 openshell-isolation-interface = { git = "https://github.com/NVIDIA/OpenShell", rev = "5d25211b25a8fc887e8d5c606d57d6ab22f1d76c" }
 
@@ -26,19 +27,19 @@ name = "openshell-driver-substrate"
 path = "src/main.rs"
 
 [dependencies]
-# The driver only needs the generated compute-driver proto types and a couple
-# of env-var-name constants; it registers as an out-of-process driver
-# (ComputeDriverServer over a socket), so no gateway code or fork is needed.
+# The compute-driver proto types, driver_utils, resource_admission and
+# extension_protocol. The driver registers out of process (ComputeDriverServer
+# over a socket), so no gateway code or fork is needed.
 openshell-core = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1.53", features = ["full"] }
-# `tls-native-roots` pulls in tonic's rustls-based TLS stack with the
-# host's system trust roots, which is the minimum needed to dial
-# https://ate-api-server endpoints under a custom CA.
-tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "fs", "net", "time", "sync"] }
+# rustls with aws-lc for the TLS to ate-api-server. The CA always comes from
+# --api-tls-ca, so no root store is needed.
+tonic = { version = "0.14", features = ["transport", "tls-aws-lc"] }
 tonic-prost = "0.14"
 prost = "0.14"
+# Not named in src; the generated client uses it for Timestamp.
 prost-types = "0.14"
 # Already in the graph through openshell-core; declared here for the template name.
 sha2 = "0.10"

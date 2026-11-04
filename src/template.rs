@@ -30,10 +30,12 @@ use crate::{ControlClient, SubstrateComputeConfig, ateapi};
 
 const READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Every template this driver makes is named `oshl-` plus a hash.
+pub const NAME_PREFIX: &str = "oshl-";
+
 /// Everything the golden snapshot depends on.
 struct Inputs {
     image: String,
-    command: Vec<String>,
     env: BTreeMap<String, String>,
     limits: ateapi::Resources,
 }
@@ -63,7 +65,6 @@ fn inputs_for(
 
     Ok(Inputs {
         image: template_spec.map(|t| t.image.clone()).unwrap_or_default(),
-        command: spec.map(|s| s.command.clone()).unwrap_or_default(),
         env,
         limits: resources_for(sandbox, config)?,
     })
@@ -90,14 +91,16 @@ pub fn resources_for(
     Ok(ateapi::Resources {
         cpu_millicores: match cpu {
             Some(q) => cpu_millicores(q).ok_or_else(|| {
-                TemplateError::InvalidSpec(format!("cpu_limit {q:?} is not a Kubernetes quantity"))
+                TemplateError::InvalidSpec(format!(
+                    "cpu_limit {q:?}: expected a positive quantity such as 2, 0.5 or 500m"
+                ))
             })?,
             None => config.default_cpu_millicores,
         },
         memory_bytes: match memory {
             Some(q) => memory_bytes(q).ok_or_else(|| {
                 TemplateError::InvalidSpec(format!(
-                    "memory_limit {q:?} is not a Kubernetes quantity"
+                    "memory_limit {q:?}: expected a positive integer, with Ki, Mi, Gi, Ti, k, M, G or T"
                 ))
             })?,
             None => config.default_memory_bytes,
@@ -105,13 +108,21 @@ pub fn resources_for(
     })
 }
 
-/// A Kubernetes CPU quantity as millicores: "2", "0.5", "500m".
+fn digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A Kubernetes CPU quantity as millicores: "2", "0.5", "500m". Finer than a
+/// millicore, zero, or signed is rejected.
 fn cpu_millicores(q: &str) -> Option<i64> {
     if let Some(m) = q.strip_suffix('m') {
+        if !digits(m) {
+            return None;
+        }
         return m.parse::<i64>().ok().filter(|v| *v > 0);
     }
     let (whole, frac) = q.split_once('.').unwrap_or((q, ""));
-    if frac.len() > 3 || !frac.chars().all(|c| c.is_ascii_digit()) {
+    if !digits(whole) || frac.len() > 3 || !frac.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let whole: i64 = whole.parse().ok()?;
@@ -120,11 +131,14 @@ fn cpu_millicores(q: &str) -> Option<i64> {
     } else {
         format!("{frac:0<3}").parse().ok()?
     };
-    Some(whole * 1000 + frac).filter(|v| *v > 0)
+    whole
+        .checked_mul(1000)?
+        .checked_add(frac)
+        .filter(|v| *v > 0)
 }
 
-/// A Kubernetes memory quantity as bytes: an integer, with a binary (Ki, Mi,
-/// Gi, Ti) or decimal (k, M, G, T) suffix or none.
+/// A Kubernetes memory quantity as bytes: an unsigned integer, with a binary
+/// (Ki, Mi, Gi, Ti) or decimal (k, M, G, T) suffix or none.
 fn memory_bytes(q: &str) -> Option<i64> {
     const SUFFIXES: [(&str, i64); 8] = [
         ("Ki", 1 << 10),
@@ -140,6 +154,9 @@ fn memory_bytes(q: &str) -> Option<i64> {
         .iter()
         .find_map(|(suffix, scale)| q.strip_suffix(suffix).map(|n| (n, *scale)))
         .unwrap_or((q, 1));
+    if !digits(number) {
+        return None;
+    }
     number
         .parse::<i64>()
         .ok()?
@@ -158,7 +175,7 @@ pub fn name_for(
     template.metadata = None;
     let digest = Sha256::digest(template.encode_to_vec());
     let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("oshl-{hex}"))
+    Ok(format!("{NAME_PREFIX}{hex}"))
 }
 
 /// Build an `ActorTemplate` from the sandbox spec and driver config. Pure:
@@ -188,7 +205,8 @@ pub fn synthesize(
         containers: vec![ateapi::Container {
             name: "sandbox".to_string(),
             image: inputs.image,
-            command: inputs.command,
+            // The image's own entrypoint: openshell-sandbox.
+            command: vec![],
             args: vec![],
             env,
             wakeup_probe: None,
@@ -247,7 +265,8 @@ pub enum TemplateError {
 /// Ensure a template named `name` exists in `atespace`, creating it from
 /// `sandbox` if not already present, then block until its golden snapshot is
 /// ready (or failed / timed out). Idempotent: a second call with the same
-/// name and an existing, healthy template is a single `GetActorTemplate`.
+/// name and an existing, healthy template is `CreateActorTemplate`
+/// (`AlreadyExists`) and one `GetActorTemplate`.
 pub async fn ensure_ready(
     client: &mut ControlClient,
     name: &str,
@@ -295,6 +314,20 @@ pub async fn ensure_ready(
             && let Some(golden) = status.golden_snapshot_status.as_ref()
         {
             if !golden.error_message.is_empty() {
+                // Terminal. Delete the template so the next create rebuilds
+                // the golden snapshot instead of finding this failure again.
+                if let Err(status) = client
+                    .delete_actor_template(ateapi::DeleteActorTemplateRequest {
+                        actor_template: Some(ateapi::ObjectRef {
+                            atespace: atespace.to_string(),
+                            name: name.to_string(),
+                        }),
+                        options: None,
+                    })
+                    .await
+                {
+                    tracing::warn!(%atespace, %name, %status, "failed template not deleted");
+                }
                 return Err(TemplateError::PhaseFailed {
                     atespace: atespace.to_string(),
                     name: name.to_string(),
@@ -323,11 +356,10 @@ mod tests {
 
     use super::*;
 
-    fn sandbox(image: &str, command: &[&str], env: &[(&str, &str)]) -> DriverSandbox {
+    fn sandbox(image: &str, env: &[(&str, &str)]) -> DriverSandbox {
         DriverSandbox {
             id: "sb-1".to_string(),
             spec: Some(DriverSandboxSpec {
-                command: command.iter().map(|s| s.to_string()).collect(),
                 sandbox_token: "gateway-minted-jwt".to_string(),
                 environment: env
                     .iter()
@@ -359,8 +391,8 @@ mod tests {
     #[test]
     fn name_is_stable_and_dns_safe() {
         let config = SubstrateComputeConfig::default();
-        let name = name_for(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config).unwrap();
-        assert_eq!(name, "oshl-349c004eb3dbc071");
+        let name = name_for(&sandbox("img@sha256:abc", &[]), &config).unwrap();
+        assert_eq!(name, "oshl-a608eea347a94582");
         assert!(
             name.chars()
                 .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
@@ -371,59 +403,34 @@ mod tests {
     fn name_covers_everything_the_snapshot_depends_on() {
         let config = SubstrateComputeConfig::default();
         let name = |sb: &DriverSandbox, c: &SubstrateComputeConfig| name_for(sb, c).unwrap();
-        let base = name(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &config);
+        let base = name(&sandbox("img@sha256:abc", &[]), &config);
+        assert_ne!(base, name(&sandbox("img@sha256:def", &[]), &config));
         assert_ne!(
             base,
-            name(&sandbox("img@sha256:def", &["/bin/foo"], &[]), &config)
-        );
-        assert_ne!(
-            base,
-            name(&sandbox("img@sha256:abc", &["/bin/bar"], &[]), &config)
-        );
-        assert_ne!(
-            base,
-            name(
-                &sandbox("img@sha256:abc", &["/bin/foo"], &[("A", "1")]),
-                &config
-            )
+            name(&sandbox("img@sha256:abc", &[("A", "1")]), &config)
         );
         assert_ne!(
             base,
             name(
-                &with_limits(sandbox("img@sha256:abc", &["/bin/foo"], &[]), "2", ""),
+                &with_limits(sandbox("img@sha256:abc", &[]), "2", ""),
                 &config
             )
         );
         // Environment order does not matter; the endpoint does.
         assert_eq!(
-            name(
-                &sandbox("i@sha256:a", &[], &[("A", "1"), ("B", "2")]),
-                &config
-            ),
-            name(
-                &sandbox("i@sha256:a", &[], &[("B", "2"), ("A", "1")]),
-                &config
-            )
+            name(&sandbox("i@sha256:a", &[("A", "1"), ("B", "2")]), &config),
+            name(&sandbox("i@sha256:a", &[("B", "2"), ("A", "1")]), &config)
         );
         let with_endpoint = SubstrateComputeConfig {
             gateway_endpoint: "gateway:443".to_string(),
             ..SubstrateComputeConfig::default()
         };
-        assert_ne!(
-            base,
-            name(
-                &sandbox("img@sha256:abc", &["/bin/foo"], &[]),
-                &with_endpoint
-            )
-        );
+        assert_ne!(base, name(&sandbox("img@sha256:abc", &[]), &with_endpoint));
         let other_pool = SubstrateComputeConfig {
             worker_selector: BTreeMap::from([("workload".to_string(), "other".to_string())]),
             ..SubstrateComputeConfig::default()
         };
-        assert_ne!(
-            base,
-            name(&sandbox("img@sha256:abc", &["/bin/foo"], &[]), &other_pool)
-        );
+        assert_ne!(base, name(&sandbox("img@sha256:abc", &[]), &other_pool));
     }
 
     // Two sandboxes with the same inputs share one template and one
@@ -434,7 +441,7 @@ mod tests {
             gateway_endpoint: "gateway:443".to_string(),
             ..SubstrateComputeConfig::default()
         };
-        let sb = sandbox("img@sha256:abc", &["/bin/foo"], &[("CALLER", "x")]);
+        let sb = sandbox("img@sha256:abc", &[("CALLER", "x")]);
         let tmpl = synthesize("oshl-abc123", "ws", &sb, &config).unwrap();
         let env = &tmpl.containers[0].env;
         let get = |k: &str| env.iter().find(|e| e.name == k).map(|e| e.value.as_str());
@@ -481,7 +488,7 @@ mod tests {
     #[test]
     fn resources_follow_the_spec_limits_or_the_defaults() {
         let config = SubstrateComputeConfig::default();
-        let sb = with_limits(sandbox("img@sha256:abc", &[], &[]), "500m", "256Mi");
+        let sb = with_limits(sandbox("img@sha256:abc", &[]), "500m", "256Mi");
         assert_eq!(
             resources_for(&sb, &config).unwrap(),
             ateapi::Resources {
@@ -489,7 +496,7 @@ mod tests {
                 memory_bytes: 256 << 20,
             }
         );
-        let partial = with_limits(sandbox("img@sha256:abc", &[], &[]), "", "1Gi");
+        let partial = with_limits(sandbox("img@sha256:abc", &[]), "", "1Gi");
         assert_eq!(
             resources_for(&partial, &config).unwrap(),
             ateapi::Resources {
@@ -497,7 +504,7 @@ mod tests {
                 memory_bytes: 1 << 30,
             }
         );
-        let bad = with_limits(sandbox("img@sha256:abc", &[], &[]), "two", "");
+        let bad = with_limits(sandbox("img@sha256:abc", &[]), "two", "");
         assert!(matches!(
             resources_for(&bad, &config),
             Err(TemplateError::InvalidSpec(_))
@@ -514,6 +521,9 @@ mod tests {
             ("0", None),
             ("x", None),
             ("1.2345", None),
+            ("-0.5", None),
+            ("+1", None),
+            ("9223372036854775807", None),
         ] {
             assert_eq!(cpu_millicores(q), want, "cpu {q:?}");
         }
@@ -525,6 +535,7 @@ mod tests {
             ("12", Some(12)),
             ("1Gib", None),
             ("0", None),
+            ("-1Gi", None),
         ] {
             assert_eq!(memory_bytes(q), want, "memory {q:?}");
         }
