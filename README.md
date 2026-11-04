@@ -248,8 +248,8 @@ makes the gateway's TLS pair and Ed25519 JWT keys, renders
 into ConfigMaps, labels the namespace for API access, gives the driver's
 ServiceAccount the `editor` role on the atespace, and installs the `openshell`
 CLI under `$WORK/bin`. Rerun it after `runtime/build.sh` or a driver change:
-the pod restarts, its database and bundles are on volumes, and the
-supervisors reconnect. Knobs: `WORK`, `REGISTRY`, `ATESPACE`,
+the pod restarts, its database, its credential key and the driver's bundles
+are on volumes, and the supervisors reconnect. Knobs: `WORK`, `REGISTRY`, `ATESPACE`,
 `OPENSHELL_VERSION`, `MODEL_HOST`, `MODEL_PORT`.
 
 Then, with a port-forward to the gateway:

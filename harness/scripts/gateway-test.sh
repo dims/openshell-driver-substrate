@@ -27,7 +27,10 @@ os() {  # the CLI against the port-forward; the harness CA is self-signed, so ev
   [ -z "$out" ] || grep -v 'TLS certificate verification' <<<"$out" || true
   return $st
 }
-getj() { openshell --gateway-endpoint "https://127.0.0.1:$GW_PORT" --gateway-insecure sandbox get alice -o json 2>/dev/null; }
+getj() {  # the warning lands on stdout too
+  openshell --gateway-endpoint "https://127.0.0.1:$GW_PORT" --gateway-insecure sandbox get alice -o json 2>/dev/null |
+    grep -v 'TLS certificate verification'
+}
 phase() { getj | jq -c '{phase, conditions: [.conditions[]? | "\(.type)=\(.status) \(.reason)"]}'; }
 wait_phase() {  # phase seconds
   local ph='' i

@@ -1,8 +1,9 @@
 # The stock OpenShell gateway and this driver in one pod, as OpenShell's own
 # e2e runs an external driver: the driver serves ComputeDriver on a socket in
 # a shared emptyDir, and its launch endpoint on a port. Both images run as
-# uid 1000, so the socket is writable by both. The gateway's database and the
-# driver's bundles live on volumes, so a new pod keeps every sandbox.
+# uid 1000, so the socket is writable by both. The gateway's database and
+# credential key and the driver's bundles live on volumes, so a new pod keeps
+# every sandbox.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

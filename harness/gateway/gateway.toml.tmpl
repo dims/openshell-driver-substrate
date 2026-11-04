@@ -1,7 +1,8 @@
 # The stock gateway, for the kind harness: TLS with the harness CA, no user
 # authentication, session tokens that do not expire (a supervisor restored
-# from a snapshot reconnects with the one it has), and the driver on the
-# socket the two containers share.
+# from a snapshot reconnects with the one it has), the driver on the socket
+# the two containers share, and the credential store's key on the database
+# volume, so a new pod can read what the old one wrote.
 [openshell]
 version = 2
 
@@ -27,3 +28,8 @@ gateway_id = "kind"
 
 [openshell.drivers.substrate]
 socket_path = "/var/run/openshell-compute/driver/driver.sock"
+
+[openshell.gateway.credential_storage]
+# In its own directory: the gateway makes that directory 0700, and the
+# volume's root is not its to change.
+key_encryption_key_path = "/var/openshell/credentials/key-encryption-key.bin"
