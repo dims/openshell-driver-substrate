@@ -38,10 +38,11 @@ working one. The sandbox's resolver is `127.0.0.53` with no search domains,
 so the workload uses fully qualified names.
 
 The workload is reached through the gateway: `openshell sandbox exec` runs a
-command inside the sandbox over the supervisor's SSH relay, and `openshell
-sandbox ssh-config` prints an SSH host entry for the same relay. Substrate's
-router cannot reach it: the sandbox's network broker refuses `accept(2)` from
-a non-loopback peer.
+command inside the sandbox over the supervisor's SSH relay, `openshell
+sandbox ssh-config` prints an SSH host entry for the same relay, and
+`openshell forward start <port>` forwards a local port over it (not tried
+through this driver yet). Substrate's router cannot reach it: the sandbox's
+network broker refuses `accept(2)` from a non-loopback peer.
 
 ## The launcher
 

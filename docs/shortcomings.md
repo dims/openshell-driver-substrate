@@ -59,10 +59,12 @@ upstream and what to fix first here.
    sandbox bootstrap authenticator stays off. `rootfs_tar_staging_dir` is
    empty, so the gateway's rootfs-tar path is off too.
 10. **No ingress but the gateway's.** The workload is reached with `openshell
-    sandbox exec` and `connect` over the supervisor's SSH relay. Substrate's
-    router cannot reach it: the sandbox's network broker refuses `accept(2)`
-    from a non-loopback peer, and the gateway's loopback service endpoint,
-    which would publish a port, is not wired up.
+    sandbox exec` and `connect` over the supervisor's SSH relay;
+    `openshell forward start <port>` uses the same relay and has not been
+    tried through this driver. Substrate's router cannot reach it: the
+    sandbox's network broker refuses `accept(2)` from a non-loopback peer,
+    and the gateway's loopback service endpoint, which would publish a port,
+    is not wired up.
 
 ## Lifecycle
 
@@ -307,11 +309,14 @@ upstream and what to fix first here.
 
 ## What needs a change upstream
 
-- OpenShell: a new generation per `start` and `resume`, no supervisor takeover
-  in dedicated mode, `SuspendBoundary` unimplemented, no deadline for
-  Provisioning after Ready and no `stop` or `start` from it, Stopped and
-  Suspended phases that reject every sandbox token, and no way for a
-  dedicated supervisor to attach to a running sandbox.
+- OpenShell: a new generation per `start` and `resume`, `SuspendBoundary`
+  unimplemented, a supervisor takeover that the sandbox's verifier accepts
+  only for the runtime generation it started with (`sandbox_auth.rs`), so no
+  supervisor can attach to a running sandbox after a resume; no deadline for
+  Provisioning after Ready and no `stop` or `start` from it; Stopped and
+  Suspended phases that reject every sandbox token. What would close the
+  memory gap is a suspend and resume contract that keeps the running workload
+  and reattaches its supervisor at the new generation.
 - Substrate: no watch RPC, no labels on actors (ownership by name), templates
   never garbage-collected, no `no_new_privileges` field, `Linux.Seccomp`,
   `ApparmorProfile` and `Sysctl` not settable from a template, `Aborted` on
