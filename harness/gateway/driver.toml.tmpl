@@ -1,0 +1,18 @@
+# The driver beside the gateway: the helpdesk shape, the egress rules every
+# actor gets, the launch endpoint the launchers poll, and the gateway the
+# supervisors dial.
+template_file = "template.yaml"
+egress_policy_file = "egress-policy.yaml"
+
+[launch]
+listen = "0.0.0.0:${LAUNCH_PORT}"
+state_dir = "/var/lib/openshell-driver"
+issuer = "https://idp.ate-system.svc"
+audience = "${LAUNCH_AUDIENCE}"
+jwks_url = "https://idp.ate-system.svc/openid/v1/jwks"
+jwks_ca_file = "/etc/ate/ctb.crt"
+
+[gateway]
+endpoint = "https://${GATEWAY_HOST}:${GATEWAY_PORT}"
+tls_ca_file = "/etc/openshell-gateway-ca/ca.crt"
+tls_server_name = "${GATEWAY_HOST}"

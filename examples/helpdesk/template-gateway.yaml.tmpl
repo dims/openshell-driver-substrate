@@ -1,0 +1,61 @@
+# The template fragment for the gateway path: both containers run launcher.py
+# with LAUNCH_URL, so the supervisor fetches this actor's bundle from the
+# driver and nothing per sandbox is in the image. See template.yaml.tmpl for
+# the shape without a gateway.
+containers:
+  - name: sandbox
+    image: "${SANDBOX_IMAGE}"
+    command: ["python3", "/opt/helpdesk/launcher.py", "sandbox"]
+    env:
+      - name: LAUNCH_URL
+        value: "http://${LAUNCH_HOST}:${LAUNCH_PORT}"
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: socket-dir
+        mountPath: "/run/openshell"
+      - name: supervisor-ca
+        mountPath: "/run/openshell-supervisor-ca"
+  - name: supervisor
+    image: "${SANDBOX_IMAGE}"
+    command: ["python3", "/opt/helpdesk/launcher.py", "supervisor"]
+    env:
+      - name: LAUNCH_URL
+        value: "http://${LAUNCH_HOST}:${LAUNCH_PORT}"
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+    volumeMounts:
+      - name: socket-dir
+        mountPath: "/run/openshell"
+      - name: identity
+        mountPath: "/run/ate"
+  # Not part of the sandbox. See relay.py.
+  - name: relay
+    image: "${SANDBOX_IMAGE}"
+    command: ["python3", "/opt/helpdesk/relay.py"]
+    securityContext:
+      capabilities:
+        drop: ["ALL"]
+resources:
+  limits:
+    cpuMillicores: 2000
+    memoryBytes: 1073741824
+volumes:
+  - name: socket-dir
+    durableDir: {}
+  - name: supervisor-ca
+    durableDir: {}
+  # Who this actor is, correct after a restore from the shared snapshot.
+  - name: identity
+    systemInfo:
+      dataSources:
+        - actorMetadata:
+            items:
+              - field: ACTOR_METADATA_FIELD_NAME
+                path: actor-name
+              - field: ACTOR_METADATA_FIELD_ATESPACE
+                path: atespace
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

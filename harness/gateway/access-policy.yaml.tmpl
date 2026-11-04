@@ -1,0 +1,8 @@
+# The driver's ServiceAccount edits the atespace: templates, actors, egress
+# policies, resume, suspend, revert, delete.
+metadata:
+  name: default
+bindings:
+  - role: editor
+    members:
+      - user:system:serviceaccount:${ATESPACE}:openshell-driver

@@ -1,0 +1,25 @@
+# Substrate's egress gate for an actor on the gateway path: the driver's
+# launch endpoint, with the actor's JWT put on the request; the gateway,
+# whose TLS passes through; and the model host. Render with render.sh.
+metadata:
+  atespace: ${ATESPACE}
+  name: default
+rules:
+  - http:
+      hostnames: ["${LAUNCH_HOST}"]
+      ports:
+        numbers: [${LAUNCH_PORT}]
+      effects:
+        replaceHeaders:
+          - header: Authorization
+            prefix: "Bearer "
+            actorJwt:
+              audiences: ["${LAUNCH_AUDIENCE}"]
+  - tlsPassthrough:
+      hostnames: ["${GATEWAY_HOST}"]
+      ports:
+        numbers: [${GATEWAY_PORT}]
+  - http:
+      hostnames: ["${MODEL_HOST}"]
+      ports:
+        numbers: [${MODEL_PORT}]

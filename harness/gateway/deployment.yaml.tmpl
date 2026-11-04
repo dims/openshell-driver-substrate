@@ -1,0 +1,159 @@
+# The stock OpenShell gateway and this driver in one pod, as OpenShell's own
+# e2e runs an external driver: the driver serves ComputeDriver on a socket in
+# a shared emptyDir, and its launch endpoint on a port. Both run as uid 1000,
+# the gateway image's user, so the socket is writable by both.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openshell-driver
+  namespace: ${ATESPACE}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-gateway
+  namespace: ${ATESPACE}
+spec:
+  selector:
+    app: openshell-gateway
+  ports:
+    - name: grpc
+      port: ${GATEWAY_PORT}
+      targetPort: ${GATEWAY_PORT}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-driver
+  namespace: ${ATESPACE}
+spec:
+  selector:
+    app: openshell-gateway
+  ports:
+    - name: launch
+      port: ${LAUNCH_PORT}
+      targetPort: ${LAUNCH_PORT}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openshell-gateway
+  namespace: ${ATESPACE}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: openshell-gateway
+  template:
+    metadata:
+      labels:
+        app: openshell-gateway
+    spec:
+      serviceAccountName: openshell-driver
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      containers:
+        - name: gateway
+          image: ${GATEWAY_IMAGE}
+          args: ["--config", "/etc/openshell/gateway.toml", "--db-url", "sqlite:/var/openshell/openshell.db"]
+          env:
+            - name: XDG_STATE_HOME
+              value: /var/lib/openshell-state
+          ports:
+            - name: grpc
+              containerPort: ${GATEWAY_PORT}
+            - name: health
+              containerPort: ${GATEWAY_HEALTH_PORT}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /etc/openshell
+            - name: gateway-tls
+              mountPath: /etc/openshell-tls
+            - name: gateway-jwt
+              mountPath: /etc/openshell-jwt
+            - name: gateway-data
+              mountPath: /var/openshell
+            - name: gateway-state
+              mountPath: /var/lib/openshell-state
+            - name: compute-driver-socket
+              mountPath: /var/run/openshell-compute
+        - name: driver
+          image: ${DRIVER_IMAGE}
+          args:
+            - --bind-socket=/var/run/openshell-compute/driver/driver.sock
+            - --api-endpoint=api.ate-system.svc:443
+            - --api-tls-ca=/etc/ate/ctb.crt
+            - --api-tls-server-name=api.ate-system.svc
+            - --api-bearer-token-path=/var/run/secrets/ate/token
+            - --atespace=${ATESPACE}
+            - --config=/etc/openshell-driver/driver.toml
+          ports:
+            - name: launch
+              containerPort: ${LAUNCH_PORT}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: compute-driver-socket
+              mountPath: /var/run/openshell-compute
+            - name: driver-config
+              mountPath: /etc/openshell-driver
+            - name: ate-ca
+              mountPath: /etc/ate
+            - name: ate-token
+              mountPath: /var/run/secrets/ate
+            - name: gateway-ca
+              mountPath: /etc/openshell-gateway-ca
+            - name: driver-state
+              mountPath: /var/lib/openshell-driver
+      volumes:
+        - name: compute-driver-socket
+          emptyDir: {}
+        - name: gateway-config
+          configMap:
+            name: openshell-gateway-config
+        - name: gateway-tls
+          secret:
+            secretName: openshell-gateway-tls
+        - name: gateway-jwt
+          secret:
+            secretName: openshell-gateway-jwt
+        - name: gateway-ca
+          configMap:
+            name: openshell-gateway-ca
+        - name: gateway-data
+          emptyDir: {}
+        - name: gateway-state
+          emptyDir: {}
+        - name: driver-config
+          configMap:
+            name: openshell-driver-config
+        - name: ate-ca
+          configMap:
+            name: ate-ca
+        - name: ate-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: api.ate-system.svc
+                  expirationSeconds: 3600
+                  path: token
+        - name: driver-state
+          emptyDir: {}
