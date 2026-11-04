@@ -80,13 +80,27 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          # subPath: the gateway wants regular files, not the symlinks a
+          # ConfigMap or Secret volume presents.
           volumeMounts:
             - name: gateway-config
-              mountPath: /etc/openshell
+              mountPath: /etc/openshell/gateway.toml
+              subPath: gateway.toml
             - name: gateway-tls
-              mountPath: /etc/openshell-tls
+              mountPath: /etc/openshell-tls/tls.crt
+              subPath: tls.crt
+            - name: gateway-tls
+              mountPath: /etc/openshell-tls/tls.key
+              subPath: tls.key
             - name: gateway-jwt
-              mountPath: /etc/openshell-jwt
+              mountPath: /etc/openshell-jwt/signing.pem
+              subPath: signing.pem
+            - name: gateway-jwt
+              mountPath: /etc/openshell-jwt/public.pem
+              subPath: public.pem
+            - name: gateway-jwt
+              mountPath: /etc/openshell-jwt/kid
+              subPath: kid
             - name: gateway-data
               mountPath: /var/openshell
             - name: gateway-state
