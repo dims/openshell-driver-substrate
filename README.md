@@ -51,7 +51,7 @@ Substrate's actor lifecycle:
 | `delete_sandbox` | `DeleteActor` |
 | `get_sandbox` / `list_sandboxes` | `GetActor` / `ListActors` |
 | `watch_sandboxes` | polls `ListActors` every 2s (Substrate has no watch RPC) |
-| `ensure_workspace` | `CreateAtespace` |
+| `ensure_workspace` | `GetAtespace`, then `CreateAtespace` when it is missing |
 | `delete_workspace` | no-op: one atespace serves every workspace |
 
 One `ActorTemplate` is reused for every actor whose template comes out
