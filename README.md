@@ -256,7 +256,7 @@ MODEL_HOST=ollama.ate-openshell-microvm.svc.cluster.local MODEL_PORT=11434 \
   harness/scripts/render.sh examples/helpdesk/data.yaml.tmpl > policy.yaml
 openshell sandbox create --name alice --from "$SANDBOX_IMAGE" --policy policy.yaml --detach \
   -- python3 /opt/helpdesk/agent.py
-openshell sandbox get alice            # Ready in about 2 s; 15 to 30 s more the first time, for the golden snapshot
+openshell sandbox get alice            # Ready in 5 to 10 s; 15 to 30 s the first time, for the golden snapshot
 openshell sandbox exec alice -- python3 /opt/helpdesk/agent.py chat "my database is timing out"
 openshell sandbox exec alice -- python3 /opt/helpdesk/agent.py status      # turns: 1
 openshell logs alice
