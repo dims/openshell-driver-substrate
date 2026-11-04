@@ -152,14 +152,17 @@ def supervisor_role():
             {},
         )
         sys.exit(child.wait())
-    name = read(f"{IDENTITY}/actor-name").strip()
-    atespace = read(f"{IDENTITY}/atespace").strip()
-    log(f"actor {atespace}/{name}, bundles from {LAUNCH_URL}")
+    log(f"bundles from {LAUNCH_URL}")
     running = None
     while True:
         if child is not None and child.poll() is not None:
             log(f"the supervisor exited with {child.returncode}")
             sys.exit(1)
+        # Read who we are on every poll: this process is restored from the
+        # golden snapshot into every actor, and Substrate rewrites the
+        # identity files on each restore.
+        name = read(f"{IDENTITY}/actor-name").strip()
+        atespace = read(f"{IDENTITY}/atespace").strip()
         try:
             bundle = fetch(name, atespace, running)
         except urllib.error.HTTPError as e:
@@ -171,6 +174,7 @@ def supervisor_role():
             time.sleep(2)
             continue
         if bundle and bundle["generation"] != running:
+            log(f"actor {atespace}/{name}: generation {bundle['generation']}")
             running = apply_bundle(bundle, running)
 
 
