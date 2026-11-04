@@ -1,11 +1,11 @@
 # The driver's template fragment: what every helpdesk actor is made of. The
 # driver adds the name, the atespace and the worker selector; run.sh prepends
 # the same for kubectl-ate. The sandbox container's image is the request's.
+# Both containers run launcher.py; see its docstring for the two modes.
 containers:
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
-    command: ["/opt/helpdesk/sandbox-entry.sh", "/openshell-sandbox"]
-    args: ["--bootstrap", "/.openshell/channel/sandbox/bootstrap.json", "--log-level", "info"]
+    command: ["python3", "/opt/helpdesk/launcher.py", "sandbox"]
     securityContext:
       capabilities:
         drop: ["ALL"]
@@ -14,21 +14,12 @@ containers:
         mountPath: "/run/openshell"
       - name: supervisor-ca
         mountPath: "/run/openshell-supervisor-ca"
-  # The supervisor binary rides the sandbox image; its own container keeps
-  # the actor's resolver, which its policy DNS needs for upstream lookups.
+  # The supervisor keeps its own container: the sandbox's resolver points at
+  # the sandbox's relay, and the supervisor's policy DNS needs the actor's
+  # resolver for upstream lookups.
   - name: supervisor
     image: "${SANDBOX_IMAGE}"
-    command: ["/openshell-supervisor"]
-    env:
-      - name: OPENSHELL_ADMITTED_ISOLATION_BACKEND
-        value: "openshell-sandbox"
-    args: ["--role","isolation-backend","--sandbox-id","test-sandbox-1",
-           "--backend-descriptor-file","/opt/supervisor-files/supervisor/runtime-descriptor.json",
-           "--auth-bundle-file","/opt/supervisor-files/supervisor/auth.json",
-           "--policy-rules","/opt/supervisor-files/supervisor/policy.rego",
-           "--policy-data","/opt/supervisor-files/supervisor/data.yaml",
-           "--log-level","info","--",
-           "python3","/opt/helpdesk/agent.py"]
+    command: ["python3", "/opt/helpdesk/launcher.py", "supervisor"]
     securityContext:
       capabilities:
         drop: ["ALL"]
@@ -37,6 +28,8 @@ containers:
         mountPath: "/opt/supervisor-files"
       - name: socket-dir
         mountPath: "/run/openshell"
+      - name: identity
+        mountPath: "/run/ate"
   # Not part of the sandbox. See relay.py.
   - name: relay
     image: "${SANDBOX_IMAGE}"
@@ -51,6 +44,7 @@ resources:
     cpuMillicores: 2000
     memoryBytes: 1073741824
 volumes:
+  # The supervisor's static files, for the demo without a gateway.
   - name: supervisor-files
     image:
       reference: "${BOOTSTRAP_FILES_IMAGE}"
@@ -58,5 +52,15 @@ volumes:
     durableDir: {}
   - name: supervisor-ca
     durableDir: {}
+  # Who this actor is, correct after a restore from the shared snapshot.
+  - name: identity
+    systemInfo:
+      dataSources:
+        - actorMetadata:
+            items:
+              - field: ACTOR_METADATA_FIELD_NAME
+                path: actor-name
+              - field: ACTOR_METADATA_FIELD_ATESPACE
+                path: atespace
 snapshotConfig:
   preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

@@ -65,7 +65,7 @@ tar --sort=name --owner=65532 --group=65532 --numeric-owner --mtime=@0 --mode='u
 rm -rf "${BAKE}"
 
 # The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
-cp "${HERE}"/{Dockerfile,agent.py,relay.py,sandbox-entry.sh} "${CTX}/"
+cp "${HERE}"/{Dockerfile,agent.py,relay.py,launcher.py} "${CTX}/"
 find "${CTX}" -maxdepth 1 -type f -exec touch -d @0 {} +
 docker build -q --provenance=false --sbom=false \
   --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:${OPENSHELL_VERSION}" \
