@@ -17,7 +17,7 @@ upstream and what to fix first here.
    OpenShell's docker driver injects the sandbox binary into any image; this
    driver cannot. A stock OpenShell sandbox image passes
    `validate_sandbox_create` and dies at boot, which shows as Provisioning for
-   up to 1800 s (Lifecycle 7).
+   up to 1800 s (Lifecycle 6).
 2. **The workload identity is fixed.** `src/bundle.rs` writes uid and gid
    65532 into every bundle and never reads the spec's `workload_identity` or
    the image's `USER`. A policy's `run_as_user` has no effect, and an image
@@ -75,44 +75,30 @@ upstream and what to fix first here.
    takeover. The launcher therefore replaces both processes
    (`runtime/launcher.py`). Only a Substrate-side suspend keeps the
    workload's memory.
-2. **A Substrate-side resume of a gateway-stopped sandbox strands it.** After
-   `openshell sandbox stop` the actor is `SUSPENDED` and anything on the
-   Substrate side can resume it: `kubectl-ate resume`, or a connection
-   through `kubectl-ate proxy actor`, which the router answers by resuming the
-   actor. The driver then reports `Bootstrapping=True` and `Ready=True` as for
-   any actor (`actor_state_conditions` ignores the stopped mark for
-   `RESUMING` and `RUNNING`). The gateway leaves Stopped for Provisioning,
-   where it refuses both `stop` and `start` and has no deadline; the restored
-   supervisor retries retired credentials and the launcher polls with the
-   stop-time generation and gets 204. Only `delete` recovers. If no watch
-   tick sees the `RESUMING` state, the gateway stays Stopped while the actor
-   holds a worker.
-3. **A stop cut in flight is misreported.** `checkpoint` in `src/lib.rs` sets
-   the stopped mark after `SuspendActor` returns, so during the synchronous
-   checkpoint the watch sees `Ready=False (DependenciesNotReady)`, the row
-   meant for a Substrate-side suspend, and the `Suspended=False
-   (PodTerminating)` row is never shown for a normal stop. The gateway ignores
-   snapshots while Stopping, so a completed stop is fine. A stop interrupted
-   by a driver restart, a gateway restart or a transport error is rolled back
-   to Ready by the gateway's recovery, which looks for `PodTerminating`, and
-   the sandbox ends in Provisioning until `kubectl-ate resume` brings the
-   supervisor back.
+2. **A Substrate-side resume of a gateway-stopped sandbox holds a worker.**
+   After `openshell sandbox stop` anything on the Substrate side can resume
+   the actor: `kubectl-ate resume`, or a connection through `kubectl-ate
+   proxy actor`, which the router answers by resuming the actor. The driver
+   keeps reporting Stopped, so the gateway sees nothing, but the actor runs
+   with retired credentials, its supervisor retrying a denied logon, until the
+   next `start`, which hands it a new generation without a restore, or
+   `delete`. Nothing suspends it again.
+3. **A stop cut in flight settles as Stopped.** The mark goes on before
+   `SuspendActor`, so the gateway's recovery after a driver restart, a
+   gateway restart or a transport error sees `PodTerminating` while the
+   checkpoint runs and Stopped after it. If the RPC was lost before Substrate
+   acted, the actor keeps running while the gateway records Stopped and
+   retires the credentials; the next `start` repairs it as in item 2.
 4. **`start` ignores `resume`.** The gateway sends `resume=false` after a
    stop and expects a fresh boot, `resume=true` after a suspend. The driver
    restores the last checkpoint either way (`start_sandbox`), so guest state
    from before a stop comes back. Without the launch endpoint start and resume
    are the same operation.
-5. **A gateway without a launch signer gets sandboxes that never become
-   Ready.** Such a gateway sends empty `launch_authentication`; `store_bundle`
-   stores nothing and returns Ok, the launcher polls 204, and the sandbox sits
-   in Provisioning until the gateway's preparation ceiling (1800 s). The
-   driver should refuse the create when it has a launch endpoint and no
-   authentication.
-6. **A Substrate-side suspend parks the sandbox in Provisioning.** The driver
+5. **A Substrate-side suspend parks the sandbox in Provisioning.** The driver
    reports `Ready=False (DependenciesNotReady)` so the gateway keeps the
    credentials, but the gateway admits only `delete` in that phase and has no
    deadline for it. Recovery is `kubectl-ate resume`, outside the gateway.
-7. **Nothing restarts a dead supervisor or sandbox.** The launcher notices a
+6. **Nothing restarts a dead supervisor or sandbox.** The launcher notices a
    dead child only after its current poll returns, up to 25 s later, and then
    exits; `openshell-sandbox` kills the workload after its own 30 s recovery
    timeout. The container is gone, the actor stays `RUNNING`, Substrate
@@ -120,23 +106,23 @@ upstream and what to fix first here.
    `SupervisorNotConnected`: 1800 s before the supervisor's first report, no
    deadline after it. Nothing but the worker pod log names the cause. The fix
    is `delete`.
-8. **No capacity handling, no retries.** `ResumeActor` returns
+7. **No capacity handling, no retries.** `ResumeActor` returns
    `ResourceExhausted` when no worker has room; `Aborted` comes back for a
    concurrent operation or a version conflict. The driver retries neither and
    does not queue. A `create` fails and the gateway compensates with
    `delete_sandbox`; a `start` fails with that error. The silent 180 s wait on
    a missing or full pool applies to the first create of a template only.
-9. **`suspend` and `stop` block on the upload.** `SuspendActor` runs with
+8. **`suspend` and `stop` block on the upload.** `SuspendActor` runs with
    synchronous durability (`src/lib.rs`, `checkpoint`), so the RPC lasts as
    long as the checkpoint of the whole guest memory takes to reach the object
    store.
-10. **The first `create` of a new image shape blocks on the golden snapshot.**
+9. **The first `create` of a new image shape blocks on the golden snapshot.**
     `ensure_ready` in `src/template.rs` waits for the boot, the fixed 20 s
     warm-up and the checkpoint, up to `template_ready_timeout_secs`, inside
     the gateway's `CreateSandbox` call. A golden failure deletes the template
     while other creates may be polling the same name, which then see
     `NotFound`; a timeout leaves the template and its golden actor behind.
-11. **The golden snapshot proves nothing on the gateway path.** The golden
+10. **The golden snapshot proves nothing on the gateway path.** The golden
     actor has no egress policy, so its launchers get 403 every 5 s and never
     start OpenShell; the qualification gates and the boundary attach run per
     actor after every restore. Substrate checkpoints at 20 s whether or not
@@ -146,13 +132,10 @@ upstream and what to fix first here.
 
 ## State and recovery
 
-1. **The stopped set lives in memory** (`src/lib.rs`, `stopped`). After a
-   driver restart the driver cannot tell a gateway stop from a Substrate
-   suspend. The watch path survives it because the gateway ignores snapshots
-   in Stopped and Suspended, but the gateway's recovery reads for a
-   transition in flight derive phase from `get_sandbox`, which then reports a
-   stopped sandbox as `DependenciesNotReady`. A second replica would disagree
-   with the first. The bundle files on disk could carry the flag.
+1. **The stopped mark lives with the bundle store.** It is a `.stopped` file
+   next to the bundle, read when the driver starts (`src/launch.rs`). Without
+   a launch endpoint it is in memory only, and a second replica would not see
+   the first one's marks.
 2. **One replica.** Bundles are files on a `ReadWriteOnce` volume plus a
    per-process map, the gateway's database is SQLite on another, the
    Deployment uses `Recreate`, and the launch Service selects every gateway
@@ -293,7 +276,7 @@ upstream and what to fix first here.
    ignores SIGTERM can outlive its broker and keep port 8080 from the next
    generation. It reaps only its direct child.
 3. **A driver restart ends the watch stream.** The gateway reopens it after
-   2 s; bundles survive on disk, the stopped set does not.
+   2 s; bundles and stopped marks survive on disk.
 
 ## Tests
 
@@ -301,8 +284,8 @@ upstream and what to fix first here.
    the proto diff, shellcheck and `py_compile` (`.github/workflows/ci.yml`).
 2. **Untested in the unit tests:** `src/bundle.rs`, the launch handler
    (401, 403, 204, 200, the generation compare), `ActorJwtVerifier`, the watch
-   diff, `checkpoint`'s revert of a crashed actor, the create sequence, the
-   stopped set, and all of `launcher.py` and `relay.py`.
+   diff, `checkpoint`'s revert of a crashed actor, the create sequence, and
+   all of `launcher.py` and `relay.py`.
 3. **`tests/live.rs` is ignored by default**, returns silently without its
    variables, and covers create, stop, start, list and delete without a
    gateway or a launch endpoint; its "Ready" is Substrate's `RUNNING`.
@@ -325,19 +308,10 @@ upstream and what to fix first here.
 
 ## What to fix first
 
-1. Report a gateway-stopped actor as Stopped whatever Substrate does with it,
-   or suspend it again, so a resume behind the gateway's back cannot strand
-   the sandbox (Lifecycle 2).
-2. Set the stopped mark before `SuspendActor`, and keep it in the bundle file
-   so a restart does not lose it (Lifecycle 3, State 1).
-3. Refuse a create without `launch_authentication` when the launch endpoint
-   is on (Lifecycle 5).
-4. Harden the launcher: guard the reads, stop what it started before it
+1. Harden the launcher: guard the reads, stop what it started before it
    exits, tolerate a vanished bundle directory, and give the sandbox longer
    than it gives the workload (Operations 2).
-5. Move the launcher, the relay, the image contract and the gateway fragment
-   out of `examples/helpdesk` into a runtime directory with its own base
-   image, and leave the helpdesk a thin layer on it (Harness 10). The step
-   after that is a static launcher on an image volume, so `--from` takes any
-   image.
-6. Put the gateway lifecycle check into the repository as a script (Tests 4).
+2. Suspend a gateway-stopped actor that Substrate resumed behind the
+   gateway's back, instead of letting it hold a worker (Lifecycle 2).
+3. A static launcher and relay on an image volume, so `--from` takes any
+   image (What a gateway user loses, item 1).

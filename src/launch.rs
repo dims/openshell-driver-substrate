@@ -8,7 +8,7 @@
 //! when it is newer than the generation the launcher already has, or 204
 //! after a long poll.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -55,10 +55,12 @@ pub struct Gateway {
 }
 
 /// Bundles by actor name, kept on disk under `dir` so a driver restart
-/// loses none.
+/// loses none. An empty `<name>.stopped` next to a bundle marks an actor
+/// the gateway stopped.
 pub struct BundleStore {
     dir: PathBuf,
     bundles: Mutex<HashMap<String, Bundle>>,
+    stopped: HashSet<String>,
     changed: watch::Sender<u64>,
 }
 
@@ -66,13 +68,17 @@ impl BundleStore {
     pub fn open(dir: PathBuf) -> std::io::Result<Self> {
         std::fs::create_dir_all(&dir)?;
         let mut bundles = HashMap::new();
+        let mut stopped = HashSet::new();
         for entry in std::fs::read_dir(&dir)? {
             let path = entry?.path();
-            let Some(name) = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .and_then(|n| n.strip_suffix(".json"))
-            else {
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(name) = file_name.strip_suffix(".stopped") {
+                stopped.insert(name.to_string());
+                continue;
+            }
+            let Some(name) = file_name.strip_suffix(".json") else {
                 continue;
             };
             let bundle: Bundle = serde_json::from_slice(&std::fs::read(&path)?).map_err(|e| {
@@ -86,8 +92,25 @@ impl BundleStore {
         Ok(Self {
             dir,
             bundles: Mutex::new(bundles),
+            stopped,
             changed: watch::Sender::new(0),
         })
+    }
+
+    /// The actors with a `.stopped` marker when the store was opened.
+    #[must_use]
+    pub fn stopped(&self) -> &HashSet<String> {
+        &self.stopped
+    }
+
+    /// Create or remove the actor's `.stopped` marker.
+    pub fn set_stopped(&self, name: &str, stopped: bool) -> std::io::Result<()> {
+        let path = self.dir.join(format!("{name}.stopped"));
+        if stopped {
+            std::fs::write(path, b"")
+        } else {
+            remove_if_present(&path)
+        }
     }
 
     pub async fn put(&self, name: &str, bundle: Bundle) -> std::io::Result<()> {
@@ -124,11 +147,15 @@ impl BundleStore {
 
     pub async fn remove(&self, name: &str) -> std::io::Result<()> {
         self.bundles.lock().await.remove(name);
-        match std::fs::remove_file(self.dir.join(format!("{name}.json"))) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
-        }
+        remove_if_present(&self.dir.join(format!("{name}.json")))
+    }
+}
+
+fn remove_if_present(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -321,5 +348,20 @@ mod tests {
         store.remove("alice").await.unwrap();
         store.remove("alice").await.unwrap();
         assert_eq!(store.get("alice").await, None);
+    }
+
+    #[test]
+    fn store_keeps_stopped_marks_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BundleStore::open(dir.path().to_path_buf()).unwrap();
+        store.set_stopped("alice", true).unwrap();
+        drop(store);
+        let store = BundleStore::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(store.stopped(), &HashSet::from(["alice".to_string()]));
+        store.set_stopped("alice", false).unwrap();
+        store.set_stopped("alice", false).unwrap();
+        drop(store);
+        let store = BundleStore::open(dir.path().to_path_buf()).unwrap();
+        assert!(store.stopped().is_empty());
     }
 }

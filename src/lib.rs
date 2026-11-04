@@ -248,12 +248,12 @@ pub struct SubstrateComputeDriver {
     channel: Arc<Mutex<Option<Channel>>>,
     /// Where the launch endpoint reads from; None without the endpoint.
     bundles: Option<Arc<launch::BundleStore>>,
-    /// The actors the gateway stopped or suspended. Any other suspension is
-    /// Substrate's own and is reported as a wait, so the gateway keeps the
-    /// sandbox's credentials for the supervisor's return. In memory: the
-    /// gateway holds its own Stopped and Suspended phases and ignores watch
-    /// snapshots in them, so a restart changes nothing on the watch path.
-    /// Its recovery reads after a restart do see the difference.
+    /// The actors the gateway stopped or suspended, marked before the
+    /// checkpoint, cleared before the next resume and by the delete. Any other
+    /// suspension is Substrate's own and is reported as a wait, so the
+    /// gateway keeps the sandbox's credentials for the supervisor's return.
+    /// A cache of the store's `.stopped` markers, so a restart keeps the
+    /// set; in memory alone without a store.
     stopped: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
@@ -276,7 +276,12 @@ impl SubstrateComputeDriver {
         }
     }
 
-    fn mark_stopped(&self, name: &str, stopped: bool) {
+    fn mark_stopped(&self, name: &str, stopped: bool) -> Result<(), Status> {
+        if let Some(store) = &self.bundles {
+            store
+                .set_stopped(name, stopped)
+                .map_err(|e| Status::internal(format!("stopped marker of {name}: {e}")))?;
+        }
         let mut set = self
             .stopped
             .lock()
@@ -286,6 +291,7 @@ impl SubstrateComputeDriver {
         } else {
             set.remove(name);
         }
+        Ok(())
     }
 
     fn stopped_set(&self) -> HashSet<String> {
@@ -297,6 +303,7 @@ impl SubstrateComputeDriver {
 
     #[must_use]
     pub fn with_bundles(mut self, store: Arc<launch::BundleStore>) -> Self {
+        self.stopped = Arc::new(std::sync::Mutex::new(store.stopped().clone()));
         self.bundles = Some(store);
         self
     }
@@ -309,8 +316,7 @@ impl SubstrateComputeDriver {
     }
 
     /// Store the bundle the launcher inside the actor fetches. Nothing to do
-    /// without the launch endpoint, or without launch authentication, which
-    /// a caller that is not a gateway does not send.
+    /// without the launch endpoint.
     async fn store_bundle(
         &self,
         name: &str,
@@ -320,9 +326,6 @@ impl SubstrateComputeDriver {
         let Some(store) = &self.bundles else {
             return Ok(());
         };
-        if launch_authentication.is_empty() {
-            return Ok(());
-        }
         let gateway = self.config.gateway.as_ref().ok_or_else(|| {
             Status::failed_precondition("the configuration names no [gateway] for the bundle")
         })?;
@@ -477,7 +480,8 @@ impl SubstrateComputeDriver {
     /// Stop and suspend both end with the actor SUSPENDED and its snapshot
     /// in durable storage. A CRASHED actor cannot be checkpointed; RevertActor
     /// puts it back at its last snapshot instead, which is the gateway's
-    /// Error, Stop, Start recovery.
+    /// Error, Stop, Start recovery. The mark goes on before the RPC, so a
+    /// stop cut in flight reads as Stopped.
     async fn checkpoint(&self, actor_name: String) -> Result<(), Status> {
         let mut client = self.control_client().await?;
         let actor = ateapi::ObjectRef {
@@ -493,6 +497,7 @@ impl SubstrateComputeDriver {
             .status
             .unwrap_or_default()
             .state();
+        self.mark_stopped(&actor.name, true)?;
         if state == ateapi::ActorState::Crashed {
             client
                 .revert_actor(ateapi::RevertActorRequest {
@@ -509,7 +514,6 @@ impl SubstrateComputeDriver {
                 })
                 .await?;
         }
-        self.mark_stopped(&actor.name, true);
         Ok(())
     }
 }
@@ -583,9 +587,13 @@ fn condition(r#type: &str, status: &str, reason: &str, message: &str) -> DriverC
 /// condition at all. `Bootstrapping=True` lets a Stopped sandbox start
 /// again. A crashed actor is a deliberate Error: it needs `RevertActor`.
 ///
-/// A stop retires the sandbox's credentials on the gateway, so a suspension
-/// the gateway did not ask for (`gateway_stopped` false: an operator or a
-/// policy on the Substrate side) is reported as Provisioning instead: the
+/// A stop retires the sandbox's credentials on the gateway. While
+/// `gateway_stopped` holds, from the stop to the next start, a running,
+/// resuming, reverting or suspended actor is therefore Stopped whatever
+/// Substrate did with it, and a suspending one shows the `PodTerminating`
+/// row the gateway's recovery reads as a stop in flight. A suspension the
+/// gateway did not ask for (`gateway_stopped` false: an operator or a policy
+/// on the Substrate side) is reported as Provisioning instead: the
 /// supervisor inside the snapshot still holds valid credentials, and the
 /// gateway is Ready again when Substrate resumes the actor and the
 /// supervisor reconnects.
@@ -598,13 +606,35 @@ fn actor_state_conditions(
     };
     use openshell_core::driver_utils::{CONDITION_EXITED, CONDITION_STOPPED};
     match state {
+        // A gateway stop holds whatever Substrate does with the actor.
+        Running | Resuming | Reverting | Suspended if gateway_stopped => vec![
+            condition(
+                "Suspended",
+                "True",
+                "Suspended",
+                "actor is stopped by the gateway; start it to resume",
+            ),
+            condition(
+                "Ready",
+                "False",
+                CONDITION_STOPPED,
+                "actor is stopped by the gateway",
+            ),
+        ],
         Running => vec![condition(
             "Ready",
             "True",
             REASON_RUNNING,
             "actor is running",
         )],
-        Suspending | Suspended if !gateway_stopped => vec![condition(
+        // The reason the gateway's lifecycle recovery reads as a stop in flight.
+        Suspending if gateway_stopped => vec![condition(
+            "Suspended",
+            "False",
+            "PodTerminating",
+            "actor is being checkpointed",
+        )],
+        Suspending | Suspended => vec![condition(
             "Ready",
             "False",
             "DependenciesNotReady",
@@ -632,22 +662,6 @@ fn actor_state_conditions(
                 REASON_STARTING,
                 "actor is reverting to its snapshot",
             ),
-        ],
-        // The reason the gateway's lifecycle recovery reads as a stop in flight.
-        Suspending => vec![condition(
-            "Suspended",
-            "False",
-            "PodTerminating",
-            "actor is being checkpointed",
-        )],
-        Suspended => vec![
-            condition(
-                "Suspended",
-                "True",
-                "Suspended",
-                "actor is checkpointed; start it to resume",
-            ),
-            condition("Ready", "False", CONDITION_STOPPED, "actor is checkpointed"),
         ],
         Crashed => vec![condition(
             "Ready",
@@ -682,6 +696,21 @@ fn require_actor_name(sandbox_id: &str, sandbox_name: &str) -> Result<String, St
     } else {
         Err(Status::invalid_argument("sandbox_id or name is required"))
     }
+}
+
+/// With the launch endpoint on, a sandbox runs only on the bundle its
+/// gateway signs, so a create or start without launch authentication would
+/// wait in Provisioning until the gateway's deadline.
+fn require_launch_authentication(
+    launch_endpoint: bool,
+    launch_authentication: &[u8],
+) -> Result<(), Status> {
+    if launch_endpoint && launch_authentication.is_empty() {
+        return Err(Status::failed_precondition(
+            "the gateway sent no launch authentication; its launch signer must be configured",
+        ));
+    }
+    Ok(())
 }
 
 /// Driver-specific validation applied before `CreateSandbox`, so the
@@ -939,6 +968,12 @@ impl ComputeDriver for SubstrateComputeDriver {
             .ok_or_else(|| Status::invalid_argument("sandbox is required"))?;
         validate_substrate_sandbox(&sandbox, &self.config, self.bundles.is_some())?;
         let actor_name = require_actor_name(&sandbox.id, &sandbox.name)?;
+        let launch_authentication = sandbox
+            .spec
+            .as_ref()
+            .map(|s| s.launch_authentication.clone())
+            .unwrap_or_default();
+        require_launch_authentication(self.bundles.is_some(), &launch_authentication)?;
         let atespace = self.config.atespace.clone();
 
         let template_name =
@@ -1017,19 +1052,14 @@ impl ComputeDriver for SubstrateComputeDriver {
                 Err(status) => return Err(status),
             }
         }
-        let launch_authentication = sandbox
-            .spec
-            .as_ref()
-            .map(|s| s.launch_authentication.clone())
-            .unwrap_or_default();
         self.store_bundle(&actor_name, &sandbox, &launch_authentication)
             .await?;
+        self.mark_stopped(&actor_name, false)?;
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(actor_ref),
             })
             .await?;
-        self.mark_stopped(&actor_name, false);
 
         Ok(Response::new(CreateSandboxResponse::default()))
     }
@@ -1041,21 +1071,31 @@ impl ComputeDriver for SubstrateComputeDriver {
         let req = request.into_inner();
         let actor_name = require_actor_name(&req.sandbox_id, &req.name)?;
         // A start brings a new generation's credentials; the launcher inside
-        // the actor picks them up after the restore.
+        // the actor picks them up after the restore. Without the spec there
+        // is no bundle to build.
+        let launch_authentication: &[u8] = match &req.sandbox {
+            Some(_) => &req.launch_authentication,
+            None => &[],
+        };
+        require_launch_authentication(self.bundles.is_some(), launch_authentication)?;
         if let Some(sandbox) = &req.sandbox {
-            self.store_bundle(&actor_name, sandbox, &req.launch_authentication)
+            self.store_bundle(&actor_name, sandbox, launch_authentication)
                 .await?;
         }
         let mut client = self.control_client().await?;
-        client
+        self.mark_stopped(&actor_name, false)?;
+        let resumed = client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(ateapi::ObjectRef {
                     atespace: self.config.atespace.clone(),
                     name: actor_name.clone(),
                 }),
             })
-            .await?;
-        self.mark_stopped(&actor_name, false);
+            .await;
+        if let Err(status) = resumed {
+            self.mark_stopped(&actor_name, true)?;
+            return Err(status);
+        }
         Ok(Response::new(StartSandboxResponse::default()))
     }
 
@@ -1107,7 +1147,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 .await
                 .map_err(|e| Status::internal(format!("bundle of {actor_name}: {e}")))?;
         }
-        self.mark_stopped(&actor_name, false);
+        self.mark_stopped(&actor_name, false)?;
         Ok(Response::new(DeleteSandboxResponse { deleted }))
     }
 
@@ -1333,6 +1373,16 @@ mod tests {
     }
 
     #[test]
+    fn launch_authentication_is_required_with_the_launch_endpoint() {
+        assert!(require_launch_authentication(false, b"").is_ok());
+        assert!(require_launch_authentication(true, b"signed").is_ok());
+        assert_eq!(
+            require_launch_authentication(true, b"").unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    #[test]
     fn validate_rejects_what_substrate_cannot_run() {
         use openshell_core::proto::compute::v1::{
             DriverSandboxSpec, DriverSandboxTemplate, GpuResourceRequirements, ResourceRequirements,
@@ -1429,18 +1479,28 @@ mod tests {
                 );
             }
             match state {
-                Running => assert!(has("Ready", "True")),
-                // Substrate's own suspension keeps the gateway waiting, with
-                // the credentials valid; the gateway's is a stop.
-                Suspending | Suspended if !gateway_stopped => {
+                // A gateway stop holds whatever Substrate does with the actor.
+                Running | Resuming | Reverting | Suspended if gateway_stopped => {
                     assert!(
-                        reason("DependenciesNotReady") && !has("Suspended", "True"),
+                        has("Suspended", "True") && !has("Ready", "True"),
                         "{state:?}"
                     );
                 }
-                Suspended => {
+                // The stop in flight the gateway's recovery looks for.
+                Suspending if gateway_stopped => {
                     assert!(
-                        has("Suspended", "True") && !has("Ready", "True"),
+                        conds.iter().any(|c| c.r#type == "Suspended"
+                            && c.status == "False"
+                            && c.reason == "PodTerminating"),
+                        "{state:?}"
+                    );
+                }
+                Running => assert!(has("Ready", "True")),
+                // Substrate's own suspension keeps the gateway waiting, with
+                // the credentials valid; the gateway's is a stop.
+                Suspending | Suspended => {
+                    assert!(
+                        reason("DependenciesNotReady") && !has("Suspended", "True"),
                         "{state:?}"
                     );
                 }
@@ -1451,7 +1511,7 @@ mod tests {
                     );
                 }
                 Crashed => assert!(reason(CONDITION_EXITED)),
-                Suspending | Deleting | Unspecified => {
+                Deleting | Unspecified => {
                     assert!(
                         !has("Ready", "True") && !has("Suspended", "True"),
                         "{state:?}"

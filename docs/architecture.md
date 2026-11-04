@@ -140,9 +140,9 @@ reflection, and the launch endpoint when configured.
 |---|---|
 | `get_capabilities` | Checks the gateway's extension metadata, names itself `substrate` and advertises `openshell.compute.suspend-resume`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false; CPU and memory limits are supported, GPUs are not. |
 | `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (ate-api-server rejects an unpinned image; the check saves a round trip) and resource limits that parse as Kubernetes quantities; rejects GPU requests and `user_namespaces`, and `spec.command` when there is no launch endpoint to carry it. |
-| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `CreateActorEgressPolicy` with the configured rules (before the first resume: the egress caches a missing policy), the bundle from `spec.launch_authentication` into the store, `ResumeActor`. |
-| `start_sandbox` | The bundle of the new generation into the store, `ResumeActor`. |
-| `stop_sandbox`, `suspend_sandbox` | `SuspendActor` with synchronous durability: checkpoint, upload, free the worker, keep the snapshot. A `CRASHED` actor gets `RevertActor` instead, back to its last snapshot. |
+| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `CreateActorEgressPolicy` with the configured rules (before the first resume: the egress caches a missing policy), the bundle from `spec.launch_authentication` into the store, `ResumeActor`. Refused without launch authentication when the launch endpoint is on. |
+| `start_sandbox` | The bundle of the new generation into the store, the stopped mark cleared, `ResumeActor`, which is a no-op on an actor Substrate already resumed. |
+| `stop_sandbox`, `suspend_sandbox` | The stopped mark set, a `.stopped` file next to the bundle, then `SuspendActor` with synchronous durability: checkpoint, upload, free the worker, keep the snapshot. A `CRASHED` actor gets `RevertActor` instead, back to its last snapshot. |
 | `delete_sandbox` | `DeleteActor`; Substrate deletes from any state. The bundle is dropped. The template stays; other actors may share it. |
 | `get_sandbox`, `list_sandboxes` | `GetActor`; `ListActors` walked to the last page (1000 per page), keeping the actors of `oshl-` templates. The gateway's name for a sandbox comes from its bundle; the actor is named by the sandbox id. |
 | `watch_sandboxes` | Substrate has no watch RPC. The driver polls `ListActors` every 2 s, diffs against the last snapshot, and emits changed and deleted sandboxes. It stops when the gateway drops the stream. |
@@ -160,18 +160,17 @@ is written against the gateway's phase rules and pinned by a table test:
 
 | Actor state | Conditions reported | Gateway phase |
 |---|---|---|
-| RUNNING | `Ready=True` (ContainerRunning) | Ready |
-| RESUMING, REVERTING | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
+| RUNNING, not stopped by the gateway | `Ready=True` (ContainerRunning) | Ready |
+| RESUMING, REVERTING, not stopped by the gateway | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
 | SUSPENDING, after the gateway's stop or suspend | `Suspended=False` (PodTerminating, the reason the gateway reads as a stop in flight) | Provisioning |
-| SUSPENDED, after the gateway's stop or suspend | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped, or Suspended after the gateway's own suspend, which its lifecycle controller keeps |
+| RUNNING, RESUMING, REVERTING, SUSPENDED, after the gateway's stop or suspend and before its next start | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped, or Suspended after the gateway's own suspend, which its lifecycle controller keeps. A resume Substrate did on its own changes nothing the gateway sees |
 | SUSPENDING, SUSPENDED, by Substrate alone | `Ready=False` (DependenciesNotReady) | Provisioning: the gateway keeps the credentials, and the supervisor's return after a Substrate resume makes it Ready again |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
 
-The stopped mark is set when `SuspendActor` returns, so during the gateway's
-own stop the watch sees the Substrate-side row; the gateway ignores snapshots
-while Stopping. [shortcomings.md](shortcomings.md) has what that costs when a
-stop is cut short.
+The stopped mark goes on before `SuspendActor` and off before `ResumeActor`,
+and lives as a `.stopped` file next to the bundle, so a stop cut short and a
+driver restart keep it. Without the launch endpoint it is in memory only.
 
 ### Template synthesis, `src/template.rs`
 
@@ -391,7 +390,10 @@ whole VM, workload memory included. The driver reports it as a wait, not a
 stop: the gateway shows Provisioning, keeps the sandbox's credentials and
 admits only `delete`, and is Ready again, memory intact, when Substrate
 resumes the actor and the supervisor reconnects. A stop would retire the
-credentials and force a new generation.
+credentials and force a new generation. A resume from the Substrate side of
+a sandbox the gateway stopped changes nothing the gateway sees: the driver
+keeps reporting Stopped, and the next `start` hands the running actor a new
+generation without a restore.
 
 ## Sequences
 
