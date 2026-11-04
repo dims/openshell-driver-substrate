@@ -23,23 +23,20 @@ upstream and what to fix first here.
    the image's `USER`. A policy's `run_as_user` has no effect, and an image
    with another user fails the sandbox's identity check inside the VM, after
    `create` returned Ok.
-3. **The supervisor and relay containers run the operator's runtime image.**
-   The fragment names `${RUNTIME_IMAGE}` for all three containers and
-   `apply_fragment` replaces only the `sandbox` container's image
-   (`src/template.rs`); `gateway-up.sh` freezes that fragment into a
-   ConfigMap. Nothing checks that the request image's `openshell-sandbox` and
-   the runtime image's `openshell-supervisor` are the same release. A fragment
-   without a container named `sandbox` is accepted and the request's image
-   lands in the first one.
+3. **The supervisor container runs the operator's runtime image.** The
+   fragment names `${RUNTIME_IMAGE}` for both containers and `synthesize`
+   replaces only the `sandbox` container's image (`src/template.rs`);
+   `gateway-up.sh` freezes that fragment into a ConfigMap. Nothing checks
+   that the request image's `openshell-sandbox` and the runtime image's
+   `openshell-supervisor` are the same release.
 4. **No GPUs, no user namespaces.** `validate_substrate_sandbox` in
    `src/lib.rs` rejects both. Substrate's `Control` API has no GPU field to
    map a request to.
 5. **Spec fields dropped without a word:** the template's `labels`,
    `agent_socket_path` and `platform_config` (the docker driver rejects the
-   last two), the spec's `sandbox_token` and `isolation_backend`, and, without
-   a launch endpoint, `tty` and `await_main_process_attachment` while only
-   `command` is refused. Resource requests are ignored and the limits size the
-   whole micro-VM, not a container.
+   last two), the spec's `sandbox_token`, `isolation_backend`, `tty` and
+   `await_main_process_attachment`. Resource requests are ignored and the
+   limits size the whole micro-VM, not a container.
 6. **No `openshell sandbox update`.** The driver advertises only
    `openshell.compute.suspend-resume`; without
    `openshell.compute.update-sandbox-configuration` the gateway refuses an
@@ -61,10 +58,11 @@ upstream and what to fix first here.
    `supports_sandbox_authentication` is false, so the gateway's compute-driver
    sandbox bootstrap authenticator stays off. `rootfs_tar_staging_dir` is
    empty, so the gateway's rootfs-tar path is off too.
-10. **A sandbox command needs the launch endpoint.** Without `[launch]` the
-    driver rejects `spec.command`, names every sandbox by its id, and runs it
-    on whatever credentials the image carries, with the command the fragment
-    puts in `WORKLOAD` (`harness/scripts/driver-up.sh`, `runtime/launcher.py`).
+10. **No ingress but the gateway's.** The workload is reached with `openshell
+    sandbox exec` and `connect` over the supervisor's SSH relay. Substrate's
+    router cannot reach it: the sandbox's network broker refuses `accept(2)`
+    from a non-loopback peer, and the gateway's loopback service endpoint,
+    which would publish a port, is not wired up.
 
 ## Lifecycle
 
@@ -92,8 +90,7 @@ upstream and what to fix first here.
 4. **`start` ignores `resume`.** The gateway sends `resume=false` after a
    stop and expects a fresh boot, `resume=true` after a suspend. The driver
    restores the last checkpoint either way (`start_sandbox`), so guest state
-   from before a stop comes back. Without the launch endpoint start and resume
-   are the same operation.
+   from before a stop comes back.
 5. **A Substrate-side suspend parks the sandbox in Provisioning.** The driver
    reports `Ready=False (DependenciesNotReady)` so the gateway keeps the
    credentials, but the gateway admits only `delete` in that phase and has no
@@ -125,22 +122,18 @@ upstream and what to fix first here.
    while other creates may be polling the same name, which then see
    `NotFound`; a timeout leaves the template and its golden actor behind.
 10. **Every activation waits for the probes, and the probes say little.** An
-    activation completes only when the two launchers and the relay answer
-    `/healthz`, and fails after 30 s if one does not. On the gateway path the
-    answer means the launchers are polling, not that OpenShell works: the
-    golden actor has no egress policy, its launchers get 403 every 5 s and
-    never start OpenShell, and the qualification gates and the boundary attach
-    run per actor after every restore. Without a gateway the sandbox launcher
-    answers only while the workload accepts on `WORKLOAD_PORT`, so a workload
-    that stops listening fails its next resume. `run.sh`'s warm-up check has
-    no gateway-path equivalent.
+    activation completes only when the two launchers answer `/healthz`, and
+    fails after 30 s if one does not. The answer means the launchers are
+    polling, not that OpenShell works: the golden actor has no egress policy,
+    its launchers get 403 every 5 s and never start OpenShell, and the
+    qualification gates and the boundary attach run per actor after every
+    restore. Nothing checks the workload itself.
 
 ## State and recovery
 
 1. **The stopped mark lives with the bundle store.** It is a `.stopped` file
-   next to the bundle, read when the driver starts (`src/launch.rs`). Without
-   a launch endpoint it is in memory only, and a second replica would not see
-   the first one's marks.
+   next to the bundle, read when the driver starts (`src/launch.rs`); a second
+   replica would not see the first one's marks.
 2. **One replica.** Bundles are files on a `ReadWriteOnce` volume plus a
    per-process map, the gateway's database is SQLite on another, the
    Deployment uses `Recreate`, and the launch Service selects every gateway
@@ -227,12 +220,9 @@ upstream and what to fix first here.
    policy that grants `/run` or `/` hands them over. The image gives `/etc` to
    that user so the launcher can rewrite `resolv.conf`; the launcher and the
    supervisor are not confined.
-7. **The relay and the health ports are unauthenticated.** `relay.py` exposes
-   the workload port on the actor's address to anything atenet-router admits,
-   outside OpenShell's own ingress, without an audit record. Its ports are the
-   fragment's (`RELAY_PORT`, `WORKLOAD_PORT`), not the request's. The three
-   `/healthz` listeners (17901 to 17903) answer the same callers; they reveal
-   only that a launcher is up.
+7. **The health ports are unauthenticated.** The two `/healthz` listeners
+   (17901, 17902) answer anything atenet-router admits; they reveal only that
+   a launcher is up.
 8. **A removed IdP key verifies for up to five minutes.** The JWKS cache is
    fetched again after that age or on an unknown `kid`, and a cold cache during
    an IdP outage holds the verifier's lock for the 10 s HTTP timeout per
@@ -250,8 +240,7 @@ upstream and what to fix first here.
 ## Harness and portability
 
 1. **kind only.** `kind-up.sh` makes a single-node cluster with rustfs. GKE
-   and multi-node clusters are untested in this version. Ollama keeps its
-   model on an emptyDir and pulls it again after every restart.
+   and multi-node clusters are untested in this version.
 2. **Two sandboxes at a time.** The pool has two workers of two cores and the
    fragment asks for two cores (`harness/manifests`,
    `harness/gateway/template.yaml.tmpl`). The soak runs are sequential; there
@@ -260,28 +249,24 @@ upstream and what to fix first here.
    platform's manifests and `gateway-up.sh` wraps a host-built glibc binary in
    an Ubuntu 24.04 image, so a host with a newer glibc yields a driver that
    does not start. No image is published.
-4. **The OpenShell pin is expensive to move.** `src/bundle.rs` and
-   `harness/bootstrap-gen` build `BoundaryConfig`, `SandboxRuntimeDescriptor`
-   and `SupervisorAuthBundle` by hand against rev 5d25211.
-5. **The boundary address is written three times.** `169.254.17.2:17777`
-   lives in `src/bundle.rs`, `harness/bootstrap-gen` and, as a hex pattern
-   for `/proc/net/tcp`, in `launcher.py`; the health ports 17901 to 17903 in
-   the launcher, the relay and both fragments; the mount paths and the
-   `policy-dns-transparent-tcp` capability are the launcher's constants. A
-   change in one place is a 120 s wait and `exit 1` with no hint.
-6. **The model endpoint is baked in.** `MODEL_HOST` goes into the policy data,
-   the egress rules and, without a gateway, the image's bootstrap. A change
-   rebuilds the image and the templates. `kind-up.sh` installs Ollama with
-   `qwen2.5:1.5b` as that endpoint.
+4. **The OpenShell pin is expensive to move.** `src/bundle.rs` builds
+   `BoundaryConfig`, `SandboxRuntimeDescriptor` and `SupervisorAuthBundle` by
+   hand against rev 5d25211.
+5. **The boundary address is written twice.** `169.254.17.2:17777` lives in
+   `src/bundle.rs` and, as a hex pattern for `/proc/net/tcp`, in
+   `launcher.py`; the health ports 17901 and 17902 in the launcher and the
+   fragment; the mount paths and the `policy-dns-transparent-tcp` capability
+   are the launcher's constants. A change in one place is a 120 s wait and
+   `exit 1` with no hint.
+6. **The model endpoint is in the configuration.** `MODEL_HOST` goes into
+   the sandbox policy and the driver's egress rules; a change re-renders both
+   and reaches new actors only. `model-up.sh` installs Ollama with
+   `qwen2.5:1.5b` as that endpoint, on an emptyDir.
 7. **Reruns drift.** `kind-up.sh` moves the Substrate checkout and rebuilds
    `kubectl-ate` while the cluster stays on the installed revision, treats one
    existing Deployment as a finished install and never re-renders the pool;
-   `build.sh` downloads `policy.rego` from GitHub with no checksum;
    `gateway-up.sh` accepts any `openshell` on `PATH` whatever its version.
-8. **Demo credentials are loose.** `bootstrap-gen` writes its tokens 0644
-   under `out/`, and `build.sh` bakes them into two images pushed to the
-   registry. Only the demo pair trusts that key.
-9. **Small fixed points.** One sandbox per actor on fixed ports; no search
+8. **Small fixed points.** One sandbox per actor on fixed ports; no search
    domains in the sandbox's `resolv.conf`, so workloads need fully qualified
    names; `prep-host.sh` pipes remote installers into a root shell and sets
    host sysctls.
@@ -305,22 +290,18 @@ upstream and what to fix first here.
 
 ## Tests
 
-1. **CI runs no cluster.** `cargo test --lib` (25 pure tests), fmt, clippy,
+1. **CI runs no cluster.** `cargo test --lib` (26 pure tests), fmt, clippy,
    the proto diff, shellcheck and `py_compile` (`.github/workflows/ci.yml`).
 2. **Untested in the unit tests:** `src/bundle.rs`, the launch handler
    (401, 403, 204, 200, the generation and uid checks), `ActorJwtVerifier`,
    the watch diff, `suspend_again` and the per-actor lock, `checkpoint`'s
-   revert of a crashed actor, the create sequence, and all of `launcher.py`
-   and `relay.py`.
-3. **`tests/live.rs` is ignored by default**, returns silently without its
-   variables, and covers create, stop, start, list and delete without a
-   gateway or a launch endpoint; its "Ready" is Substrate's `RUNNING`.
-4. **The gateway path runs only by hand.** `harness/scripts/gateway-test.sh`
-   drives it start to finish, a resume behind a stop and a gateway pod
-   restart included, and `examples/helpdesk/soak.sh` the kubectl-ate demo,
-   but CI has no cluster, so neither runs there. Nothing interrupts a
-   lifecycle step, races a stop with a start, or recreates an actor under the
-   same name.
+   revert of a crashed actor, the create sequence, and all of `launcher.py`.
+3. **The gateway path runs only by hand.** `harness/scripts/gateway-test.sh`
+   drives two sandboxes start to finish, a resume behind a stop, a gateway
+   pod restart and a worker's death included, and `harness/scripts/soak.sh`
+   repeats it, but CI has no cluster, so neither runs there. Nothing
+   interrupts a lifecycle step, races a stop with a start, or recreates an
+   actor under the same name.
 
 ## What needs a change upstream
 
@@ -341,7 +322,7 @@ upstream and what to fix first here.
 1. Harden the launcher: guard the reads, stop what it started before it
    exits, tolerate a vanished bundle directory, and give the sandbox longer
    than it gives the workload (Operations 2).
-2. A static launcher and relay on a digest-pinned image volume, so the
+2. A static launcher on a digest-pinned image volume, so the
    workload image needs neither Python nor the runtime image (What a gateway
    user loses, item 1). It also needs a uid and gid strategy instead of the
    fixed 65532, and a way to point the sandbox's resolver at its relay that
@@ -349,6 +330,4 @@ upstream and what to fix first here.
 3. Durable lifecycle records with phases, reconciled against Substrate at
    startup and on a schedule, and fault tests that interrupt each phase,
    race a stop with a start, and recreate an actor under the same name
-   (State 3, Tests 4).
-4. OpenShell's own ingress for published services, the supervisor's app
-   listener behind Substrate's router, instead of the relay (Security 7).
+   (State 3, Tests 3).

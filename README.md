@@ -11,9 +11,9 @@ to either project. A stock `openshell-gateway` drives the driver over its
 socket: `openshell sandbox create` reaches `Ready` in a few seconds, and
 `exec`, `logs`, `suspend`, `resume`, `stop`, `start` and `delete` work. The
 workload in [`examples/helpdesk`](examples/helpdesk) runs inside a real
-OpenShell sandbox, its egress is mediated by the supervisor, it is reachable
-through atenet-router, and its memory survives a Substrate suspend and
-resume. Both pass on arm64 and on amd64.
+OpenShell sandbox, its egress is mediated by the supervisor, and its memory
+survives a Substrate suspend and resume. The lifecycle test passes ten times
+in a row on arm64 and on amd64.
 
 A resume through the gateway restarts the workload; only a Substrate-side
 suspend keeps its memory. See [Known gaps](#known-gaps).
@@ -41,28 +41,26 @@ flowchart TB
   api["ate-api-server"]
   worker["worker pod<br/>ateworker-microvm"]
   egress["atenet egress<br/>adds the actor JWT"]
-  router["atenet router<br/>mTLS ingress"]
 
   subgraph vm["one actor, one micro-VM"]
     direction LR
-    relay["relay"] -- "loopback" --> sbx["sandbox<br/>openshell-sandbox"] -- "boundary, TLS" --> sup["supervisor<br/>openshell-supervisor"]
+    sbx["sandbox<br/>openshell-sandbox"] -- "boundary, TLS" --> sup["supervisor<br/>openshell-supervisor"]
   end
 
   cli --> gw
   gw -- "ComputeDriver" --> drv
   drv -- "Control API" --> api
+  kate -- "suspend, resume" --> api
   api -- "restore, checkpoint" --> worker
   worker --> vm
   vm -- "supervisor: GET /v1/launch" --> egress
   egress --> drv
-  vm -- "supervisor session" --> gw
-  kate -- "proxy actor" --> router
-  router -- "to the relay" --> vm
+  vm -- "supervisor session, exec" --> gw
 
   class cli,gw stock
   class drv ours
-  class api,worker,egress,router sub
-  class relay,sbx,sup guest
+  class api,worker,egress sub
+  class sbx,sup guest
 ```
 
 The driver implements OpenShell's `ComputeDriver` gRPC trait and maps it onto
@@ -70,7 +68,7 @@ Substrate's actor lifecycle:
 
 | OpenShell call | What the driver does |
 |---|---|
-| `create_sandbox` | `CreateActorTemplate` (reused by content hash), `CreateActor`, `CreateActorEgressPolicy` when rules are configured, store the bundle bound to the actor's uid, `ResumeActor` |
+| `create_sandbox` | `CreateActorTemplate` (reused by content hash), `CreateActor`, `CreateActorEgressPolicy`, store the bundle bound to the actor's uid, `ResumeActor` |
 | `start_sandbox` | store the bundle of the new generation, clear the stopped mark, `ResumeActor` |
 | `stop_sandbox`, `suspend_sandbox` | set the stopped mark, then `SuspendActor` with synchronous durability; `RevertActor` for a `CRASHED` actor |
 | `delete_sandbox` | `DeleteActor`, drop the bundle and the mark |
@@ -90,27 +88,22 @@ the sandbox class. Its shape comes from the configuration file (`--config`,
 TOML): an ActorTemplate fragment in protojson YAML gives the containers,
 volumes, resources and snapshot settings every sandbox gets, and the
 request's image goes into the container named `sandbox`; an EgressPolicy
-file gives the rules every actor gets before its first resume. Without a
-fragment the template is one container. Every container drops all
-capabilities, the template takes memory snapshots, and its limits come from
-the sandbox template's `cpu_limit` and `memory_limit` (Kubernetes
-quantities), then the fragment, then the driver's defaults.
+file gives the rules every actor gets before its first resume; `[launch]`
+and `[gateway]` say where the launch endpoint listens and which gateway the
+supervisors dial. Every container drops all capabilities, the template takes
+memory snapshots, and its limits come from the sandbox template's `cpu_limit`
+and `memory_limit` (Kubernetes quantities), then the fragment, then the
+driver's defaults.
 
 A sandbox gets its credentials after the restore, not from the snapshot. The
 gateway mints a launch bundle per sandbox and per start; the driver keeps it
-on disk and serves it on `GET /v1/launch/<atespace>/<name>` (the `[launch]`
-section of the configuration). Inside the actor a launcher reads its own name
-from a `systemInfo` volume, which Substrate rewrites on every restore, and
-polls that URL. An EgressPolicy rule makes atenet-egress replace the
-`Authorization` header with a Substrate-minted actor JWT, so the driver knows
-which actor asks and answers only with that actor's bundle; it verifies the
-token against the IdP's JWKS and the token's actor uid against the bundle's,
-and the sandbox checks the same uid against `/run/ate/actor-uid` before it
-starts. The launcher writes the supervisor's and the
-sandbox's files, starts `openshell-supervisor` against the gateway (the
-`[gateway]` section), then `openshell-sandbox`, and the supervisor's session
-takes the sandbox to `Ready`. A new generation from `start` or `resume`
-replaces both processes.
+on disk and serves it on `GET /v1/launch/<atespace>/<name>`. Inside the actor
+a launcher polls that URL, atenet-egress puts a Substrate-minted actor JWT on
+the request, and the driver answers only with that actor's bundle; the
+launcher then starts `openshell-supervisor` and `openshell-sandbox` on it,
+and the supervisor's session takes the sandbox to `Ready`. The
+[Credentials](docs/architecture.md#credentials) section has the checks on
+both sides.
 
 The driver registers out of process over a Unix socket, as OpenShell's in-tree
 `openshell-driver-podman` / `-docker` / `-kubernetes` / `-vm` binaries do. A
@@ -131,34 +124,31 @@ authentication), `launch.rs` (the bundle store and the launch endpoint),
 ```
 src/                  the driver
 proto/                ateapi.proto, used by build.rs
-tests/live.rs         full lifecycle against a real cluster
 docs/                 architecture, shortcomings
-runtime/              the image every workload starts from: the OpenShell binaries, the launcher, the relay
-examples/helpdesk/    the demo: a Python agent on the runtime image, and the run without a gateway
+runtime/              the image every workload starts from: the OpenShell binaries and the launcher
+examples/helpdesk/    the example workload: a Python agent on the runtime image, and the optional model endpoint
 harness/
-  bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle for the demo without a gateway
   gateway/            the gateway and driver pod: Deployment, gateway.toml, driver.toml, the actor fragment, the egress rules, access policy
   manifests/          the WorkerPool
   scripts/prep-host.sh  packages, Docker, Go, kind, kubectl and Rust on Ubuntu 24.04
-  scripts/kind-up.sh    Substrate on kind, the pool, the atespace and the model endpoint
+  scripts/kind-up.sh    Substrate on kind, the pool and the atespace
   scripts/gateway-up.sh the stock gateway and this driver in the cluster, the openshell CLI
-  scripts/gateway-test.sh one sandbox through the gateway, start to finish
-  scripts/driver-up.sh  the driver alone on this host, for grpcurl
+  scripts/gateway-test.sh two sandboxes through the gateway, start to finish
+  scripts/soak.sh       gateway-test.sh N times in a row
   scripts/render.sh     renders a .tmpl from the environment
 ```
 
 ## Build and test
 
 ```sh
-cargo build --workspace --release
+cargo build --release
 cargo test --lib          # no cluster needed
 cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
-Needs rustc ≥ 1.94 (OpenShell's floor). `tests/live.rs` needs a reachable
-`ate-api-server` and is ignored by default; its header lists the variables,
-and `SUBSTRATE_LIVE_CONFIG` points it at a configuration file.
+Needs rustc ≥ 1.94 (OpenShell's floor). The cluster tests are
+`harness/scripts/gateway-test.sh` and `soak.sh` below.
 
 `proto/ateapi.proto` is a verbatim copy of Substrate's
 `api/ateapi/v1/ateapi.proto` at the commit in `proto/upstream-rev`; CI diffs
@@ -171,9 +161,9 @@ curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat pr
 ```
 
 Bumping the OpenShell pin in `Cargo.toml` is not a one-line change:
-`src/bundle.rs` and `harness/bootstrap-gen` build `BoundaryConfig`,
-`SandboxRuntimeDescriptor` and `SupervisorAuthBundle` by hand, and those
-types move between releases. Budget that work with every bump.
+`src/bundle.rs` builds `BoundaryConfig`, `SandboxRuntimeDescriptor` and
+`SupervisorAuthBundle` by hand, and those types move between releases. Budget
+that work with every bump.
 
 ---
 
@@ -211,12 +201,10 @@ under `WORK` (default `$HOME/openshell-substrate`, which holds the clone,
 `bin/` and `logs/`), builds `kubectl-ate`, creates the kind cluster and its
 registry at `localhost:5001`, installs `ate-system` with the micro-VM class
 (`ate-setup --kind deploy ate-system --sandbox-classes=microvm`, with the
-bundled credential provider and `atenet-client` on the router's ingress
-allowlist), creates the pool of two micro-VM workers and the atespace
-`ate-openshell-microvm`, and deploys Ollama with `qwen2.5:1.5b` in that
-atespace as the model endpoint. Steps already done are skipped. The install
-log is `$WORK/logs/install.log`. Knobs: `WORK`, `SUBSTRATE_REF`, `ATESPACE`,
-`MODEL_NAME`, `MODEL_PORT`, `POST_KIND_HOOK`.
+bundled credential provider), and creates the pool of two micro-VM workers
+and the atespace `ate-openshell-microvm`. Steps already done are skipped. The
+install log is `$WORK/logs/install.log`. Knobs: `WORK`, `SUBSTRATE_REF`,
+`ATESPACE`, `POST_KIND_HOOK`.
 
 Substrate, OpenShell and kata run unmodified. One gap stays: micro-VM
 containers run without `no_new_privileges`, and `SecurityContext` has no field
@@ -230,35 +218,15 @@ REGISTRY=localhost:5001 examples/helpdesk/build.sh
 
 This builds the runtime image first (`runtime/build.sh`: the release's
 `sandbox` and `supervisor` images mirrored from `ghcr.io/nvidia/openshell`
-into the registry, python, the launcher and the relay; its digest goes to
-`out/runtime.env`), mints the credentials for the run without a gateway,
-builds the helpdesk image on top of the runtime image and the supervisor's
-files image, and writes their digests to `out/helpdesk.env`. Only this
-platform's manifest is mirrored, so build on the architecture the cluster
-runs. Substrate's API requires image digests, and Docker's own
-`RepoDigests` name the upstream index for a mirrored tag, so the digests come
-from the registry. Knobs: `REGISTRY` (required), `ATESPACE`, `MODEL_HOST`,
-`MODEL_PORT`, `MODEL_NAME`, `OPENSHELL_VERSION`.
+into the registry, python and the launcher; its digest goes to
+`out/runtime.env`), then the helpdesk image on top of it, and writes the
+digests to `out/helpdesk.env`. Only this platform's manifest is mirrored, so
+build on the architecture the cluster runs. Substrate's API requires image
+digests, and Docker's own `RepoDigests` name the upstream index for a
+mirrored tag, so the digests come from the registry. Knobs: `REGISTRY`
+(required), `OPENSHELL_VERSION`.
 
-### 3. Run it
-
-```sh
-examples/helpdesk/run.sh        # ten beats, about a minute
-examples/helpdesk/soak.sh 10    # the same, ten times in a row
-```
-
-[`examples/helpdesk`](examples/helpdesk) explains the beats and what each one
-proves. The two agents are reached with `kubectl-ate proxy actor`, which holds
-the client certificate atenet-router requires. `soak.sh` keeps one log per
-run under `SOAK_LOGS` (default `$HOME/openshell-substrate/logs/soak-<time>`).
-
-To tear everything down:
-
-```sh
-kind delete cluster && docker rm -f kind-registry && rm -rf "${WORK:-$HOME/openshell-substrate}" out
-```
-
-### 4. Drive it from a stock gateway
+### 3. The gateway and the driver
 
 ```sh
 harness/scripts/gateway-up.sh
@@ -273,10 +241,10 @@ makes the gateway's TLS pair and Ed25519 JWT keys, renders
 `harness/gateway/*.tmpl`, the actor fragment and the egress rules among them,
 into ConfigMaps, labels the namespace for API access, gives the driver's
 ServiceAccount the `editor` role on the atespace, and installs the `openshell`
-CLI under `$WORK/bin`. Rerun it after `runtime/build.sh` or a driver change:
+CLI under `$WORK/bin`. Rerun it after `build.sh` or a driver change:
 the pod restarts, its database, its credential key and the driver's bundles
-are on volumes, and the supervisors reconnect. Knobs: `WORK`, `REGISTRY`, `ATESPACE`,
-`OPENSHELL_VERSION`, `MODEL_HOST`, `MODEL_PORT`.
+are on volumes, and the supervisors reconnect. Knobs: `WORK`, `REGISTRY`,
+`ATESPACE`, `OPENSHELL_VERSION`, `MODEL_HOST`, `MODEL_PORT`.
 
 Then, with a port-forward to the gateway:
 
@@ -284,12 +252,13 @@ Then, with a port-forward to the gateway:
 kubectl -n ate-openshell-microvm port-forward svc/openshell-gateway 17670:17670 &
 export OPENSHELL_GATEWAY_ENDPOINT=https://127.0.0.1:17670 OPENSHELL_GATEWAY_INSECURE=1
 . out/helpdesk.env
-MODEL_HOST=$MODEL_HOST MODEL_PORT=$MODEL_PORT harness/scripts/render.sh examples/helpdesk/data.yaml.tmpl > policy.yaml
+MODEL_HOST=ollama.ate-openshell-microvm.svc.cluster.local MODEL_PORT=11434 \
+  harness/scripts/render.sh examples/helpdesk/data.yaml.tmpl > policy.yaml
 openshell sandbox create --name alice --from "$SANDBOX_IMAGE" --policy policy.yaml --detach \
-  --env "OPENAI_BASE_URL=http://$MODEL_HOST:$MODEL_PORT/v1" --env HELPDESK_MODEL=qwen2.5:1.5b \
   -- python3 /opt/helpdesk/agent.py
 openshell sandbox get alice            # Ready in about 2 s; 15 to 30 s more the first time, for the golden snapshot
-openshell sandbox exec alice -- cat /etc/resolv.conf
+openshell sandbox exec alice -- python3 /opt/helpdesk/agent.py chat "my database is timing out"
+openshell sandbox exec alice -- python3 /opt/helpdesk/agent.py status      # turns: 1
 openshell logs alice
 openshell sandbox suspend alice        # the actor is checkpointed and its worker freed
 openshell sandbox resume alice         # restored, new credentials, workload restarted
@@ -297,29 +266,35 @@ openshell sandbox stop alice && openshell sandbox start alice
 openshell sandbox delete alice
 ```
 
-The agent is reachable the demo's way too, with `kubectl-ate proxy actor`
-on the sandbox id (`openshell sandbox get alice -o json | jq -r .id`). The
-policy file matters: without one, the gateway's default Landlock rules do not
-cover `/opt/helpdesk` and the workload exits with `Permission denied`. The
-`--from` image must be built on the runtime image, as the helpdesk image is;
-[`runtime/README.md`](runtime/README.md) has the contract.
-`harness/scripts/gateway-test.sh` runs all of the above and more in one go:
-create, exec, logs, a chat, suspend and resume, stop and start, a
-Substrate-side resume behind a stop, a gateway pod restart, a Substrate-side
-suspend with the memory check, delete.
+Without a model endpoint the agent answers on its own. For a real model,
+`examples/helpdesk/model-up.sh` deploys Ollama in the atespace, and the create
+takes `--env OPENAI_BASE_URL=http://ollama.ate-openshell-microvm.svc.cluster.local:11434/v1 --env HELPDESK_MODEL=qwen2.5:1.5b`.
+The policy file matters: without one, the gateway's default Landlock rules do
+not cover `/opt/helpdesk` and the workload exits with `Permission denied`.
+The `--from` image must be built on the runtime image, as the helpdesk image
+is; [`runtime/README.md`](runtime/README.md) has the contract.
 
-To run the driver on this host instead, against a port-forward to
-`ate-api-server` with a 24 h token, and talk to it with `grpcurl` over the
-socket (it serves reflection):
+### 4. The lifecycle test
 
 ```sh
-harness/scripts/driver-up.sh
-grpcurl -plaintext -unix "$HOME/openshell-substrate/driver/driver.sock" list
+harness/scripts/gateway-test.sh    # about three minutes
+harness/scripts/soak.sh 10         # the same, ten times in a row
 ```
 
-`ate-api-server` needs TLS with the `servicedns` trust bundle, server name
-`api.ate-system.svc`, and a bearer token whose audience is that same name. It
-does not require a client certificate.
+`gateway-test.sh` drives two sandboxes through the gateway: create to Ready,
+exec and logs, the egress allow-list, a chat, suspend and resume, stop and
+start, a Substrate-side resume behind a stop, a gateway pod restart behind a
+stop, a Substrate-side suspend with the memory check, the death of one
+sandbox's worker with the gateway's recovery (`stop`, then `start`), delete;
+the second sandbox stays untouched until the end. With `WITH_MODEL=1` the
+chats go to the model endpoint. `soak.sh` keeps one log per run under
+`SOAK_LOGS` (default `$WORK/logs/soak-<time>`).
+
+To tear everything down:
+
+```sh
+kind delete cluster && docker rm -f kind-registry && rm -rf "${WORK:-$HOME/openshell-substrate}" out
+```
 
 ---
 
@@ -374,8 +349,9 @@ in the rootfs base layer and keeps the actor's own edits, so the launcher
 replaces the file with `nameserver 127.0.0.53` on the first boot and the golden
 snapshot carries it; the image's `/etc` belongs to the sandbox user so no root
 is needed. The supervisor keeps its own container, because its policy DNS
-resolves upstream names through the container's resolver. The supervisor's policy DNS then resolves only the hosts the policy
-names; a refused name shows as `NET:REFUSE ... policy_dns_ineligible`.
+resolves upstream names through the container's resolver. The supervisor's
+policy DNS then resolves only the hosts the policy names; a refused name shows
+as `NET:REFUSE ... policy_dns_ineligible`.
 
 ### Two transient conditions
 
@@ -383,17 +359,15 @@ names; a refused name shows as `NET:REFUSE ... policy_dns_ineligible`.
 progress` while that template's golden warm-up runs. Retry after it finishes.
 
 The golden snapshot is taken when every container's wakeup probe answers
-200 (`/healthz` on the two launchers and the relay); a probe that never
-answers fails the golden actor after 30 s and the template records the error,
-so `create_sandbox` fails instead of snapshotting a dead container. Without
-a gateway the sandbox launcher answers only once the workload accepts
-connections, so that snapshot holds a live workload.
+200 (`/healthz` on the two launchers); a probe that never answers fails the
+golden actor after 30 s and the template records the error, so
+`create_sandbox` fails instead of snapshotting a dead container.
 
 ### Where the output is
 
 The worker pod forwards actor logs, each line labelled with the actor and
 container; `kubectl-ate logs actor <name> -a <atespace>` filters them, and
-`run.sh` prints the matching lines after each beat:
+`gateway-test.sh` prints the matching lines when a step fails:
 
 ```sh
 kubectl logs -n "${ATESPACE}" <worker-pod> | grep -i openshell
