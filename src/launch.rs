@@ -170,6 +170,9 @@ pub struct ActorJwtVerifier {
 
 /// An unknown key id refetches the JWKS, at most this often.
 const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// A key set older than this is fetched again before use, so a key the IdP
+/// removed stops verifying within this long.
+const JWKS_MAX_AGE: Duration = Duration::from_secs(300);
 
 #[derive(Deserialize)]
 struct Claims {
@@ -230,10 +233,10 @@ impl ActorJwtVerifier {
 
     async fn key(&self, kid: &str, refresh: bool) -> Result<Option<DecodingKey>, String> {
         let mut keys = self.keys.lock().await;
-        let stale = keys
-            .as_ref()
-            .is_none_or(|(_, fetched)| fetched.elapsed() >= JWKS_REFRESH_INTERVAL);
-        if keys.is_none() || (refresh && stale) {
+        let age = keys.as_ref().map(|(_, fetched)| fetched.elapsed());
+        let stale = age.is_none_or(|age| age >= JWKS_REFRESH_INTERVAL);
+        let expired = age.is_some_and(|age| age >= JWKS_MAX_AGE);
+        if keys.is_none() || expired || (refresh && stale) {
             let set: JwkSet = self
                 .http
                 .get(&self.jwks_url)

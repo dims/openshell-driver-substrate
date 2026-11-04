@@ -430,6 +430,18 @@ impl SubstrateComputeDriver {
     ) -> Result<Option<tonic::transport::ClientTlsConfig>, SubstrateDriverError> {
         let cfg = &self.config;
         let Some(ca_path) = cfg.api_tls_ca_path.as_ref() else {
+            if cfg.api_client_cert_path.is_some()
+                || cfg.api_client_key_path.is_some()
+                || cfg.api_tls_server_name.is_some()
+            {
+                return Err(SubstrateDriverError::CredentialFile {
+                    path: String::from("api_tls_ca_path"),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "a client certificate or a TLS server name needs api_tls_ca_path; without it the driver dials plaintext",
+                    ),
+                });
+            }
             return Ok(None);
         };
         let ca_pem = tokio::fs::read(ca_path).await.map_err(|source| {
@@ -1351,6 +1363,16 @@ mod tests {
         let mut interceptor = AuthInterceptor { bearer: None };
         let req = interceptor.call(Request::new(())).unwrap();
         assert!(req.metadata().get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn load_tls_config_rejects_tls_settings_without_a_ca() {
+        let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
+            api_tls_server_name: Some("api.ate-system.svc".to_string()),
+            ..Default::default()
+        });
+        let err = driver.load_tls_config().await.unwrap_err();
+        assert!(matches!(err, SubstrateDriverError::CredentialFile { .. }));
     }
 
     #[tokio::test]

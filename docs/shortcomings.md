@@ -141,7 +141,11 @@ upstream and what to fix first here.
    Deployment uses `Recreate`, and the launch Service selects every gateway
    pod (`harness/gateway/deployment.yaml.tmpl`). A second replica would answer
    204 or 403 for bundles it does not hold. Every rollout is downtime for the
-   API; running sandboxes continue and their supervisors reconnect.
+   API; running sandboxes continue and their supervisors reconnect. The
+   gateway's state dir (`XDG_STATE_HOME`) is an emptyDir: its database and
+   its credential-store key are pointed at the data volume by name
+   (`gateway.toml.tmpl`), and anything else it may keep there is lost on a
+   restart.
 3. **No reconciliation.** A lost gateway database leaves actors in Substrate
    that no one owns. A lost bundle store leaves running sandboxes whose
    launchers get 204 until the next `start` mints a bundle, and the driver
@@ -173,8 +177,14 @@ upstream and what to fix first here.
 ## Security
 
 1. **The launch hop is plain HTTP** from atenet-egress to the driver's
-   Service (`harness/gateway/egress-policy.yaml.tmpl`). An `https` rule with
-   the trust bundle from a `systemInfo` source would close it.
+   Service (`harness/gateway/egress-policy.yaml.tmpl`), so the actor JWT and
+   the bundle cross the cluster network in the clear. Closing it takes two
+   changes: the driver must serve TLS on the launch endpoint (it serves only
+   HTTP, `src/main.rs`), and the egress must trust an in-cluster origin, which
+   it does not today: an `https` rule re-originates against the public roots
+   only (`/etc/ssl/certs/ca-certificates.crt` in Substrate's agentgateway
+   egress config), so a servicedns or harness-CA certificate would not verify.
+   The second part is an upstream change.
 2. **A bundle is a bearer secret for the sandbox's lifetime.** The endpoint
    checks the actor JWT and compares generations; there is no one-shot
    delivery, and the bundle stays until `delete`. The driver cannot tell the
@@ -211,9 +221,10 @@ upstream and what to fix first here.
    the actor's address to anything atenet-router admits, outside OpenShell's
    own ingress, without an audit record. Its ports are the fragment's
    (`RELAY_PORT`, `WORKLOAD_PORT`), not the request's.
-8. **The JWKS cache never drops a key.** A key removed from the IdP verifies
-   tokens until an unknown `kid` forces a refresh, and a cold cache during an
-   IdP outage holds the verifier's lock for the 10 s HTTP timeout per request.
+8. **A removed IdP key verifies for up to five minutes.** The JWKS cache is
+   fetched again after that age or on an unknown `kid`, and a cold cache during
+   an IdP outage holds the verifier's lock for the 10 s HTTP timeout per
+   request.
 9. **The harness gateway is open.** `allow_unauthenticated_users = true`, no
    NetworkPolicy on the gateway or launch Services, the whole namespace
    labelled for API access, the CLI running with `--gateway-insecure` because
@@ -272,9 +283,10 @@ upstream and what to fix first here.
    supervisor and leaves no current generation. If a newer generation arrives
    while the sandbox role is still terminating the old sandbox, the bundle
    directory it copies from is already gone. It gives `openshell-sandbox`
-   10 s to leave while the sandbox gives the workload 15 s, so a workload that
-   ignores SIGTERM can outlive its broker and keep port 8080 from the next
-   generation. It reaps only its direct child.
+   10 s before SIGKILL while the sandbox gives its workload the same 10 s and
+   then a forced kill and a flush, so a workload that ignores SIGTERM may
+   outlive its broker and keep port 8080 from the next generation; not
+   reproduced here. It reaps only its direct child.
 3. **A driver restart ends the watch stream.** The gateway reopens it after
    2 s; bundles and stopped marks survive on disk.
 
@@ -298,13 +310,14 @@ upstream and what to fix first here.
 - OpenShell: a new generation per `start` and `resume`, no supervisor takeover
   in dedicated mode, `SuspendBoundary` unimplemented, no deadline for
   Provisioning after Ready and no `stop` or `start` from it, Stopped and
-  Suspended phases that reject every sandbox token, a sandbox binary that must
-  be in the image, and default Landlock rules that need `--policy` for a
-  workload outside the defaults.
+  Suspended phases that reject every sandbox token, and no way for a
+  dedicated supervisor to attach to a running sandbox.
 - Substrate: no watch RPC, no labels on actors (ownership by name), templates
   never garbage-collected, no `no_new_privileges` field, `Linux.Seccomp`,
   `ApparmorProfile` and `Sysctl` not settable from a template, `Aborted` on
-  concurrent operations, and a golden snapshot with no readiness check.
+  concurrent operations, a golden snapshot with no readiness check, and an
+  egress that verifies an `https` origin against the public roots only, so no
+  in-cluster service can sit behind an `https` rule.
 
 ## What to fix first
 

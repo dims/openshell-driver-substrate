@@ -419,7 +419,7 @@ sequenceDiagram
     R->>API: create golden actor, ResumeActor
     API->>W: Restore from cold boot
     W->>W: boot the micro-VM, start the containers
-    Note over R,W: sandbox clears its gates, supervisor attaches,<br/>workload launched
+    Note over R,W: without a gateway the sandbox clears its gates, the supervisor attaches and the workload starts.<br/>With one, the golden actor holds two launchers polling for a bundle they never get
     R->>R: wait 20 s (goldenSnapshotWarmup)
     R->>API: SuspendActor
     API->>W: Checkpoint

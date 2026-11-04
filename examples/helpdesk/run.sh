@@ -53,6 +53,10 @@ until_up() {  # actor: a 502 from the router is not up
   local i; for ((i = 0; i < 60; i++)); do ask "$1" /status >/dev/null 2>&1 && return 0; sleep 1; done
   echo "$1 never answered /status through the router; read the worker pod log" >&2; return 1
 }
+expect_turns() {  # actor n: /status must report that many turns
+  local out; out=$(ask "$1" /status); echo "${out}"
+  jq -e --argjson n "$2" '.turns == $n' <<<"${out}" >/dev/null || { echo "$1 reports turns $(jq -r .turns <<<"${out}"), expected $2" >&2; return 1; }
+}
 chat()  {  # actor message: the answer must carry a reply, not the app's error JSON
   local out; out=$(ask "$1" /chat -X POST -H 'Content-Type: application/json' -d "{\"message\":\"$2\"}")
   echo "${out}"; jq -e '.reply' <<<"${out}" >/dev/null || { echo "$1 gave no reply" >&2; return 1; }
@@ -129,12 +133,15 @@ actors
 under 'Actor restored'
 
 beat "3  Egress is an allow-list: the model host, from python, and nothing else"
-ask alice "/egress?url=https://example.com/"
-ask alice "/egress?url=http://${MODEL_HOST}:${MODEL_PORT}/api/tags"
+denied=$(ask alice "/egress?url=https://example.com/"); echo "${denied}"
+jq -e '.reached == false' <<<"${denied}" >/dev/null || { echo "example.com was reachable from the sandbox" >&2; exit 1; }
+allowed=$(ask alice "/egress?url=http://${MODEL_HOST}:${MODEL_PORT}/api/tags"); echo "${allowed}"
+jq -e '.reached == true' <<<"${allowed}" >/dev/null || { echo "the model host was not reachable from the sandbox" >&2; exit 1; }
 under 'network_broker|OCSF'
 
 beat "4  alice answers through the supervisor's proxy"
 chat alice "User foo reports their database is timing out. Give me a three-step triage checklist."
+expect_turns alice 1 >/dev/null
 under 'OCSF HTTP'
 
 beat "5  Suspend alice: a snapshot is written and her worker is free"
@@ -145,12 +152,13 @@ under 'checkpoint'
 
 beat "6  Resume alice: her memory comes back with the snapshot"
 kubectl-ate resume actor -a "${ATESPACE}" alice >/dev/null; until_state alice ACTOR_STATE_RUNNING; proxy alice; until_up alice
-ask alice /status
+expect_turns alice 1
 chat alice "In one sentence, what problem did the user report?"
+expect_turns alice 2 >/dev/null
 under 'Actor restored'
 
 beat "7  bob was never involved"
-ask bob /status
+expect_turns bob 0
 
 beat "8  alice's host dies: alice crashes, bob does not"
 worker_pod=$(pod alice)
@@ -172,7 +180,7 @@ done
 until_state alice ACTOR_STATE_RUNNING 300; proxy alice; until_up alice
 kubectl-ate get workers
 actors
-ask alice /status
+expect_turns alice 1
 under 'Actor restored'
 
 beat "10 Delete alice; bob and the template stay"

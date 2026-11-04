@@ -267,10 +267,10 @@ pub fn check_fragment(fragment: &ateapi::ActorTemplate) -> Result<(), String> {
     Ok(())
 }
 
-/// The fragment's containers replace the synthesized one; the container
-/// named `sandbox`, or else the first, takes the request's image and
-/// `drop: ALL`. Volumes, snapshot config and the golden egress policy come
-/// from the fragment when it sets them; the limits were merged in
+/// The fragment's containers replace the synthesized one, every one with
+/// `drop: ALL`; the container named `sandbox`, or else the first, takes the
+/// request's image. Volumes, snapshot config and the golden egress policy
+/// come from the fragment when it sets them; the limits were merged in
 /// `resources_for`.
 fn apply_fragment(
     template: &mut ateapi::ActorTemplate,
@@ -279,13 +279,14 @@ fn apply_fragment(
 ) {
     if !fragment.containers.is_empty() {
         let mut containers = fragment.containers.clone();
+        for c in &mut containers {
+            c.security_context = Some(drop_all());
+        }
         let i = containers
             .iter()
             .position(|c| c.name == "sandbox")
             .unwrap_or(0);
-        let sandbox = &mut containers[i];
-        sandbox.image = inputs.image.clone();
-        sandbox.security_context = Some(drop_all());
+        containers[i].image = inputs.image.clone();
         template.containers = containers;
     }
     if !fragment.volumes.is_empty() {
@@ -577,15 +578,17 @@ mod tests {
             .map(|e| (e.name.as_str(), e.value.as_str()))
             .collect();
         assert_eq!(env, [("FOO", "bar")]);
-        let drops = &s
-            .security_context
-            .as_ref()
-            .unwrap()
-            .capabilities
-            .as_ref()
-            .unwrap()
-            .drop;
-        assert_eq!(drops, &["ALL"]);
+        for c in &tmpl.containers {
+            let drops = &c
+                .security_context
+                .as_ref()
+                .unwrap()
+                .capabilities
+                .as_ref()
+                .unwrap()
+                .drop;
+            assert_eq!(drops, &["ALL"], "{}", c.name);
+        }
         assert_eq!(s.volume_mounts[0].mount_path, "/data");
         assert_eq!(tmpl.volumes.len(), 1);
         assert_eq!(
