@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepare an Ubuntu 24.04 host (amd64 or arm64) for the demo: the packages,
+# Prepare an Ubuntu 24.04 host (amd64 or arm64) for the harness: the packages,
 # Docker, Go, kind, kubectl and the Rust toolchain. Run as root. Idempotent.
 #
 #   sudo harness/scripts/prep-host.sh

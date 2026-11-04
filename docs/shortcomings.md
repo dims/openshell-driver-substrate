@@ -250,8 +250,8 @@ upstream and what to fix first here.
    an Ubuntu 24.04 image, so a host with a newer glibc yields a driver that
    does not start. No image is published.
 4. **The OpenShell pin is expensive to move.** `src/bundle.rs` builds
-   `BoundaryConfig`, `SandboxRuntimeDescriptor` and `SupervisorAuthBundle` by
-   hand against rev 5d25211.
+   `BoundaryConfig` and `SandboxRuntimeDescriptor` by hand and reads the
+   gateway's `SandboxLaunchAuthentication`, all against rev 5d25211.
 5. **The boundary address is written twice.** `169.254.17.2:17777` lives in
    `src/bundle.rs` and, as a hex pattern for `/proc/net/tcp`, in
    `launcher.py`; the health ports 17901 and 17902 in the launcher and the

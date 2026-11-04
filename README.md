@@ -144,7 +144,7 @@ harness/
 cargo build --release
 cargo test --lib          # no cluster needed
 cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Needs rustc ≥ 1.94 (OpenShell's floor). The cluster tests are
@@ -161,9 +161,9 @@ curl -fsSL "https://raw.githubusercontent.com/agent-substrate/substrate/$(cat pr
 ```
 
 Bumping the OpenShell pin in `Cargo.toml` is not a one-line change:
-`src/bundle.rs` builds `BoundaryConfig`, `SandboxRuntimeDescriptor` and
-`SupervisorAuthBundle` by hand, and those types move between releases. Budget
-that work with every bump.
+`src/bundle.rs` builds `BoundaryConfig` and `SandboxRuntimeDescriptor` by
+hand and reads the gateway's `SandboxLaunchAuthentication`, and those types
+move between releases. Budget that work with every bump.
 
 ---
 

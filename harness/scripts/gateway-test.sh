@@ -9,7 +9,8 @@
 # gateway-up.sh, examples/helpdesk/build.sh and two free workers. With
 # WITH_MODEL=1 the chats go to the model endpoint (examples/helpdesk/model-up.sh)
 # and the egress check expects it reachable too; without it the agent answers
-# on its own. The last line printed is GATEWAY_TEST_EXIT=<rc>.
+# on its own and the egress check is the refusal only. The last line printed
+# is GATEWAY_TEST_EXIT=<rc>.
 #
 #   harness/scripts/gateway-test.sh
 #

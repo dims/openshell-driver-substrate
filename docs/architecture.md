@@ -124,7 +124,7 @@ variables), loads the configuration file (`--config`: the ActorTemplate
 fragment, the egress rules, the `[launch]` endpoint and the `[gateway]` the
 supervisors dial; `src/configfile.rs`, protojson YAML decoded in
 `src/fragment.rs`), binds the socket, serves `ComputeDriverServer` with
-reflection, and the launch endpoint when configured.
+reflection, and the launch endpoint.
 
 `src/lib.rs` implements the trait:
 

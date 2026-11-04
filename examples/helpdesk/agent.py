@@ -123,8 +123,8 @@ def client(args):
         except urllib.error.HTTPError as e:
             status, body = e.code, e.read().decode("utf-8", "replace")
             break
-        except ConnectionRefusedError:
-            if attempt == 9:
+        except urllib.error.URLError as e:
+            if attempt == 9 or not isinstance(e.reason, ConnectionRefusedError):
                 raise
             time.sleep(0.5)
     print(body)
