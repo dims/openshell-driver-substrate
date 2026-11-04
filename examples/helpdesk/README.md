@@ -105,7 +105,7 @@ examples/helpdesk/run.sh
 examples/helpdesk/soak.sh 10    # ten runs in a row; stops at the first failure
 ```
 
-About a minute with a fresh template, 20 to 30 seconds when it exists.
+About 35 seconds with a fresh template, 20 to 30 seconds when it exists.
 In a second terminal:
 
 ```sh
@@ -124,58 +124,60 @@ Trimmed. The indented lines under each beat are what `run.sh` pulled from the
 worker pods and ate-api-server for that beat.
 
 ```
-== 1  Template and golden snapshot  (+2s)
+== 1  Template and golden snapshot  (+1s)
 ATESPACE                NAME                GOLDEN TAG                             ERROR   AGE
-ate-openshell-microvm   helpdesk-c734f33f   1c6a0b2e-...                                   26s
+ate-openshell-microvm   helpdesk-01bc8e28   13e261c3-...                                   10s
+  golden/sandbox      OCSF CONFIG:BUILT [INFO] Landlock ruleset built [rules_applied:14 skipped:0]
+  golden/sandbox      OCSF PROC:LAUNCH [INFO] python3(449)
   golden/supervisor   INFO openshell_sandbox_backend::runtime_initiated: Runtime-initiated Sandbox Protocol listener ready
   golden/supervisor   INFO openshell_supervisor: Isolation boundary attached
-  golden/sandbox      OCSF CONFIG:BUILT [INFO] Landlock ruleset built [rules_applied:14 skipped:0]
-  golden/sandbox      OCSF PROC:LAUNCH [INFO] python3(56)
   ateworker           Actor checkpointed  base-id config.json durable-dir-socket-dir.tar durable-dir-supervisor-ca.tar memory-ranges rootfs-upper-relay.tar ...
 
-== 2  Two agents restored from that one snapshot  (+38s)
-ate-openshell-microvm   alice   .../helpdesk-c734f33f   ACTOR_STATE_RUNNING   .../openshell-microvm-c764cc79-brq82   10.244.0.23
-ate-openshell-microvm   bob     .../helpdesk-c734f33f   ACTOR_STATE_RUNNING   .../openshell-microvm-c764cc79-q7h4m   10.244.0.24
-  ateworker           Actor restored (overlay rootfs) in 350 ms
-  ateworker           Actor restored (overlay rootfs) in 323 ms
+== 2  Two agents restored from that one snapshot  (+13s)
+ate-openshell-microvm   alice   .../helpdesk-01bc8e28   ACTOR_STATE_RUNNING   .../openshell-microvm-fb57f8c8-b24jg   10.244.0.23
+ate-openshell-microvm   bob     .../helpdesk-01bc8e28   ACTOR_STATE_RUNNING   .../openshell-microvm-fb57f8c8-rcq4c   10.244.0.24
+  ateworker           Actor restored (overlay rootfs) in 378 ms
+  ateworker           Actor restored (overlay rootfs) in 387 ms
 
-== 3  Egress is an allow-list: the model host, from python, and nothing else  (+42s)
+== 3  Egress is an allow-list: the model host, from python, and nothing else  (+18s)
 {"url": "https://example.com/", "reached": false, "error": "URLError: <urlopen error [Errno 13] Permission denied>"}
 {"url": "http://ollama.ate-openshell-microvm.svc.cluster.local:11434/api/tags", "reached": true, "http_status": 200, "bytes": 438}
   alice/supervisor    OCSF NET:REFUSE [MED] DENIED example.com [reason:policy_dns_ineligible]
   alice/supervisor    OCSF NET:OPEN [MED] DENIED /usr/local/bin/python3.12(0) -> example.com:443 [reason:transparent_tcp_policy_denied]
-  alice/supervisor    OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped ollama.ate-openshell-microvm.svc.cluster.local resolved=10.96.237.191 ...
+  alice/supervisor    OCSF CONFIG:PUBLISHED [INFO] Policy DNS mapped ollama.ate-openshell-microvm.svc.cluster.local resolved=10.96.28.83 ...
   alice/supervisor    OCSF NET:OPEN [INFO] ALLOWED /usr/local/bin/python3.12(0) -> ollama.ate-openshell-microvm.svc.cluster.local:11434 [policy:model engine:opa]
   alice/supervisor    OCSF HTTP:GET [INFO] ALLOWED GET http://ollama.ate-openshell-microvm.svc.cluster.local:11434/api/tags
 
-== 4  alice answers through the supervisor's proxy  (+43s)
-{"reply": "Certainly! Here's a three-step triage checklist ...", "turns": 1}
+== 4  alice answers through the supervisor's proxy  (+19s)
+{"reply": "Sure, here's a three-step triage checklist ...", "turns": 1}
   alice/supervisor    OCSF HTTP:POST [INFO] ALLOWED POST http://ollama.ate-openshell-microvm.svc.cluster.local:11434/v1/chat/completions
 
-== 5  Suspend alice: a snapshot is written and her worker is free  (+47s)
+== 5  Suspend alice: a snapshot is written and her worker is free  (+23s)
   ateworker           Actor checkpointed  base-id config.json durable-dir-socket-dir.tar ...
 
-== 6  Resume alice: her memory comes back with the snapshot  (+49s)
-{"turns": 1, "uptime_seconds": 32.1, "model": "qwen2.5:1.5b", "inference_base": "http://ollama.ate-openshell-microvm.svc.cluster.local:11434/v1"}
+== 6  Resume alice: her memory comes back with the snapshot  (+25s)
+{"turns": 1, "uptime_seconds": 18.2, "model": "qwen2.5:1.5b", "inference_base": "http://ollama.ate-openshell-microvm.svc.cluster.local:11434/v1"}
 {"reply": "The user reported that their database is timing out.", "turns": 2}
-  ateworker           Actor restored (overlay rootfs) in 312 ms
+  ateworker           Actor restored (overlay rootfs) in 357 ms
 
-== 7  bob was never involved  (+51s)
-{"turns": 0, "uptime_seconds": 33.6, ...}
+== 7  bob was never involved  (+28s)
+{"turns": 0, "uptime_seconds": 19.7, ...}
 
-== 8  alice's host dies: alice crashes, bob does not  (+51s)
-ate-openshell-microvm   alice   .../helpdesk-c734f33f   ACTOR_STATE_CRASHED   <none>
-ate-openshell-microvm   bob     .../helpdesk-c734f33f   ACTOR_STATE_RUNNING   .../openshell-microvm-c764cc79-q7h4m   10.244.0.24
+== 8  alice's host dies: alice crashes, bob does not  (+28s)
+ate-openshell-microvm   alice   .../helpdesk-01bc8e28   ACTOR_STATE_CRASHED   <none>
+ate-openshell-microvm   bob     .../helpdesk-01bc8e28   ACTOR_STATE_RUNNING   .../openshell-microvm-fb57f8c8-rcq4c   10.244.0.24
   ateapi              Releasing actor from a worker whose pod is gone  alice
 
-== 9  Revert alice to her last snapshot; she resumes on the new worker  (+52s)
-ate-openshell-microvm   alice   .../helpdesk-c734f33f   ACTOR_STATE_RUNNING   .../openshell-microvm-c764cc79-pcn2s   10.244.0.26
-{"turns": 1, "uptime_seconds": 36.2, ...}
-  ateworker           Actor restored (overlay rootfs) in 360 ms
+== 9  Revert alice to her last snapshot; she resumes on the new worker  (+30s)
+ate-openshell-microvm   alice   .../helpdesk-01bc8e28   ACTOR_STATE_RUNNING   .../openshell-microvm-fb57f8c8-vxrpw   10.244.0.30
+{"turns": 1, "uptime_seconds": 23.6, ...}
+  ateworker           Actor restored (overlay rootfs) in 403 ms
 
-== 10 Delete alice; bob and the template stay  (+54s)
-ate-openshell-microvm   bob    .../helpdesk-c734f33f   ACTOR_STATE_RUNNING   .../openshell-microvm-c764cc79-q7h4m   10.244.0.24
-{"reply": "A helpdesk triage agent prioritizes and manages customer issues ...", "turns": 1}
+== 10 Delete alice; bob and the template stay  (+33s)
+ate-openshell-microvm   bob    .../helpdesk-01bc8e28   ACTOR_STATE_RUNNING   .../openshell-microvm-fb57f8c8-rcq4c   10.244.0.24
+{"reply": "A helpdesk triage agent quickly assesses and prioritizes issues ...", "turns": 1}
+
+== Done  (+34s)
 ```
 
 Beat 9 says `turns: 1` where beat 6 said `turns: 2`. That is the point of

@@ -26,19 +26,46 @@ suspend keeps its memory. See [Known gaps](#known-gaps).
 component, the lifecycle, and sequence diagrams for create, the request
 path, suspend and resume, host death, and how a sandbox gets its credentials.
 
-```
-openshell CLI -> openshell-gateway  (stock, unmodified binary)
-                       |
-                       |  ComputeDriver over a Unix socket
-                       v
-             openshell-driver-substrate   (this repo; its own process)
-                 |                 ^
-                 |  Control gRPC   |  GET /v1/launch/<atespace>/<name>
-                 v                 |  (actor JWT put on by atenet-egress)
-        Substrate ate-api-server   |
-                 |                 |
-                 v                 |
-ActorTemplate -> golden snapshot -> Actor (micro-VM): launcher -> supervisor + sandbox -> workload
+```mermaid
+flowchart TB
+  classDef stock fill:#ecfdf5,stroke:#059669,color:#064e3b
+  classDef ours fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px
+  classDef sub fill:#fff7ed,stroke:#ea580c,color:#7c2d12
+  classDef guest fill:#fdf4ff,stroke:#a21caf,color:#701a75
+
+  cli["openshell CLI"]
+  kate["kubectl-ate"]
+  gw["openshell-gateway<br/>stock v0.1.7"]
+  drv["openshell-driver-substrate, this repository<br/>ComputeDriver on a Unix socket<br/>launch endpoint: each sandbox's credential bundle"]
+  api["ate-api-server, the Control API<br/>ActorTemplate → golden snapshot → Actor"]
+  worker["worker pod, ateworker-microvm<br/>restores the actor from the golden snapshot<br/>in about 330 ms"]
+  egress["atenet egress<br/>puts the actor JWT on the launch request"]
+  router["atenet router<br/>mTLS ingress"]
+
+  subgraph vm["one actor, one micro-VM"]
+    direction LR
+    relay["relay container"]
+    sbx["sandbox container<br/>launcher → openshell-sandbox → workload"]
+    sup["supervisor container<br/>launcher → openshell-supervisor"]
+    relay -- "loopback" --> sbx
+    sbx -- "boundary, TLS to 169.254.17.2:17777" --> sup
+  end
+
+  cli --> gw
+  gw -- "create, start, stop, suspend, delete, watch" --> drv
+  drv -- "CreateActorTemplate, CreateActor, EgressPolicy,<br/>ResumeActor, SuspendActor, DeleteActor" --> api
+  api -- "restore, checkpoint" --> worker
+  worker --> vm
+  sup -- "GET /v1/launch, a long poll" --> egress
+  egress -- "the same request with the actor JWT" --> drv
+  sup -- "supervisor session, through the egress" --> gw
+  kate -- "proxy actor" --> router
+  router --> relay
+
+  class cli,gw stock
+  class drv ours
+  class api,worker,egress,router sub
+  class relay,sbx,sup guest
 ```
 
 The driver implements OpenShell's `ComputeDriver` gRPC trait and maps it onto
@@ -264,7 +291,7 @@ MODEL_HOST=$MODEL_HOST MODEL_PORT=$MODEL_PORT harness/scripts/render.sh examples
 openshell sandbox create --name alice --from "$SANDBOX_IMAGE" --policy policy.yaml --detach \
   --env "OPENAI_BASE_URL=http://$MODEL_HOST:$MODEL_PORT/v1" --env HELPDESK_MODEL=qwen2.5:1.5b \
   -- python3 /opt/helpdesk/agent.py
-openshell sandbox get alice            # Ready in about 2 s; about 30 s more the first time, for the golden snapshot
+openshell sandbox get alice            # Ready in about 2 s; 15 to 30 s more the first time, for the golden snapshot
 openshell sandbox exec alice -- cat /etc/resolv.conf
 openshell logs alice
 openshell sandbox suspend alice        # the actor is checkpointed and its worker freed
