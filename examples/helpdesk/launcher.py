@@ -5,11 +5,11 @@
 With LAUNCH_URL set, the supervisor role fetches the bundle the gateway minted
 for this actor from the driver's launch endpoint (the actor's name and atespace
 come from the systemInfo mount; atenet-egress puts the actor JWT on the
-request), writes the supervisor's files, lays the sandbox's files out on the
-shared durable dir and starts the supervisor; a newer generation replaces
-both. The sandbox role watches that dir and runs openshell-sandbox on the
-current generation. Without LAUNCH_URL both roles use the files the image and
-its volumes carry, which is the demo without a gateway.
+request), writes the supervisor's files on its own filesystem, lays the
+sandbox's files out on the shared durable dir and starts the supervisor; a
+newer generation replaces both. The sandbox role watches that dir and runs
+openshell-sandbox on the current generation. Without LAUNCH_URL both roles use
+the files the image and its volumes carry, which is the demo without a gateway.
 """
 import json
 import os
@@ -26,13 +26,13 @@ LAUNCH_URL = os.environ.get("LAUNCH_URL", "").rstrip("/")
 SHARED = "/run/openshell"                   # durable dir, both containers
 CURRENT = f"{SHARED}/current"               # the generation laid out below
 SANDBOX_BUNDLES = f"{SHARED}/bundle"        # <generation>/bootstrap.json, server.crt, server.key
-SUPERVISOR_DIR = f"{SHARED}/supervisor"     # <generation>/runtime-descriptor.json, auth.json
+# The supervisor's tokens stay in its own container, away from the workload.
+SUPERVISOR_DIR = "/tmp/openshell-supervisor"  # <generation>/runtime-descriptor.json, auth.json
 STATIC_SUPERVISOR = "/opt/supervisor-files/supervisor"
 SANDBOX_DIR = "/.openshell/channel/sandbox"
 IDENTITY = "/run/ate"
 LISTENER = " 0211FEA9:4571 "                # 169.254.17.2:17777, little-endian hex, in /proc/net/tcp
 child = None
-expected_exit = False
 
 
 def log(msg):
@@ -60,8 +60,6 @@ def terminate(proc, what):
 
 
 def on_signal(signum, _frame):
-    global expected_exit
-    expected_exit = True
     terminate(child, "the child")
     sys.exit(128 + signum)
 
@@ -109,7 +107,7 @@ def apply_bundle(bundle, running):
         "OPENSHELL_NETWORK_RUNTIME_CAPABILITIES": "policy-dns-transparent-tcp",
         # The relay behind `openshell sandbox exec` and `forward`. On this
         # container's own filesystem: the durable dir takes no socket.
-        "OPENSHELL_SSH_SOCKET_PATH": "/tmp/openshell-supervisor/ssh.sock",
+        "OPENSHELL_SSH_SOCKET_PATH": f"{SUPERVISOR_DIR}/ssh.sock",
     }
     if bundle.get("main_process_spec"):
         env["OPENSHELL_MAIN_PROCESS_SPEC"] = bundle["main_process_spec"]
@@ -118,6 +116,10 @@ def apply_bundle(bundle, running):
         env["OPENSHELL_TLS_CA"] = f"{sup}/gateway-ca.pem"
     if bundle["gateway"].get("tls_server_name"):
         env["OPENSHELL_GATEWAY_TLS_SERVER_NAME"] = bundle["gateway"]["tls_server_name"]
+    # No current generation while the listener changes hands, so the sandbox
+    # role does not start on the old files against the new supervisor.
+    if running:
+        os.unlink(CURRENT)
     terminate(child, f"the supervisor of generation {running}")
     start_supervisor(
         ["--backend-descriptor-file", f"{sup}/runtime-descriptor.json",
@@ -128,7 +130,10 @@ def apply_bundle(bundle, running):
         log("the new supervisor never listened on 169.254.17.2:17777")
         sys.exit(1)
     write_private(CURRENT, gen)
-    log(f"generation {gen} (epoch {bundle['epoch']}, resume={bundle['resume']}) published")
+    log(f"generation {gen} (epoch {bundle['epoch']}) published")
+    if running:
+        shutil.rmtree(f"{SUPERVISOR_DIR}/{running}", ignore_errors=True)
+        shutil.rmtree(f"{SANDBOX_BUNDLES}/{running}", ignore_errors=True)
     return gen
 
 
@@ -136,8 +141,11 @@ def fetch(name, atespace, generation):
     url = f"{LAUNCH_URL}/v1/launch/{atespace}/{name}"
     if generation:
         url += f"?generation={generation}"
+    # The egress replaces this header with the actor JWT; it adds none.
     req = urllib.request.Request(url, headers={"Authorization": "Bearer x"})
-    with urllib.request.urlopen(req, timeout=40) as r:
+    # The driver long-polls for 20 s; a dead connection after a restore
+    # costs at most this.
+    with urllib.request.urlopen(req, timeout=25) as r:
         if r.status == 204:
             return None
         return json.load(r)
@@ -220,6 +228,7 @@ def sandbox_role():
             for name in ("bootstrap.json", "server.crt", "server.key"):
                 shutil.copyfile(f"{src}/{name}", f"{SANDBOX_DIR}/{name}")
                 os.chmod(f"{SANDBOX_DIR}/{name}", 0o600)
+            shutil.rmtree(src, ignore_errors=True)
             start_sandbox()
             running = gen
             log(f"generation {gen} running")
