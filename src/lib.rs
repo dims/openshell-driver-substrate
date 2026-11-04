@@ -133,9 +133,6 @@ pub struct SubstrateComputeConfig {
     /// How long to wait for a synthesized `ActorTemplate` to reach a
     /// golden snapshot before giving up.
     pub template_ready_timeout_secs: u64,
-    /// OpenShell gateway endpoint reachable from inside the actor.
-    /// Injected as `OPENSHELL_ENDPOINT`. Empty disables injection.
-    pub gateway_endpoint: String,
     /// Path to the CA bundle used to verify `ate-api-server`'s
     /// certificate. Set to dial `https://`; unset dials plaintext
     /// (development only).
@@ -174,7 +171,6 @@ impl Default for SubstrateComputeConfig {
             default_cpu_millicores: 1000,
             default_memory_bytes: 1 << 30,
             template_ready_timeout_secs: 180,
-            gateway_endpoint: String::new(),
             api_tls_ca_path: None,
             api_client_cert_path: None,
             api_client_key_path: None,
@@ -254,7 +250,9 @@ pub struct SubstrateComputeDriver {
     bundles: Option<Arc<launch::BundleStore>>,
     /// The actors the gateway stopped or suspended. Any other suspension is
     /// Substrate's own and is reported as a wait, so the gateway keeps the
-    /// sandbox's credentials for the supervisor's return.
+    /// sandbox's credentials for the supervisor's return. In memory: the
+    /// gateway holds its own Stopped and Suspended phases and ignores
+    /// snapshots in them, so a restart changes nothing it sees.
     stopped: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
@@ -317,7 +315,6 @@ impl SubstrateComputeDriver {
         name: &str,
         sandbox: &DriverSandbox,
         launch_authentication: &[u8],
-        resume: bool,
     ) -> Result<(), Status> {
         let Some(store) = &self.bundles else {
             return Ok(());
@@ -328,7 +325,7 @@ impl SubstrateComputeDriver {
         let gateway = self.config.gateway.as_ref().ok_or_else(|| {
             Status::failed_precondition("the configuration names no [gateway] for the bundle")
         })?;
-        let bundle = bundle::build(sandbox, launch_authentication, resume, gateway)
+        let bundle = bundle::build(sandbox, launch_authentication, gateway)
             .map_err(Status::failed_precondition)?;
         store
             .put(name, bundle)
@@ -788,8 +785,9 @@ async fn list_atespace_actors(
     }
 }
 
-/// The actors this driver made: those of an `oshl-` template. Hand-made
-/// actors and the template controller's golden actors share the atespace.
+/// The actors of `oshl-` templates: this driver's, and for the half minute
+/// a golden snapshot takes, the reconciler's golden actor too. The gateway
+/// drops an id it does not know.
 async fn list_driver_actors(
     client: &mut impl ListActors,
     atespace: &str,
@@ -1022,14 +1020,14 @@ impl ComputeDriver for SubstrateComputeDriver {
             .as_ref()
             .map(|s| s.launch_authentication.clone())
             .unwrap_or_default();
-        self.store_bundle(&actor_name, &sandbox, &launch_authentication, false)
+        self.store_bundle(&actor_name, &sandbox, &launch_authentication)
             .await?;
-        self.mark_stopped(&actor_name, false);
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(actor_ref),
             })
             .await?;
+        self.mark_stopped(&actor_name, false);
 
         Ok(Response::new(CreateSandboxResponse::default()))
     }
@@ -1043,19 +1041,19 @@ impl ComputeDriver for SubstrateComputeDriver {
         // A start brings a new generation's credentials; the launcher inside
         // the actor picks them up after the restore.
         if let Some(sandbox) = &req.sandbox {
-            self.store_bundle(&actor_name, sandbox, &req.launch_authentication, req.resume)
+            self.store_bundle(&actor_name, sandbox, &req.launch_authentication)
                 .await?;
         }
         let mut client = self.control_client().await?;
-        self.mark_stopped(&actor_name, false);
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(ateapi::ObjectRef {
                     atespace: self.config.atespace.clone(),
-                    name: actor_name,
+                    name: actor_name.clone(),
                 }),
             })
             .await?;
+        self.mark_stopped(&actor_name, false);
         Ok(Response::new(StartSandboxResponse::default()))
     }
 

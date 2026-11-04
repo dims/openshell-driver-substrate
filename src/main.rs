@@ -6,8 +6,9 @@
 //! same out-of-process pattern its in-tree Docker/Podman/Kubernetes
 //! drivers use) to hand it Substrate as a compute backend.
 
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -47,10 +48,6 @@ struct Args {
         default_value_t = 180
     )]
     template_ready_timeout_secs: u64,
-
-    /// OpenShell gateway endpoint injected into actors as OPENSHELL_ENDPOINT.
-    #[arg(long, env = "OPENSHELL_GATEWAY_ENDPOINT", default_value = "")]
-    gateway_endpoint: String,
 
     /// CA bundle verifying ate-api-server's certificate. Unset dials plaintext.
     #[arg(long, env = "SUBSTRATE_API_TLS_CA")]
@@ -117,7 +114,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         atespace: args.atespace,
         worker_selector,
         template_ready_timeout_secs: args.template_ready_timeout_secs,
-        gateway_endpoint: args.gateway_endpoint,
         api_tls_ca_path: args.api_tls_ca,
         api_client_cert_path: args.api_tls_cert,
         api_client_key_path: args.api_tls_key,
@@ -128,19 +124,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gateway: loaded.gateway,
         ..Default::default()
     });
+    // Pending without the endpoint, so one select serves both cases.
+    let mut launch_server: Pin<Box<dyn Future<Output = std::io::Result<()>>>> =
+        Box::pin(std::future::pending());
     if let Some(settings) = loaded.launch {
         let store = Arc::new(launch::BundleStore::open(
             settings.state_dir.join("bundles"),
         )?);
-        let ca = match &settings.jwks_ca_file {
-            Some(path) => Some(std::fs::read(path)?),
-            None => None,
-        };
         let verifier = launch::ActorJwtVerifier::new(
             settings.issuer,
             settings.audience,
             settings.jwks_url,
-            ca.as_deref(),
+            &std::fs::read(&settings.jwks_ca_file)?,
         )?;
         let service = Arc::new(launch::LaunchService {
             atespace,
@@ -149,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let listener = tokio::net::TcpListener::bind(&settings.listen).await?;
         tracing::info!(listen = %settings.listen, "serving the launch endpoint");
-        tokio::spawn(axum::serve(listener, launch::router(service)).into_future());
+        launch_server = Box::pin(axum::serve(listener, launch::router(service)).into_future());
         driver = driver.with_bundles(store);
     }
 
@@ -173,11 +168,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register_encoded_file_descriptor_set(openshell_core::FILE_DESCRIPTOR_SET)
             .with_service_name("openshell.compute.v1.ComputeDriver")
     };
-    tonic::transport::Server::builder()
+    let grpc_server = tonic::transport::Server::builder()
         .add_service(ComputeDriverServer::new(driver))
         .add_service(reflection().build_v1()?)
         .add_service(reflection().build_v1alpha()?)
-        .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
-        .await?;
+        .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener));
+    tokio::select! {
+        result = grpc_server => result?,
+        result = launch_server => {
+            result?;
+            return Err("the launch endpoint stopped".into());
+        }
+    }
     Ok(())
 }

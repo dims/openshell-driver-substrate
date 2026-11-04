@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -26,14 +26,13 @@ use tokio::sync::{Mutex, watch};
 const LONG_POLL: Duration = Duration::from_secs(20);
 
 /// What a sandbox needs to start or to take new credentials: the files for
-/// each container and where the gateway is.
+/// each container and where the gateway is. Every generation restarts the
+/// supervisor and the sandbox, a resume included: the sandbox keeps its
+/// first identity in memory and takes no later generation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Bundle {
     pub generation: String,
     pub epoch: u64,
-    /// The gateway resumed the sandbox: the supervisor is replaced and the
-    /// sandbox and its workload stay. False restarts all of it.
-    pub resume: bool,
     pub gateway: Gateway,
     /// What the supervisor is told it serves, and how loud it is.
     pub sandbox_id: String,
@@ -139,8 +138,11 @@ pub struct ActorJwtVerifier {
     audience: String,
     jwks_url: String,
     http: reqwest::Client,
-    keys: Mutex<Option<JwkSet>>,
+    keys: Mutex<Option<(JwkSet, Instant)>>,
 }
+
+/// An unknown key id refetches the JWKS, at most this often.
+const JWKS_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 struct Claims {
@@ -148,25 +150,26 @@ struct Claims {
 }
 
 impl ActorJwtVerifier {
+    /// `ca_pem` signs the IdP's certificate; the client trusts nothing else.
     pub fn new(
         issuer: String,
         audience: String,
         jwks_url: String,
-        ca_pem: Option<&[u8]>,
+        ca_pem: &[u8],
     ) -> Result<Self, String> {
-        let mut http = reqwest::Client::builder()
+        let http = reqwest::Client::builder()
             .use_rustls_tls()
-            .timeout(Duration::from_secs(10));
-        if let Some(pem) = ca_pem {
-            http = http.add_root_certificate(
-                reqwest::Certificate::from_pem(pem).map_err(|e| e.to_string())?,
-            );
-        }
+            .timeout(Duration::from_secs(10))
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(ca_pem).map_err(|e| e.to_string())?,
+            )
+            .build()
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             issuer,
             audience,
             jwks_url,
-            http: http.build().map_err(|e| e.to_string())?,
+            http,
             keys: Mutex::new(None),
         })
     }
@@ -200,7 +203,10 @@ impl ActorJwtVerifier {
 
     async fn key(&self, kid: &str, refresh: bool) -> Result<Option<DecodingKey>, String> {
         let mut keys = self.keys.lock().await;
-        if refresh || keys.is_none() {
+        let stale = keys
+            .as_ref()
+            .is_none_or(|(_, fetched)| fetched.elapsed() >= JWKS_REFRESH_INTERVAL);
+        if keys.is_none() || (refresh && stale) {
             let set: JwkSet = self
                 .http
                 .get(&self.jwks_url)
@@ -211,9 +217,9 @@ impl ActorJwtVerifier {
                 .json()
                 .await
                 .map_err(|e| format!("{}: {e}", self.jwks_url))?;
-            *keys = Some(set);
+            *keys = Some((set, Instant::now()));
         }
-        let Some(jwk) = keys.as_ref().and_then(|set| set.find(kid)) else {
+        let Some(jwk) = keys.as_ref().and_then(|(set, _)| set.find(kid)) else {
             return Ok(None);
         };
         DecodingKey::from_jwk(jwk)
@@ -288,7 +294,6 @@ mod tests {
         Bundle {
             generation: generation.to_string(),
             epoch: 1,
-            resume: false,
             gateway: Gateway::default(),
             sandbox_id: "alice".to_string(),
             sandbox_name: "alice".to_string(),

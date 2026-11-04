@@ -39,7 +39,6 @@ pub const SANDBOX_UID: u32 = 65532;
 pub fn build(
     sandbox: &DriverSandbox,
     launch_authentication: &[u8],
-    resume: bool,
     gateway: &Gateway,
 ) -> Result<Bundle, String> {
     let auth: SandboxLaunchAuthentication = serde_json::from_slice(launch_authentication)
@@ -126,14 +125,9 @@ pub fn build(
         resource_claims: BTreeMap::new(),
         provisioning_evidence: evidence,
     };
-    let epoch = serde_json::to_value(supervisor.auth_epoch)
-        .ok()
-        .and_then(|v| v.as_u64())
-        .ok_or("auth epoch is not a number")?;
     Ok(Bundle {
         generation,
-        epoch,
-        resume,
+        epoch: supervisor.auth_epoch.get(),
         gateway: gateway.clone(),
         sandbox_id: sandbox.id.clone(),
         sandbox_name: sandbox.name.clone(),

@@ -40,7 +40,7 @@ pub struct LaunchSettings {
     pub audience: String,
     /// The IdP's JWKS URL, and the CA that signs its certificate.
     pub jwks_url: String,
-    pub jwks_ca_file: Option<PathBuf>,
+    pub jwks_ca_file: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -96,9 +96,15 @@ pub fn load(path: &Path) -> Result<Loaded, String> {
     };
     let launch = file.launch.map(|mut launch| {
         launch.state_dir = dir.join(&launch.state_dir);
-        launch.jwks_ca_file = launch.jwks_ca_file.map(|p| dir.join(p));
+        launch.jwks_ca_file = dir.join(&launch.jwks_ca_file);
         launch
     });
+    if launch.is_some() && file.gateway.is_none() {
+        return Err(format!(
+            "{}: [launch] needs [gateway], the one the bundles name",
+            path.display()
+        ));
+    }
     let gateway = match file.gateway {
         Some(gateway) => Some(launch::Gateway {
             endpoint: gateway.endpoint,
@@ -127,7 +133,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("driver.toml"),
-            "template_file = \"template.yaml\"\negress_policy_file = \"egress.yaml\"\n\n[launch]\nlisten = \"127.0.0.1:0\"\nstate_dir = \"state\"\nissuer = \"https://idp.ate-system.svc\"\naudience = \"driver\"\njwks_url = \"https://idp.ate-system.svc/openid/v1/jwks\"\n\n[gateway]\nendpoint = \"gateway.example:17670\"\ntls_ca_file = \"gateway-ca.pem\"\n",
+            "template_file = \"template.yaml\"\negress_policy_file = \"egress.yaml\"\n\n[launch]\nlisten = \"127.0.0.1:0\"\nstate_dir = \"state\"\nissuer = \"https://idp.ate-system.svc\"\naudience = \"driver\"\njwks_url = \"https://idp.ate-system.svc/openid/v1/jwks\"\njwks_ca_file = \"idp-ca.pem\"\n\n[gateway]\nendpoint = \"gateway.example:17670\"\ntls_ca_file = \"gateway-ca.pem\"\n",
         )
         .unwrap();
         std::fs::write(dir.path().join("gateway-ca.pem"), "PEM").unwrap();
@@ -144,10 +150,21 @@ mod tests {
         let loaded = load(&dir.path().join("driver.toml")).unwrap();
         assert_eq!(loaded.template_fragment.unwrap().containers.len(), 1);
         assert_eq!(loaded.egress_rules.len(), 1);
-        assert_eq!(loaded.launch.unwrap().state_dir, dir.path().join("state"));
+        let launch = loaded.launch.unwrap();
+        assert_eq!(launch.state_dir, dir.path().join("state"));
+        assert_eq!(launch.jwks_ca_file, dir.path().join("idp-ca.pem"));
         assert_eq!(loaded.gateway.unwrap().tls_ca_pem.as_deref(), Some("PEM"));
 
         std::fs::write(dir.path().join("driver.toml"), "templte_file = \"x\"\n").unwrap();
         assert!(load(&dir.path().join("driver.toml")).is_err());
+        std::fs::write(
+            dir.path().join("driver.toml"),
+            "[launch]\nlisten = \"127.0.0.1:0\"\nstate_dir = \"state\"\nissuer = \"i\"\naudience = \"a\"\njwks_url = \"u\"\njwks_ca_file = \"idp-ca.pem\"\n",
+        )
+        .unwrap();
+        assert!(
+            load(&dir.path().join("driver.toml")).is_err(),
+            "[launch] without [gateway]"
+        );
     }
 }

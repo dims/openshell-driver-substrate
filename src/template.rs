@@ -11,14 +11,14 @@
 //!
 //! Nothing that varies per sandbox goes into a template. A snapshot freezes
 //! process memory, so an environment variable set here comes back identical
-//! in every actor restored from it. The sandbox id and the gateway-minted
-//! sandbox token are per sandbox and are left out for that reason.
+//! in every actor restored from it. The sandbox id, the gateway-minted
+//! sandbox token and the request's environment are per sandbox and are left
+//! out for that reason; the bundle carries the environment to the workload.
 //!
 //! The sandbox class is the worker pool's: the template selects its workers
 //! by the labels in the driver config, and the pool those labels name decides
 //! the class.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use openshell_core::proto::compute::v1::DriverSandbox;
@@ -36,7 +36,6 @@ pub const NAME_PREFIX: &str = "oshl-";
 /// Everything the golden snapshot depends on.
 struct Inputs {
     image: String,
-    env: BTreeMap<String, String>,
     limits: ateapi::Resources,
 }
 
@@ -44,28 +43,13 @@ fn inputs_for(
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
 ) -> Result<Inputs, TemplateError> {
-    let spec = sandbox.spec.as_ref();
-    let template_spec = spec.and_then(|s| s.template.as_ref());
-
-    // spec.environment, then spec.template.environment over it, then the
-    // gateway endpoint over both so a caller cannot redirect it.
-    let mut env = BTreeMap::new();
-    if let Some(s) = spec {
-        env.extend(s.environment.clone());
-    }
-    if let Some(t) = template_spec {
-        env.extend(t.environment.clone());
-    }
-    if !config.gateway_endpoint.is_empty() {
-        env.insert(
-            openshell_core::sandbox_env::ENDPOINT.to_string(),
-            config.gateway_endpoint.clone(),
-        );
-    }
-
     Ok(Inputs {
-        image: template_spec.map(|t| t.image.clone()).unwrap_or_default(),
-        env,
+        image: sandbox
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.as_ref())
+            .map(|t| t.image.clone())
+            .unwrap_or_default(),
         limits: resources_for(sandbox, config)?,
     })
 }
@@ -216,7 +200,7 @@ pub fn synthesize(
             // The image's own entrypoint: openshell-sandbox.
             command: vec![],
             args: vec![],
-            env: env_vars(&inputs.env),
+            env: vec![],
             wakeup_probe: None,
             volume_mounts: vec![],
             // openshell-sandbox refuses to run with any capability in its
@@ -244,15 +228,6 @@ pub fn synthesize(
         apply_fragment(&mut template, fragment, &inputs);
     }
     Ok(template)
-}
-
-fn env_vars(env: &BTreeMap<String, String>) -> Vec<ateapi::EnvVar> {
-    env.iter()
-        .map(|(name, value)| ateapi::EnvVar {
-            name: name.clone(),
-            value: value.clone(),
-        })
-        .collect()
 }
 
 fn drop_all() -> ateapi::SecurityContext {
@@ -293,10 +268,10 @@ pub fn check_fragment(fragment: &ateapi::ActorTemplate) -> Result<(), String> {
 }
 
 /// The fragment's containers replace the synthesized one; the container
-/// named `sandbox`, or else the first, takes the request's image, the merged
-/// environment and `drop: ALL`. Volumes, snapshot config and the golden
-/// egress policy come from the fragment when it sets them; the limits were
-/// merged in `resources_for`.
+/// named `sandbox`, or else the first, takes the request's image and
+/// `drop: ALL`. Volumes, snapshot config and the golden egress policy come
+/// from the fragment when it sets them; the limits were merged in
+/// `resources_for`.
 fn apply_fragment(
     template: &mut ateapi::ActorTemplate,
     fragment: &ateapi::ActorTemplate,
@@ -310,13 +285,6 @@ fn apply_fragment(
             .unwrap_or(0);
         let sandbox = &mut containers[i];
         sandbox.image = inputs.image.clone();
-        let mut env: BTreeMap<String, String> = sandbox
-            .env
-            .iter()
-            .map(|e| (e.name.clone(), e.value.clone()))
-            .collect();
-        env.extend(inputs.env.clone());
-        sandbox.env = env_vars(&env);
         sandbox.security_context = Some(drop_all());
         template.containers = containers;
     }
@@ -442,6 +410,8 @@ pub async fn ensure_ready(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use openshell_core::proto::compute::v1::{
         DriverResourceRequirements, DriverSandboxSpec, DriverSandboxTemplate,
     };
@@ -499,25 +469,17 @@ mod tests {
         assert_ne!(base, name(&sandbox("img@sha256:def", &[]), &config));
         assert_ne!(
             base,
-            name(&sandbox("img@sha256:abc", &[("A", "1")]), &config)
-        );
-        assert_ne!(
-            base,
             name(
                 &with_limits(sandbox("img@sha256:abc", &[]), "2", ""),
                 &config
             )
         );
-        // Environment order does not matter; the endpoint does.
+        // The request's environment goes to the workload in the bundle, not
+        // into the shared snapshot.
         assert_eq!(
-            name(&sandbox("i@sha256:a", &[("A", "1"), ("B", "2")]), &config),
-            name(&sandbox("i@sha256:a", &[("B", "2"), ("A", "1")]), &config)
+            base,
+            name(&sandbox("img@sha256:abc", &[("A", "1")]), &config)
         );
-        let with_endpoint = SubstrateComputeConfig {
-            gateway_endpoint: "gateway:443".to_string(),
-            ..SubstrateComputeConfig::default()
-        };
-        assert_ne!(base, name(&sandbox("img@sha256:abc", &[]), &with_endpoint));
         let other_pool = SubstrateComputeConfig {
             worker_selector: BTreeMap::from([("workload".to_string(), "other".to_string())]),
             ..SubstrateComputeConfig::default()
@@ -529,24 +491,12 @@ mod tests {
     // snapshot, so nothing that identifies one sandbox may be in it.
     #[test]
     fn synthesize_bakes_no_per_sandbox_identity() {
-        let config = SubstrateComputeConfig {
-            gateway_endpoint: "gateway:443".to_string(),
-            ..SubstrateComputeConfig::default()
-        };
+        let config = SubstrateComputeConfig::default();
         let sb = sandbox("img@sha256:abc", &[("CALLER", "x")]);
         let tmpl = synthesize("oshl-abc123", "ws", &sb, &config).unwrap();
-        let env = &tmpl.containers[0].env;
-        let get = |k: &str| env.iter().find(|e| e.name == k).map(|e| e.value.as_str());
-
-        assert_eq!(
-            get(openshell_core::sandbox_env::ENDPOINT),
-            Some("gateway:443")
-        );
-        assert_eq!(get("CALLER"), Some("x"));
-        assert_eq!(get(openshell_core::sandbox_env::SANDBOX_ID), None);
         assert!(
-            env.iter().all(|e| e.value != "gateway-minted-jwt"),
-            "the sandbox token must not be in the template"
+            tmpl.containers[0].env.is_empty(),
+            "neither the request's environment nor the sandbox token is in the template"
         );
         assert_eq!(
             tmpl.worker_selector
@@ -613,7 +563,6 @@ mod tests {
     fn fragment_shapes_the_template_and_the_driver_keeps_its_say() {
         let config = SubstrateComputeConfig {
             template_fragment: Some(fragment(SHAPE)),
-            gateway_endpoint: "gateway:443".to_string(),
             ..SubstrateComputeConfig::default()
         };
         let sb = sandbox("img@sha256:abc", &[("CALLER", "x")]);
@@ -627,14 +576,7 @@ mod tests {
             .iter()
             .map(|e| (e.name.as_str(), e.value.as_str()))
             .collect();
-        assert_eq!(
-            env,
-            [
-                ("CALLER", "x"),
-                ("FOO", "bar"),
-                (openshell_core::sandbox_env::ENDPOINT, "gateway:443")
-            ]
-        );
+        assert_eq!(env, [("FOO", "bar")]);
         let drops = &s
             .security_context
             .as_ref()
