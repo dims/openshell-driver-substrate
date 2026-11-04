@@ -1,13 +1,36 @@
 # The stock OpenShell gateway and this driver in one pod, as OpenShell's own
 # e2e runs an external driver: the driver serves ComputeDriver on a socket in
-# a shared emptyDir, and its launch endpoint on a port. Both run as uid 1000,
-# the gateway image's user, so the socket is writable by both.
+# a shared emptyDir, and its launch endpoint on a port. Both images run as
+# uid 1000, so the socket is writable by both. The gateway's database and the
+# driver's bundles live on volumes, so a new pod keeps every sandbox.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: openshell-driver
   namespace: ${ATESPACE}
 automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openshell-gateway-data
+  namespace: ${ATESPACE}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openshell-driver-state
+  namespace: ${ATESPACE}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: Service
@@ -55,8 +78,6 @@ spec:
       serviceAccountName: openshell-driver
       automountServiceAccountToken: false
       securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
         fsGroup: 1000
         runAsNonRoot: true
       containers:
@@ -153,7 +174,8 @@ spec:
           configMap:
             name: openshell-gateway-ca
         - name: gateway-data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: openshell-gateway-data
         - name: gateway-state
           emptyDir: {}
         - name: driver-config
@@ -170,4 +192,5 @@ spec:
                   expirationSeconds: 3600
                   path: token
         - name: driver-state
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: openshell-driver-state

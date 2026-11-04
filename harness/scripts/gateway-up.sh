@@ -8,7 +8,7 @@
 #
 # Environment: WORK (default $HOME/openshell-substrate), REGISTRY (default
 # localhost:5001), ATESPACE (default ate-openshell-microvm), OPENSHELL_VERSION
-# (default 0.1.7), MODEL_HOST and MODEL_PORT as build.sh took them.
+# (default 0.1.7). The model host and port come from out/helpdesk.env.
 set -o errexit -o nounset -o pipefail
 shopt -s inherit_errexit
 REPO=$(cd "$(dirname "$0")/../.." && pwd)

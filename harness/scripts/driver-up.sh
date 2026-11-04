@@ -35,7 +35,7 @@ wait_for() {  # seconds what command...
   until "$@" >/dev/null 2>&1; do [ "$(date +%s)" -lt "$deadline" ] || fail "$what did not come up"; sleep 1; done
 }
 mint_token() {  # atomic replace: the driver reads the file on every client build
-  kubectl create token ate-client -n ate-system --audience api.ate-system.svc --duration=24h > "$DIR/token.new"
+  (umask 077; kubectl create token ate-client -n ate-system --audience api.ate-system.svc --duration=24h > "$DIR/token.new")
   mv "$DIR/token.new" "$DIR/token"
   echo $(( $(date +%s) + 24 * 3600 - 300 )) > "$DIR/token.expires-at"
 }
