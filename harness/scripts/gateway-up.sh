@@ -94,7 +94,9 @@ kubectl -n "$ATESPACE" create configmap openshell-driver-config --from-file=driv
 
 step "access policy"
 MEMBER=user:system:serviceaccount:${ATESPACE}:openshell-driver
-if kubectl-ate get access-policy -a "$ATESPACE" -o json > "$DIR/access-policy.current.json" 2>/dev/null; then
+current=$(kubectl-ate get access-policy -a "$ATESPACE" -o json 2>/dev/null)  # exits 0 with a sentence when there is none
+if [ "${current:0:1}" = "{" ]; then
+  printf '%s' "$current" > "$DIR/access-policy.current.json"
   # An update replaces the policy and needs its uid and version; keep what is there.
   python3 - "$DIR/access-policy.current.json" "$MEMBER" > "$DIR/access-policy.json" <<'MERGE'
 import json, sys
