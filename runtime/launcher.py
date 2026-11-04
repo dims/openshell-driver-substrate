@@ -15,13 +15,16 @@ auth bundle and policy under /opt/supervisor-files/supervisor, the sandbox's
 bootstrap and TLS pair in its channel directory, and the workload command in
 WORKLOAD. That is the run without a gateway.
 """
+import http.server
 import json
 import os
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -37,7 +40,10 @@ STATIC_SUPERVISOR = "/opt/supervisor-files/supervisor"
 SANDBOX_DIR = "/.openshell/channel/sandbox"
 IDENTITY = "/run/ate"
 LISTENER = " 0211FEA9:4571 "                # 169.254.17.2:17777, little-endian hex, in /proc/net/tcp
+HEALTH_PORT = {"supervisor": 17901, "sandbox": 17902}  # the wakeup probe of each container
+WORKLOAD_PORT = int(os.environ.get("WORKLOAD_PORT", "8080"))
 child = None
+ready = False
 
 
 def log(msg):
@@ -85,6 +91,40 @@ def wait_for_listener(seconds):
 def read(path):
     with open(path) as f:
         return f.read()
+
+
+def healthy():
+    """What the wakeup probe asks: with LAUNCH_URL, that this launcher is up
+    and polling; without it, that the child runs and, for the sandbox role,
+    that the workload accepts on its port, so the golden snapshot holds a live
+    workload."""
+    if not ready:
+        return False
+    if LAUNCH_URL:
+        return True
+    if child is None or child.poll() is not None:
+        return False
+    if ROLE != "sandbox":
+        return True
+    try:
+        socket.create_connection(("127.0.0.1", WORKLOAD_PORT), timeout=0.2).close()
+        return True
+    except OSError:
+        return False
+
+
+class Health(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if healthy() else 503)
+        self.end_headers()
+
+    def log_message(self, *_):
+        pass
+
+
+def serve_health():
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", HEALTH_PORT[ROLE]), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
 # --- supervisor role -----------------------------------------------------
@@ -157,6 +197,7 @@ def fetch(name, atespace, generation):
 
 
 def supervisor_role():
+    global ready
     if not LAUNCH_URL:
         workload = shlex.split(os.environ.get("WORKLOAD", ""))
         if not workload:
@@ -171,9 +212,11 @@ def supervisor_role():
              "--log-level", "info", "--", *workload],
             {},
         )
+        ready = True
         sys.exit(child.wait())
     log(f"bundles from {LAUNCH_URL}")
     running = None
+    ready = True
     while True:
         if child is not None and child.poll() is not None:
             log(f"the supervisor exited with {child.returncode}")
@@ -215,12 +258,15 @@ def sandbox_role():
     # The workload's resolver is the sandbox's DNS relay. Substrate writes the
     # actor gateway into the base layer on every activation; the image's /etc
     # belongs to the sandbox user, and the edit rides in the snapshot.
+    global ready
     write_private("/etc/resolv.conf.sandbox", "nameserver 127.0.0.53\n")
     os.replace("/etc/resolv.conf.sandbox", "/etc/resolv.conf")
     if not LAUNCH_URL:
         start_sandbox()
+        ready = True
         sys.exit(child.wait())
     running = None
+    ready = True
     while True:
         if child is not None and child.poll() is not None:
             log(f"openshell-sandbox exited with {child.returncode}")
@@ -246,10 +292,11 @@ def sandbox_role():
 
 signal.signal(signal.SIGTERM, on_signal)
 signal.signal(signal.SIGINT, on_signal)
-if ROLE == "supervisor":
-    supervisor_role()
-elif ROLE == "sandbox":
-    sandbox_role()
-else:
+if ROLE not in HEALTH_PORT:
     log("usage: launcher.py supervisor|sandbox")
     sys.exit(2)
+serve_health()
+if ROLE == "supervisor":
+    supervisor_role()
+else:
+    sandbox_role()

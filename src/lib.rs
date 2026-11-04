@@ -255,6 +255,9 @@ pub struct SubstrateComputeDriver {
     /// A cache of the store's `.stopped` markers, so a restart keeps the
     /// set; in memory alone without a store.
     stopped: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// One lock per actor around a stop, a start and the suspend of an actor
+    /// resumed behind the gateway's stop, so they do not interleave.
+    locks: Arc<std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl std::fmt::Debug for SubstrateComputeDriver {
@@ -273,7 +276,17 @@ impl SubstrateComputeDriver {
             channel: Arc::new(Mutex::new(None)),
             bundles: None,
             stopped: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    fn actor_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(name.to_string())
+            .or_default()
+            .clone()
     }
 
     fn mark_stopped(&self, name: &str, stopped: bool) -> Result<(), Status> {
@@ -322,6 +335,7 @@ impl SubstrateComputeDriver {
         name: &str,
         sandbox: &DriverSandbox,
         launch_authentication: &[u8],
+        actor_uid: &str,
     ) -> Result<(), Status> {
         let Some(store) = &self.bundles else {
             return Ok(());
@@ -329,7 +343,7 @@ impl SubstrateComputeDriver {
         let gateway = self.config.gateway.as_ref().ok_or_else(|| {
             Status::failed_precondition("the configuration names no [gateway] for the bundle")
         })?;
-        let bundle = bundle::build(sandbox, launch_authentication, gateway)
+        let bundle = bundle::build(sandbox, launch_authentication, gateway, actor_uid)
             .map_err(Status::failed_precondition)?;
         store
             .put(name, bundle)
@@ -495,6 +509,8 @@ impl SubstrateComputeDriver {
     /// Error, Stop, Start recovery. The mark goes on before the RPC, so a
     /// stop cut in flight reads as Stopped.
     async fn checkpoint(&self, actor_name: String) -> Result<(), Status> {
+        let lock = self.actor_lock(&actor_name);
+        let _held = lock.lock().await;
         let mut client = self.control_client().await?;
         let actor = ateapi::ObjectRef {
             atespace: self.config.atespace.clone(),
@@ -528,6 +544,85 @@ impl SubstrateComputeDriver {
         }
         Ok(())
     }
+
+    /// Substrate resumed an actor the gateway had stopped: an operator, or a
+    /// request through the router. The gateway's stop stands, so the actor
+    /// is suspended again. Runs off the watch loop.
+    async fn suspend_again(self, name: String) {
+        let lock = self.actor_lock(&name);
+        let _held = lock.lock().await;
+        if !self.stopped_set().contains(&name) {
+            return;
+        }
+        let Ok(mut client) = self.control_client().await else {
+            return;
+        };
+        let actor = ateapi::ObjectRef {
+            atespace: self.config.atespace.clone(),
+            name: name.clone(),
+        };
+        let running = client
+            .get_actor(ateapi::GetActorRequest {
+                actor: Some(actor.clone()),
+            })
+            .await
+            .map(|a| {
+                a.into_inner().status.unwrap_or_default().state() == ateapi::ActorState::Running
+            })
+            .unwrap_or(false);
+        if !running {
+            return;
+        }
+        tracing::info!(%name, "actor resumed behind the gateway's stop; suspending it again");
+        if let Err(status) = client
+            .suspend_actor(ateapi::SuspendActorRequest {
+                actor: Some(actor),
+                options: Some(ateapi::SuspendOptions {
+                    mode: ateapi::DurabilityMode::Synchronous as i32,
+                }),
+            })
+            .await
+        {
+            tracing::warn!(%name, %status, "suspending the actor again failed");
+        }
+    }
+
+    /// Drop the bundles and marks of actors that no longer exist: a delete the
+    /// driver did not see through, or a cluster rebuilt under the same store.
+    pub async fn reap_orphan_bundles(&self) -> Result<usize, Status> {
+        let Some(store) = &self.bundles else {
+            return Ok(0);
+        };
+        let mut client = self.control_client().await?;
+        let live: HashSet<String> = list_driver_actors(&mut client, &self.config.atespace)
+            .await?
+            .into_iter()
+            .filter_map(|a| a.metadata.map(|m| m.name))
+            .collect();
+        let orphans = reap_orphans(store, &live)
+            .await
+            .map_err(|e| Status::internal(format!("reaping bundles: {e}")))?;
+        for name in &orphans {
+            self.mark_stopped(name, false)?;
+        }
+        Ok(orphans.len())
+    }
+}
+
+/// Remove every bundle whose actor is not in `live`; the names removed.
+async fn reap_orphans(
+    store: &launch::BundleStore,
+    live: &HashSet<String>,
+) -> std::io::Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for name in store.names().await.into_keys() {
+        if !live.contains(&name) {
+            store.remove(&name).await?;
+            store.set_stopped(&name, false)?;
+            removed.push(name);
+        }
+    }
+    Ok(removed)
 }
 
 type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>> + Send>>;
@@ -694,6 +789,26 @@ fn actor_state_conditions(
             "actor state not reported",
         )],
     }
+}
+
+/// The uid of the actor as Substrate has it now.
+async fn actor_uid(
+    client: &mut ControlClient,
+    atespace: &str,
+    name: &str,
+) -> Result<String, Status> {
+    Ok(client
+        .get_actor(ateapi::GetActorRequest {
+            actor: Some(ateapi::ObjectRef {
+                atespace: atespace.to_string(),
+                name: name.to_string(),
+            }),
+        })
+        .await?
+        .into_inner()
+        .metadata
+        .map(|m| m.uid)
+        .unwrap_or_default())
 }
 
 /// Reject empty identifiers up front so every RPC method shares one "must
@@ -1043,6 +1158,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             }
             Err(status) => return Err(status),
         }
+        let actor_uid = actor_uid(&mut client, &atespace, &actor_name).await?;
         // Before the first resume: the egress caches a missing policy.
         if !self.config.egress_rules.is_empty() {
             match client
@@ -1064,7 +1180,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 Err(status) => return Err(status),
             }
         }
-        self.store_bundle(&actor_name, &sandbox, &launch_authentication)
+        self.store_bundle(&actor_name, &sandbox, &launch_authentication, &actor_uid)
             .await?;
         self.mark_stopped(&actor_name, false)?;
         client
@@ -1090,11 +1206,14 @@ impl ComputeDriver for SubstrateComputeDriver {
             None => &[],
         };
         require_launch_authentication(self.bundles.is_some(), launch_authentication)?;
+        let lock = self.actor_lock(&actor_name);
+        let _held = lock.lock().await;
+        let mut client = self.control_client().await?;
         if let Some(sandbox) = &req.sandbox {
-            self.store_bundle(&actor_name, sandbox, launch_authentication)
+            let uid = actor_uid(&mut client, &self.config.atespace, &actor_name).await?;
+            self.store_bundle(&actor_name, sandbox, launch_authentication, &uid)
                 .await?;
         }
-        let mut client = self.control_client().await?;
         self.mark_stopped(&actor_name, false)?;
         let resumed = client
             .resume_actor(ateapi::ResumeActorRequest {
@@ -1205,6 +1324,18 @@ impl ComputeDriver for SubstrateComputeDriver {
                 };
                 let names = driver.names().await;
                 let stopped = driver.stopped_set();
+                for a in &actors {
+                    let name = a
+                        .metadata
+                        .as_ref()
+                        .map(|m| m.name.clone())
+                        .unwrap_or_default();
+                    let running =
+                        a.status.as_ref().map(|s| s.state()) == Some(ateapi::ActorState::Running);
+                    if running && stopped.contains(&name) {
+                        tokio::spawn(driver.clone().suspend_again(name));
+                    }
+                }
                 let current: HashMap<String, DriverSandbox> = actors
                     .iter()
                     .map(|a| {
@@ -1569,6 +1700,23 @@ mod tests {
                 .expect("more pages requested than exist");
             Box::pin(async move { Ok(page) })
         }
+    }
+
+    #[tokio::test]
+    async fn reap_orphans_removes_bundles_and_marks_of_missing_actors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = launch::BundleStore::open(dir.path().to_path_buf()).unwrap();
+        for name in ["kept", "gone"] {
+            store.put(name, launch::test_bundle()).await.unwrap();
+            store.set_stopped(name, true).unwrap();
+        }
+        let removed = reap_orphans(&store, &HashSet::from(["kept".to_string()]))
+            .await
+            .unwrap();
+        assert_eq!(removed, ["gone"]);
+        assert!(store.get("kept").await.is_some() && store.get("gone").await.is_none());
+        let reopened = launch::BundleStore::open(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.stopped(), &HashSet::from(["kept".to_string()]));
     }
 
     #[tokio::test]

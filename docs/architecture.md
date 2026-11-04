@@ -140,12 +140,12 @@ reflection, and the launch endpoint when configured.
 |---|---|
 | `get_capabilities` | Checks the gateway's extension metadata, names itself `substrate` and advertises `openshell.compute.suspend-resume`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false; CPU and memory limits are supported, GPUs are not. |
 | `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (ate-api-server rejects an unpinned image; the check saves a round trip) and resource limits that parse as Kubernetes quantities; rejects GPU requests and `user_namespaces`, and `spec.command` when there is no launch endpoint to carry it. |
-| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `CreateActorEgressPolicy` with the configured rules (before the first resume: the egress caches a missing policy), the bundle from `spec.launch_authentication` into the store, `ResumeActor`. Refused without launch authentication when the launch endpoint is on. |
+| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `CreateActorEgressPolicy` with the configured rules (before the first resume: the egress caches a missing policy), the bundle from `spec.launch_authentication`, bound to the actor's uid, into the store, `ResumeActor`. Refused without launch authentication when the launch endpoint is on. |
 | `start_sandbox` | The bundle of the new generation into the store, the stopped mark cleared, `ResumeActor`, which is a no-op on an actor Substrate already resumed. |
 | `stop_sandbox`, `suspend_sandbox` | The stopped mark set, a `.stopped` file next to the bundle, then `SuspendActor` with synchronous durability: checkpoint, upload, free the worker, keep the snapshot. A `CRASHED` actor gets `RevertActor` instead, back to its last snapshot. |
 | `delete_sandbox` | `DeleteActor`; Substrate deletes from any state. The bundle is dropped. The template stays; other actors may share it. |
 | `get_sandbox`, `list_sandboxes` | `GetActor`; `ListActors` walked to the last page (1000 per page), keeping the actors of `oshl-` templates. The gateway's name for a sandbox comes from its bundle; the actor is named by the sandbox id. |
-| `watch_sandboxes` | Substrate has no watch RPC. The driver polls `ListActors` every 2 s, diffs against the last snapshot, and emits changed and deleted sandboxes. It stops when the gateway drops the stream. |
+| `watch_sandboxes` | Substrate has no watch RPC. The driver polls `ListActors` every 2 s, diffs against the last snapshot, and emits changed and deleted sandboxes. A running actor the gateway stopped, which Substrate resumed on its own, is suspended again from here. It stops when the gateway drops the stream. |
 | `ensure_workspace` | `GetAtespace`, then `CreateAtespace` when it is missing, for the one configured atespace. The trait carries workspace identity only on create, so one atespace serves every workspace. |
 | `delete_workspace` | No-op. |
 | `authenticate_sandbox` | Unimplemented. |
@@ -153,7 +153,9 @@ reflection, and the launch endpoint when configured.
 One `Control` channel is dialed lazily and reused. An interceptor adds
 `Authorization: Bearer` from a token file read on every client build, so a
 rotated projected token needs no restart. TLS is on when a CA bundle is
-configured; a client certificate is optional and must come as a pair.
+configured; a client certificate is optional and must come as a pair. A stop,
+a start and the suspend of a resumed actor take one lock per actor. At
+startup the driver drops the bundles of actors that no longer exist.
 
 Conditions are the driver's only voice to the gateway, so `actor_state_conditions`
 is written against the gateway's phase rules and pinned by a table test:
@@ -163,7 +165,7 @@ is written against the gateway's phase rules and pinned by a table test:
 | RUNNING, not stopped by the gateway | `Ready=True` (ContainerRunning) | Ready |
 | RESUMING, REVERTING, not stopped by the gateway | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
 | SUSPENDING, after the gateway's stop or suspend | `Suspended=False` (PodTerminating, the reason the gateway reads as a stop in flight) | Provisioning |
-| RUNNING, RESUMING, REVERTING, SUSPENDED, after the gateway's stop or suspend and before its next start | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped, or Suspended after the gateway's own suspend, which its lifecycle controller keeps. A resume Substrate did on its own changes nothing the gateway sees |
+| RUNNING, RESUMING, REVERTING, SUSPENDED, after the gateway's stop or suspend and before its next start | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped, or Suspended after the gateway's own suspend, which its lifecycle controller keeps. A resume Substrate did on its own is undone within a watch tick |
 | SUSPENDING, SUSPENDED, by Substrate alone | `Ready=False` (DependenciesNotReady) | Provisioning: the gateway keeps the credentials, and the supervisor's return after a Substrate resume makes it Ready again |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
@@ -219,9 +221,10 @@ the next create rebuilds it), or 180 s pass (DeadlineExceeded).
   it needs no client certificate.
 - **template reconciler**, inside ate-api-server, gives a new template its
   golden snapshot: it creates one golden actor, resumes it from cold boot,
-  waits a fixed 20 s (`goldenSnapshotWarmup`), suspends it, and tags the
-  snapshot in atespace `ate-golden`. Whatever the VM looked like at 20 s is
-  what every actor starts from.
+  waits until every container's wakeup probe answers 200 (a fixed 20 s when
+  a container has none), suspends it, and tags the snapshot in atespace
+  `ate-golden`. Whatever the VM looked like then is what every actor starts
+  from.
 - **ate-controller** turns a `WorkerPool` into a Deployment of worker pods and
   runs the syncer: a new pod registers as a Worker, a terminating pod marks
   its Worker `DRAINING`, a vanished pod deletes its Worker, which releases the
@@ -257,7 +260,10 @@ the request's image in the sandbox container, the runtime image (`runtime/`)
 in the other two. `launcher.py` is the first process of the first two, uid
 65532 with no capability. With `LAUNCH_URL` set (the gateway path) it works
 from the bundle it fetches; without it, from the files the image and its
-volumes carry and the command in `WORKLOAD`.
+volumes carry and the command in `WORKLOAD`. Each launcher and the relay
+answer Substrate's wakeup probe on their own port (17901 to 17903), so an
+activation completes only when they are up, and the golden snapshot is taken
+as soon as they are.
 
 - **sandbox**: the launcher points `/etc/resolv.conf` at the sandbox's DNS
   relay (the image's `/etc` belongs to that user), waits for the supervisor's
@@ -391,9 +397,9 @@ stop: the gateway shows Provisioning, keeps the sandbox's credentials and
 admits only `delete`, and is Ready again, memory intact, when Substrate
 resumes the actor and the supervisor reconnects. A stop would retire the
 credentials and force a new generation. A resume from the Substrate side of
-a sandbox the gateway stopped changes nothing the gateway sees: the driver
-keeps reporting Stopped, and the next `start` hands the running actor a new
-generation without a restore.
+a sandbox the gateway stopped is undone: the driver keeps reporting Stopped
+and suspends the actor again within a watch tick; a `start` in that window
+hands the running actor a new generation without a restore.
 
 ## Sequences
 
@@ -420,7 +426,7 @@ sequenceDiagram
     API->>W: Restore from cold boot
     W->>W: boot the micro-VM, start the containers
     Note over R,W: without a gateway the sandbox clears its gates, the supervisor attaches and the workload starts.<br/>With one, the golden actor holds two launchers polling for a bundle they never get
-    R->>R: wait 20 s (goldenSnapshotWarmup)
+    R->>R: wait until every wakeup probe answers 200
     R->>API: SuspendActor
     API->>W: Checkpoint
     W->>S: memory ranges, rootfs uppers, durable dirs, state.json
@@ -449,9 +455,9 @@ sequenceDiagram
   end
 ```
 
-The first `create_sandbox` for a workload pays for the golden snapshot: about
-30 s in all, a few seconds of boot, the fixed 20 s warm-up, and the checkpoint.
-Every later one, and every later actor of the same template, is a restore,
+The first `create_sandbox` for a workload pays for the golden snapshot: a few
+seconds of boot, the wakeup probes, and the checkpoint. Every later one, and
+every later actor of the same template, is a restore,
 and `Ready` follows about two seconds later, once the launcher has the bundle
 and the supervisor's session is up. The gateway's provisioning ceiling is far
 above this.
@@ -616,7 +622,7 @@ sequenceDiagram
   L->>L: read /run/ate/actor-name and atespace (systemInfo, rewritten on every restore)
   L->>EG: GET http://openshell-driver:17790/v1/launch/<atespace>/<name>?generation=<current>
   EG->>D: the same request, Authorization: Bearer <actor JWT><br/>(EgressPolicy rule: replaceHeaders with actorJwt, audience = the driver)
-  D->>D: verify the JWT against the IdP's JWKS: issuer, audience, sub = actor/<atespace>/<name>
+  D->>D: verify the JWT against the IdP's JWKS: issuer, audience, sub = actor/<atespace>/<name>, the bundle's actor uid
   D-->>L: the bundle, or 204 after a 20 s long poll when nothing is newer
   L->>SU: write the files, stop the previous supervisor, start the new one<br/>OPENSHELL_ENDPOINT, OPENSHELL_TLS_CA, sandbox id and name, main-process spec
   SU->>GW: ConnectSupervisor through the egress (tlsPassthrough rule) · "supervisor session: accepted"
@@ -631,7 +637,11 @@ actor's own request, so the driver knows who asks without a shared secret in
 any image. The driver hands out only that actor's bundle, and only to a
 caller with that actor's token. And the bundle files are mode 0600 on the
 writable rootfs or a durable dir, never in the golden snapshot; the sandbox
-consumes its bootstrap on read. The limits of this, the plain HTTP hop, the
+consumes its bootstrap on read. And the bundle is bound to the actor's uid:
+the launch endpoint refuses a token whose `actor.ate.dev` uid is not the
+bundle's, and the sandbox refuses a bundle whose `substrate.actor_uid` claim
+does not match `/run/ate/actor-uid`, so material for an earlier actor of the
+same name is never accepted. The limits of this, the plain HTTP hop, the
 bearer token, one uid in both containers and the credentials inside per-actor
 snapshots, are in [shortcomings.md](shortcomings.md).
 
@@ -648,8 +658,10 @@ is an accepted trust anchor.
 A snapshot is the whole VM: guest memory, the rootfs upper layers, the durable
 dirs. It is not a health check. A container that died inside the VM before the
 snapshot comes back dead in every restore, and Substrate reports the actor
-`RUNNING` all the same. The golden snapshot is taken at a fixed 20 s, whether
-or not the supervisor has attached by then. Read the worker pod's log:
+`RUNNING` all the same. The golden snapshot is taken when every container's
+wakeup probe answers: on the gateway path when the launchers poll, without a
+gateway when the workload accepts connections (`healthy` in
+`runtime/launcher.py`). Read the worker pod's log:
 `Runtime-initiated Sandbox Protocol listener ready`, `Isolation boundary
 attached` and `PROC:LAUNCH` are the signs of a healthy golden actor. On the
 gateway path the golden actor runs only the two launchers, which have no

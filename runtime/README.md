@@ -18,6 +18,7 @@ REGISTRY=localhost:5001 runtime/build.sh
 | `USER 65532:65532`, `/etc` owned by that user | the identity every bundle names; the launcher rewrites `resolv.conf` without root |
 | `/.openshell/channel/sandbox`, mode 700, owned by 65532 | where the sandbox's bootstrap and TLS pair are written and consumed |
 | no setuid binary | `openshell-sandbox` refuses any privilege |
+| `GET /healthz` on 17901 (supervisor launcher), 17902 (sandbox launcher), 17903 (relay) | Substrate's wakeup probes; an activation completes only when they answer, and the golden snapshot is taken as soon as they do |
 
 ## A workload image
 
@@ -63,6 +64,13 @@ The supervisor listens on `169.254.17.2:17777`, the address of every Substrate
 actor, and the sandbox dials it; the launcher waits for that listener in
 `/proc/net/tcp`. Both constants also live in `src/bundle.rs` and
 `harness/bootstrap-gen`.
+
+With `LAUNCH_URL` the health endpoint answers 200 once the launcher polls;
+without it, once the child runs and, for the sandbox role, the workload
+accepts on `WORKLOAD_PORT` (8080), so the demo's golden snapshot holds a live
+workload. The sandbox container also mounts the identity volume: the bundle
+names the actor's uid in a `substrate.actor_uid` claim, and `openshell-sandbox`
+checks it against `/run/ate/actor-uid` before it opens its listener.
 
 ## The relay
 

@@ -37,6 +37,8 @@ pub struct Bundle {
     /// What the supervisor is told it serves, and how loud it is.
     pub sandbox_id: String,
     pub sandbox_name: String,
+    /// The incarnation this bundle is for; a token for another gets 403.
+    pub actor_uid: String,
     pub log_level: String,
     /// File name to contents for the supervisor container.
     pub supervisor: BTreeMap<String, String>,
@@ -177,6 +179,14 @@ const JWKS_MAX_AGE: Duration = Duration::from_secs(300);
 #[derive(Deserialize)]
 struct Claims {
     sub: String,
+    #[serde(rename = "actor.ate.dev")]
+    actor: Option<ActorClaims>,
+}
+
+#[derive(Deserialize)]
+struct ActorClaims {
+    #[serde(rename = "actorUID")]
+    actor_uid: String,
 }
 
 impl ActorJwtVerifier {
@@ -204,8 +214,8 @@ impl ActorJwtVerifier {
         })
     }
 
-    /// The actor the token names, as `atespace/name`.
-    pub async fn verify(&self, token: &str) -> Result<String, String> {
+    /// The actor the token names, as `atespace/name`, and its uid.
+    pub async fn verify(&self, token: &str) -> Result<(String, String), String> {
         let header = jsonwebtoken::decode_header(token).map_err(|e| e.to_string())?;
         if !matches!(header.alg, Algorithm::ES256 | Algorithm::RS256) {
             return Err(format!("algorithm {:?} is not accepted", header.alg));
@@ -224,11 +234,17 @@ impl ActorJwtVerifier {
         let claims = jsonwebtoken::decode::<Claims>(token, &key, &validation)
             .map_err(|e| e.to_string())?
             .claims;
-        claims
+        let actor = claims
             .sub
             .strip_prefix("actor/")
             .map(str::to_string)
-            .ok_or_else(|| format!("subject {} is not an actor", claims.sub))
+            .ok_or_else(|| format!("subject {} is not an actor", claims.sub))?;
+        let uid = claims
+            .actor
+            .map(|a| a.actor_uid)
+            .filter(|uid| !uid.is_empty())
+            .ok_or("token names no actor uid")?;
+        Ok((actor, uid))
     }
 
     async fn key(&self, kid: &str, refresh: bool) -> Result<Option<DecodingKey>, String> {
@@ -289,8 +305,8 @@ async fn launch(
         tracing::warn!(%atespace, %name, "launch request without a bearer token");
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    let actor = match svc.verifier.verify(token).await {
-        Ok(actor) => actor,
+    let (actor, uid) = match svc.verifier.verify(token).await {
+        Ok(verified) => verified,
         Err(err) => {
             tracing::warn!(%atespace, %name, %err, "launch request refused");
             return StatusCode::UNAUTHORIZED.into_response();
@@ -303,11 +319,15 @@ async fn launch(
     let mut changes = svc.store.changed.subscribe();
     let deadline = tokio::time::Instant::now() + LONG_POLL;
     loop {
-        if let Some(bundle) = svc.store.get(&name).await
-            && query.generation.as_deref() != Some(bundle.generation.as_str())
-        {
-            tracing::info!(%name, generation = %bundle.generation, "bundle handed out");
-            return Json(bundle).into_response();
+        if let Some(bundle) = svc.store.get(&name).await {
+            if bundle.actor_uid != uid {
+                tracing::warn!(%name, "launch request from another incarnation of the actor");
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            if query.generation.as_deref() != Some(bundle.generation.as_str()) {
+                tracing::info!(%name, generation = %bundle.generation, "bundle handed out");
+                return Json(bundle).into_response();
+            }
         }
         tokio::select! {
             _ = changes.changed() => {}
@@ -316,17 +336,24 @@ async fn launch(
     }
 }
 
+/// A bundle for tests.
+#[cfg(test)]
+pub(crate) fn test_bundle() -> Bundle {
+    tests::bundle("g1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn bundle(generation: &str) -> Bundle {
+    pub(super) fn bundle(generation: &str) -> Bundle {
         Bundle {
             generation: generation.to_string(),
             epoch: 1,
             gateway: Gateway::default(),
             sandbox_id: "alice".to_string(),
             sandbox_name: "alice".to_string(),
+            actor_uid: "u1".to_string(),
             log_level: "info".to_string(),
             supervisor: BTreeMap::from([("auth.json".to_string(), "{}".to_string())]),
             sandbox: BTreeMap::new(),

@@ -75,20 +75,17 @@ upstream and what to fix first here.
    takeover. The launcher therefore replaces both processes
    (`runtime/launcher.py`). Only a Substrate-side suspend keeps the
    workload's memory.
-2. **A Substrate-side resume of a gateway-stopped sandbox holds a worker.**
-   After `openshell sandbox stop` anything on the Substrate side can resume
-   the actor: `kubectl-ate resume`, or a connection through `kubectl-ate
-   proxy actor`, which the router answers by resuming the actor. The driver
-   keeps reporting Stopped, so the gateway sees nothing, but the actor runs
-   with retired credentials, its supervisor retrying a denied logon, until the
-   next `start`, which hands it a new generation without a restore, or
-   `delete`. Nothing suspends it again.
+2. **A Substrate-side resume of a gateway-stopped sandbox is undone, not
+   prevented.** `kubectl-ate resume`, or a connection through `kubectl-ate
+   proxy actor`, which the router answers by resuming the actor, restores the
+   VM; the driver reports Stopped throughout and suspends it again within a
+   watch tick plus one checkpoint. In between the supervisor retries a denied
+   logon. An operator who wants the actor up has to `openshell sandbox start`.
 3. **A stop cut in flight settles as Stopped.** The mark goes on before
    `SuspendActor`, so the gateway's recovery after a driver restart, a
    gateway restart or a transport error sees `PodTerminating` while the
    checkpoint runs and Stopped after it. If the RPC was lost before Substrate
-   acted, the actor keeps running while the gateway records Stopped and
-   retires the credentials; the next `start` repairs it as in item 2.
+   acted, the watch loop suspends the still-running actor as in item 2.
 4. **`start` ignores `resume`.** The gateway sends `resume=false` after a
    stop and expects a fresh boot, `resume=true` after a suspend. The driver
    restores the last checkpoint either way (`start_sandbox`), so guest state
@@ -117,18 +114,18 @@ upstream and what to fix first here.
    long as the checkpoint of the whole guest memory takes to reach the object
    store.
 9. **The first `create` of a new image shape blocks on the golden snapshot.**
-    `ensure_ready` in `src/template.rs` waits for the boot, the fixed 20 s
-    warm-up and the checkpoint, up to `template_ready_timeout_secs`, inside
-    the gateway's `CreateSandbox` call. A golden failure deletes the template
+    `ensure_ready` in `src/template.rs` waits for the boot, the wakeup probes
+    and the checkpoint, up to `template_ready_timeout_secs`, inside the
+    gateway's `CreateSandbox` call. A golden failure deletes the template
     while other creates may be polling the same name, which then see
     `NotFound`; a timeout leaves the template and its golden actor behind.
 10. **The golden snapshot proves nothing on the gateway path.** The golden
     actor has no egress policy, so its launchers get 403 every 5 s and never
     start OpenShell; the qualification gates and the boundary attach run per
-    actor after every restore. Substrate checkpoints at 20 s whether or not
-    the containers are healthy, and a container that died before that comes
-    back dead in every restore. `run.sh`'s warm-up check has no gateway-path
-    equivalent.
+    actor after every restore. The wakeup probes only say the launchers and
+    the relay are up; a probe that never answers fails the activation after
+    30 s instead of snapshotting a dead container. `run.sh`'s warm-up check
+    has no gateway-path equivalent.
 
 ## State and recovery
 
@@ -146,12 +143,13 @@ upstream and what to fix first here.
    its credential-store key are pointed at the data volume by name
    (`gateway.toml.tmpl`), and anything else it may keep there is lost on a
    restart.
-3. **No reconciliation.** A lost gateway database leaves actors in Substrate
-   that no one owns. A lost bundle store leaves running sandboxes whose
-   launchers get 204 until the next `start` mints a bundle, and the driver
-   reports them under their ids, which the gateway adopts as their names
-   (it takes the name from every snapshot, and a start waiting at that moment
-   aborts). The same rename shows for one tick between `CreateActor` and
+3. **Little reconciliation.** The driver drops the bundles of vanished actors
+   at startup and suspends a resumed actor the gateway stopped, nothing more.
+   A lost gateway database leaves actors in Substrate that no one owns. A lost
+   bundle store leaves running sandboxes whose launchers get 204 until the
+   next `start` mints a bundle, and the driver reports them under their ids,
+   which the gateway adopts as their names (it takes the name from every
+   snapshot, and a start waiting at that moment aborts). The same rename shows for one tick between `CreateActor` and
    `store_bundle` in `create_sandbox`. Ownership is by name: any actor of a
    template named `oshl-*` is reported as a sandbox (`list_driver_actors`),
    and the driver's token holds `editor` on the whole atespace, in the same
@@ -190,7 +188,10 @@ upstream and what to fix first here.
    delivery, and the bundle stays until `delete`. The driver cannot tell the
    egress from a direct caller, so anyone who captures the clear-text actor
    JWT can fetch the supervisor's gateway token, the sandbox token and the
-   boundary private key from any pod for the token's 600 s. Inside the actor,
+   boundary private key from any pod for the token's 600 s. A token of another
+   incarnation of the actor, the same name after a delete and a recreate, is
+   refused, and the sandbox checks the bundle's uid claim against
+   `/run/ate/actor-uid`. Inside the actor,
    any process in any container that can open a TCP connection to the launch
    host gets the same; the workload is kept out by OpenShell's policy, not by
    the driver.
@@ -253,7 +254,8 @@ upstream and what to fix first here.
    and `SupervisorAuthBundle` by hand against rev 5d25211.
 5. **The boundary address is written three times.** `169.254.17.2:17777`
    lives in `src/bundle.rs`, `harness/bootstrap-gen` and, as a hex pattern
-   for `/proc/net/tcp`, in `launcher.py`; the mount paths and the
+   for `/proc/net/tcp`, in `launcher.py`; the health ports 17901 to 17903 in
+   the launcher, the relay and both fragments; the mount paths and the
    `policy-dns-transparent-tcp` capability are the launcher's constants. A
    change in one place is a 120 s wait and `exit 1` with no hint.
 6. **The model endpoint is baked in.** `MODEL_HOST` goes into the policy data,
@@ -324,7 +326,14 @@ upstream and what to fix first here.
 1. Harden the launcher: guard the reads, stop what it started before it
    exits, tolerate a vanished bundle directory, and give the sandbox longer
    than it gives the workload (Operations 2).
-2. Suspend a gateway-stopped actor that Substrate resumed behind the
-   gateway's back, instead of letting it hold a worker (Lifecycle 2).
-3. A static launcher and relay on an image volume, so `--from` takes any
-   image (What a gateway user loses, item 1).
+2. A static launcher and relay on a digest-pinned image volume, so the
+   workload image needs neither Python nor the runtime image (What a gateway
+   user loses, item 1). It also needs a uid and gid strategy instead of the
+   fixed 65532, and a way to point the sandbox's resolver at its relay that
+   does not need a workload-owned `/etc`.
+3. Durable lifecycle records with phases, reconciled against Substrate at
+   startup and on a schedule, and fault tests that interrupt each phase,
+   race a stop with a start, and recreate an actor under the same name
+   (State 3).
+4. OpenShell's own ingress for published services, the supervisor's app
+   listener behind Substrate's router, instead of the relay (Security 7).

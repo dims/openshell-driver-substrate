@@ -146,6 +146,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!(listen = %settings.listen, "serving the launch endpoint");
         launch_server = Box::pin(axum::serve(listener, launch::router(service)).into_future());
         driver = driver.with_bundles(store);
+        match driver.reap_orphan_bundles().await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(
+                count = n,
+                "removed the bundles of actors that no longer exist"
+            ),
+            Err(status) => {
+                tracing::warn!(%status, "could not check the bundles against Substrate; keeping them");
+            }
+        }
     }
 
     if let Some(parent) = args.bind_socket.parent() {

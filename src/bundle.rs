@@ -35,12 +35,21 @@ pub const SANDBOX_DIR: &str = "/.openshell/channel/sandbox";
 /// The sandbox process's uid and gid; the sandbox image fixes them.
 pub const SANDBOX_UID: u32 = 65532;
 
+/// The actor UID as the systemInfo volume writes it in the sandbox container;
+/// the sandbox refuses a bundle whose claim does not match it.
+const ACTOR_UID_FILE: &str = "/run/ate/actor-uid";
+const ACTOR_UID_CLAIM: &str = "substrate.actor_uid";
+
 /// Build the bundle for one generation of a sandbox.
 pub fn build(
     sandbox: &DriverSandbox,
     launch_authentication: &[u8],
     gateway: &Gateway,
+    actor_uid: &str,
 ) -> Result<Bundle, String> {
+    if actor_uid.is_empty() {
+        return Err("the actor has no uid".to_string());
+    }
     let auth: SandboxLaunchAuthentication = serde_json::from_slice(launch_authentication)
         .map_err(|e| format!("launch authentication: {e}"))?;
     auth.validate()
@@ -84,6 +93,9 @@ pub fn build(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // Both sides carry the claim and compare them; the sandbox also reads the
+    // file, so material from an earlier actor of the same name is refused.
+    let resource_claims = BTreeMap::from([(ACTOR_UID_CLAIM.to_string(), actor_uid.to_string())]);
 
     let boundary = BoundaryConfig {
         boundary_id: sandbox.id.clone(),
@@ -102,8 +114,11 @@ pub fn build(
             },
             route: None,
         },
-        resource_claims: BTreeMap::new(),
-        resource_claim_files: BTreeMap::new(),
+        resource_claims: resource_claims.clone(),
+        resource_claim_files: BTreeMap::from([(
+            ACTOR_UID_CLAIM.to_string(),
+            PathBuf::from(ACTOR_UID_FILE),
+        )]),
         workload_identity: workload_identity.clone(),
         provisioning_evidence: evidence.clone(),
         child_env: child_env(sandbox),
@@ -122,7 +137,7 @@ pub fn build(
             trust_anchor_pem: tls.trust_anchor_pem.clone(),
         },
         host_gateway_ip: None,
-        resource_claims: BTreeMap::new(),
+        resource_claims,
         provisioning_evidence: evidence,
     };
     Ok(Bundle {
@@ -131,6 +146,7 @@ pub fn build(
         gateway: gateway.clone(),
         sandbox_id: sandbox.id.clone(),
         sandbox_name: sandbox.name.clone(),
+        actor_uid: actor_uid.to_string(),
         log_level: spec
             .map(|s| s.log_level.clone())
             .filter(|l| !l.is_empty())

@@ -7,6 +7,11 @@ containers:
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
     command: ["python3", "/opt/openshell-substrate/launcher.py", "sandbox"]
+    wakeupProbe:
+      httpGet:
+        path: /healthz
+        port: 17902
+      timeoutSeconds: 30
     securityContext:
       capabilities:
         drop: ["ALL"]
@@ -15,12 +20,19 @@ containers:
         mountPath: "/run/openshell"
       - name: supervisor-ca
         mountPath: "/run/openshell-supervisor-ca"
+      - name: identity
+        mountPath: "/run/ate"
   # The supervisor keeps its own container: the sandbox's resolver points at
   # the sandbox's relay, and the supervisor's policy DNS needs the actor's
   # resolver for upstream lookups.
   - name: supervisor
     image: "${RUNTIME_IMAGE}"
     command: ["python3", "/opt/openshell-substrate/launcher.py", "supervisor"]
+    wakeupProbe:
+      httpGet:
+        path: /healthz
+        port: 17901
+      timeoutSeconds: 30
     env:
       - name: WORKLOAD
         value: "python3 /opt/helpdesk/agent.py"
@@ -38,6 +50,11 @@ containers:
   - name: relay
     image: "${RUNTIME_IMAGE}"
     command: ["python3", "/opt/openshell-substrate/relay.py"]
+    wakeupProbe:
+      httpGet:
+        path: /healthz
+        port: 17903
+      timeoutSeconds: 30
     securityContext:
       capabilities:
         drop: ["ALL"]
@@ -66,5 +83,7 @@ volumes:
                 path: actor-name
               - field: ACTOR_METADATA_FIELD_ATESPACE
                 path: atespace
+              - field: ACTOR_METADATA_FIELD_UID
+                path: actor-uid
 snapshotConfig:
   preferredFidelity: SNAPSHOT_FIDELITY_MEMORY
