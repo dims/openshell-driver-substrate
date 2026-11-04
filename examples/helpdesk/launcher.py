@@ -107,6 +107,8 @@ def apply_bundle(bundle, running):
         "OPENSHELL_SANDBOX": bundle["sandbox_name"],
         "OPENSHELL_LOG_LEVEL": bundle["log_level"],
         "OPENSHELL_NETWORK_RUNTIME_CAPABILITIES": "policy-dns-transparent-tcp",
+        # The relay behind `openshell sandbox exec` and `forward`.
+        "OPENSHELL_SSH_SOCKET_PATH": f"{SHARED}/ssh.sock",
     }
     if bundle.get("main_process_spec"):
         env["OPENSHELL_MAIN_PROCESS_SPEC"] = bundle["main_process_spec"]
