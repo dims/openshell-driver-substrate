@@ -27,6 +27,7 @@ component, the lifecycle, and sequence diagrams for create, the request
 path, suspend and resume, host death, and how a sandbox gets its credentials.
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300, "nodeSpacing": 30, "rankSpacing": 30}}}%%
 flowchart TB
   classDef stock fill:#ecfdf5,stroke:#059669,color:#064e3b
   classDef ours fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a,stroke-width:2px
@@ -36,31 +37,27 @@ flowchart TB
   cli["openshell CLI"]
   kate["kubectl-ate"]
   gw["openshell-gateway<br/>stock v0.1.7"]
-  drv["openshell-driver-substrate, this repository<br/>ComputeDriver on a Unix socket<br/>launch endpoint: each sandbox's credential bundle"]
-  api["ate-api-server, the Control API<br/>ActorTemplate → golden snapshot → Actor"]
-  worker["worker pod, ateworker-microvm<br/>restores the actor from the golden snapshot<br/>in about 330 ms"]
-  egress["atenet egress<br/>puts the actor JWT on the launch request"]
+  drv["openshell-driver-substrate<br/>this repository"]
+  api["ate-api-server"]
+  worker["worker pod<br/>ateworker-microvm"]
+  egress["atenet egress<br/>adds the actor JWT"]
   router["atenet router<br/>mTLS ingress"]
 
-  subgraph vm["one actor, one micro-VM"]
+  subgraph vm["one actor, one microVM"]
     direction LR
-    relay["relay container"]
-    sbx["sandbox container<br/>launcher → openshell-sandbox → workload"]
-    sup["supervisor container<br/>launcher → openshell-supervisor"]
-    relay -- "loopback" --> sbx
-    sbx -- "boundary, TLS to 169.254.17.2:17777" --> sup
+    relay["relay"] -- "loopback" --> sbx["sandbox<br/>openshell-sandbox"] -- "boundary, TLS" --> sup["supervisor<br/>openshell-supervisor"]
   end
 
   cli --> gw
-  gw -- "create, start, stop, suspend, delete, watch" --> drv
-  drv -- "CreateActorTemplate, CreateActor, EgressPolicy,<br/>ResumeActor, SuspendActor, DeleteActor" --> api
+  gw -- "ComputeDriver" --> drv
+  drv -- "Control API" --> api
   api -- "restore, checkpoint" --> worker
   worker --> vm
-  sup -- "GET /v1/launch, a long poll" --> egress
-  egress -- "the same request with the actor JWT" --> drv
-  sup -- "supervisor session, through the egress" --> gw
+  vm -- "supervisor: GET /v1/launch" --> egress
+  egress --> drv
+  vm -- "supervisor session" --> gw
   kate -- "proxy actor" --> router
-  router --> relay
+  router -- "to the relay" --> vm
 
   class cli,gw stock
   class drv ours
