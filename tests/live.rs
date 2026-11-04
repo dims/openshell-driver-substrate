@@ -10,10 +10,11 @@
 //! export SUBSTRATE_LIVE_BEARER_TOKEN_PATH=creds/token
 //! export SUBSTRATE_LIVE_TLS_SERVER_NAME=api.ate-system.svc
 //! export SUBSTRATE_LIVE_TEST_IMAGE=<SANDBOX_IMAGE from out/helpdesk.env>
+//! export SUBSTRATE_LIVE_CONFIG=driver.toml   # optional: the fragment and egress rules
 //! cargo test --test live -- --ignored
 //! ```
 //!
-//! Skips when any variable is missing.
+//! Skips when any required variable is missing.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -23,7 +24,7 @@ use openshell_core::proto::compute::v1::{
     DriverSandboxTemplate, GetCapabilitiesRequest, GetSandboxRequest, ListSandboxesRequest,
     StartSandboxRequest, StopSandboxRequest, compute_driver_server::ComputeDriver,
 };
-use openshell_driver_substrate::{SubstrateComputeConfig, SubstrateComputeDriver};
+use openshell_driver_substrate::{SubstrateComputeConfig, SubstrateComputeDriver, configfile};
 use tonic::Request;
 
 struct Live {
@@ -33,12 +34,22 @@ struct Live {
 
 fn live() -> Option<Live> {
     let var = |k: &str| std::env::var(k).ok();
+    let (template_fragment, egress_rules) = match var("SUBSTRATE_LIVE_CONFIG") {
+        Some(path) => {
+            let loaded =
+                configfile::load(std::path::Path::new(&path)).expect("SUBSTRATE_LIVE_CONFIG");
+            (loaded.template_fragment, loaded.egress_rules)
+        }
+        None => (None, Vec::new()),
+    };
     let config = SubstrateComputeConfig {
         api_endpoint: var("SUBSTRATE_LIVE_API_ENDPOINT")?,
         atespace: var("SUBSTRATE_LIVE_ATESPACE")?,
         api_tls_ca_path: Some(PathBuf::from(var("SUBSTRATE_LIVE_CA_PATH")?)),
         api_bearer_token_path: Some(PathBuf::from(var("SUBSTRATE_LIVE_BEARER_TOKEN_PATH")?)),
         api_tls_server_name: var("SUBSTRATE_LIVE_TLS_SERVER_NAME"),
+        template_fragment,
+        egress_rules,
         ..SubstrateComputeConfig::default()
     };
     Some(Live {

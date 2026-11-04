@@ -41,6 +41,14 @@ tonic-prost = "0.14"
 prost = "0.14"
 # Not named in src; the generated client uses it for Timestamp.
 prost-types = "0.14"
+# The configuration file: TOML, with ActorTemplate and EgressPolicy fragments
+# decoded from protojson YAML through the descriptor set build.rs writes.
+prost-reflect = { version = "0.16", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+toml = "1"
+# Server reflection on the socket, so grpcurl needs no proto files.
+tonic-reflection = "=0.14.6"
 # Already in the graph through openshell-core; declared here for the template name.
 sha2 = "0.10"
 tokio-stream = "0.1"

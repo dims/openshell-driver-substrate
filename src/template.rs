@@ -71,8 +71,8 @@ fn inputs_for(
 }
 
 /// The template's resource limits: the sandbox template's `cpu_limit` and
-/// `memory_limit`, Kubernetes quantities, when set; the config defaults
-/// otherwise.
+/// `memory_limit`, Kubernetes quantities, when set; the fragment's limits
+/// next; the config defaults last.
 pub fn resources_for(
     sandbox: &DriverSandbox,
     config: &SubstrateComputeConfig,
@@ -88,6 +88,14 @@ pub fn resources_for(
     let memory = resources
         .map(|r| r.memory_limit.trim())
         .filter(|q| !q.is_empty());
+    let fragment = config
+        .template_fragment
+        .as_ref()
+        .and_then(|t| t.resources.as_ref())
+        .and_then(|r| r.limits.as_ref());
+    let fallback = |from_fragment: Option<i64>, default: i64| {
+        from_fragment.filter(|v| *v > 0).unwrap_or(default)
+    };
     Ok(ateapi::Resources {
         cpu_millicores: match cpu {
             Some(q) => cpu_millicores(q).ok_or_else(|| {
@@ -95,7 +103,10 @@ pub fn resources_for(
                     "cpu_limit {q:?}: expected a positive quantity such as 2, 0.5 or 500m"
                 ))
             })?,
-            None => config.default_cpu_millicores,
+            None => fallback(
+                fragment.map(|l| l.cpu_millicores),
+                config.default_cpu_millicores,
+            ),
         },
         memory_bytes: match memory {
             Some(q) => memory_bytes(q).ok_or_else(|| {
@@ -103,7 +114,10 @@ pub fn resources_for(
                     "memory_limit {q:?}: expected a positive integer, with Ki, Mi, Gi, Ti, k, M, G or T"
                 ))
             })?,
-            None => config.default_memory_bytes,
+            None => fallback(
+                fragment.map(|l| l.memory_bytes),
+                config.default_memory_bytes,
+            ),
         },
     })
 }
@@ -187,13 +201,7 @@ pub fn synthesize(
     config: &SubstrateComputeConfig,
 ) -> Result<ateapi::ActorTemplate, TemplateError> {
     let inputs = inputs_for(sandbox, config)?;
-    let env = inputs
-        .env
-        .into_iter()
-        .map(|(name, value)| ateapi::EnvVar { name, value })
-        .collect();
-
-    Ok(ateapi::ActorTemplate {
+    let mut template = ateapi::ActorTemplate {
         metadata: Some(ateapi::ResourceMetadata {
             atespace: atespace.to_string(),
             name: name.to_string(),
@@ -204,21 +212,16 @@ pub fn synthesize(
         }),
         containers: vec![ateapi::Container {
             name: "sandbox".to_string(),
-            image: inputs.image,
+            image: inputs.image.clone(),
             // The image's own entrypoint: openshell-sandbox.
             command: vec![],
             args: vec![],
-            env,
+            env: env_vars(&inputs.env),
             wakeup_probe: None,
             volume_mounts: vec![],
             // openshell-sandbox refuses to run with any capability in its
             // bounding set; Substrate grants a few by default.
-            security_context: Some(ateapi::SecurityContext {
-                capabilities: Some(ateapi::Capabilities {
-                    drop: vec!["ALL".to_string()],
-                    ..Default::default()
-                }),
-            }),
+            security_context: Some(drop_all()),
             resources: None,
         }],
         volumes: vec![],
@@ -236,7 +239,96 @@ pub fn synthesize(
         }),
         golden_egress_policy: None,
         status: None,
-    })
+    };
+    if let Some(fragment) = &config.template_fragment {
+        apply_fragment(&mut template, fragment, &inputs);
+    }
+    Ok(template)
+}
+
+fn env_vars(env: &BTreeMap<String, String>) -> Vec<ateapi::EnvVar> {
+    env.iter()
+        .map(|(name, value)| ateapi::EnvVar {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+fn drop_all() -> ateapi::SecurityContext {
+    ateapi::SecurityContext {
+        capabilities: Some(ateapi::Capabilities {
+            drop: vec!["ALL".to_string()],
+            ..Default::default()
+        }),
+    }
+}
+
+/// What a fragment may not say: the driver names and places the template,
+/// and no container may add a capability.
+pub fn check_fragment(fragment: &ateapi::ActorTemplate) -> Result<(), String> {
+    if fragment.metadata.is_some() {
+        return Err("metadata is the driver's".to_string());
+    }
+    if fragment.worker_selector.is_some() {
+        return Err("workerSelector is the driver's (--worker-selector)".to_string());
+    }
+    if fragment.status.is_some() {
+        return Err("status is read-only".to_string());
+    }
+    for c in &fragment.containers {
+        let adds = c
+            .security_context
+            .as_ref()
+            .and_then(|s| s.capabilities.as_ref())
+            .is_some_and(|caps| !caps.add.is_empty());
+        if adds {
+            return Err(format!(
+                "container {}: capabilities.add is not allowed",
+                c.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The fragment's containers replace the synthesized one; the container
+/// named `sandbox`, or else the first, takes the request's image, the merged
+/// environment and `drop: ALL`. Volumes, snapshot config and the golden
+/// egress policy come from the fragment when it sets them; the limits were
+/// merged in `resources_for`.
+fn apply_fragment(
+    template: &mut ateapi::ActorTemplate,
+    fragment: &ateapi::ActorTemplate,
+    inputs: &Inputs,
+) {
+    if !fragment.containers.is_empty() {
+        let mut containers = fragment.containers.clone();
+        let i = containers
+            .iter()
+            .position(|c| c.name == "sandbox")
+            .unwrap_or(0);
+        let sandbox = &mut containers[i];
+        sandbox.image = inputs.image.clone();
+        let mut env: BTreeMap<String, String> = sandbox
+            .env
+            .iter()
+            .map(|e| (e.name.clone(), e.value.clone()))
+            .collect();
+        env.extend(inputs.env.clone());
+        sandbox.env = env_vars(&env);
+        sandbox.security_context = Some(drop_all());
+        template.containers = containers;
+    }
+    if !fragment.volumes.is_empty() {
+        template.volumes = fragment.volumes.clone();
+    }
+    if fragment.snapshot_config.is_some() {
+        template.snapshot_config = fragment.snapshot_config.clone();
+    }
+    if fragment.golden_egress_policy.is_some() {
+        template.golden_egress_policy = fragment.golden_egress_policy.clone();
+    }
 }
 
 /// Errors specific to template management. Lifted into
@@ -509,6 +601,90 @@ mod tests {
             resources_for(&bad, &config),
             Err(TemplateError::InvalidSpec(_))
         ));
+    }
+
+    fn fragment(yaml: &str) -> ateapi::ActorTemplate {
+        crate::fragment::from_yaml("substrate.ateapi.v1.ActorTemplate", yaml).unwrap()
+    }
+
+    const SHAPE: &str = "containers:\n- name: relay\n  image: relay@sha256:r\n- name: sandbox\n  image: placeholder@sha256:p\n  env:\n  - name: FOO\n    value: bar\n  volumeMounts:\n  - name: data\n    mountPath: /data\nvolumes:\n- name: data\n  durableDir: {}\nresources:\n  limits:\n    cpuMillicores: 2000\n    memoryBytes: 2147483648\n";
+
+    #[test]
+    fn fragment_shapes_the_template_and_the_driver_keeps_its_say() {
+        let config = SubstrateComputeConfig {
+            template_fragment: Some(fragment(SHAPE)),
+            gateway_endpoint: "gateway:443".to_string(),
+            ..SubstrateComputeConfig::default()
+        };
+        let sb = sandbox("img@sha256:abc", &[("CALLER", "x")]);
+        let tmpl = synthesize("oshl-x", "ws", &sb, &config).unwrap();
+        let names: Vec<&str> = tmpl.containers.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["relay", "sandbox"]);
+        let s = &tmpl.containers[1];
+        assert_eq!(s.image, "img@sha256:abc");
+        let env: Vec<(&str, &str)> = s
+            .env
+            .iter()
+            .map(|e| (e.name.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(
+            env,
+            [
+                ("CALLER", "x"),
+                ("FOO", "bar"),
+                (openshell_core::sandbox_env::ENDPOINT, "gateway:443")
+            ]
+        );
+        let drops = &s
+            .security_context
+            .as_ref()
+            .unwrap()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .drop;
+        assert_eq!(drops, &["ALL"]);
+        assert_eq!(s.volume_mounts[0].mount_path, "/data");
+        assert_eq!(tmpl.volumes.len(), 1);
+        assert_eq!(
+            tmpl.resources.unwrap().limits.unwrap(),
+            ateapi::Resources {
+                cpu_millicores: 2000,
+                memory_bytes: 2 << 30,
+            }
+        );
+        // The spec's own limit wins over the fragment's; the name covers the fragment.
+        let sb = with_limits(sandbox("img@sha256:abc", &[]), "500m", "");
+        assert_eq!(
+            resources_for(&sb, &config).unwrap(),
+            ateapi::Resources {
+                cpu_millicores: 500,
+                memory_bytes: 2 << 30,
+            }
+        );
+        assert_ne!(
+            name_for(&sb, &config).unwrap(),
+            name_for(&sb, &SubstrateComputeConfig::default()).unwrap()
+        );
+    }
+
+    #[test]
+    fn fragment_rejects_what_the_driver_owns() {
+        for (what, yaml) in [
+            ("metadata", "metadata:\n  name: x\n"),
+            (
+                "workerSelector",
+                "workerSelector:\n  matchLabels:\n    a: b\n",
+            ),
+            ("status", "status: {}\n"),
+            (
+                "capabilities.add",
+                "containers:\n- name: sandbox\n  securityContext:\n    capabilities:\n      add: [NET_ADMIN]\n",
+            ),
+        ] {
+            assert!(check_fragment(&fragment(yaml)).is_err(), "{what}");
+        }
+        assert!(check_fragment(&fragment(SHAPE)).is_ok());
     }
 
     #[test]

@@ -102,6 +102,8 @@ pub mod ateapi {
     tonic::include_proto!("substrate.ateapi.v1");
 }
 
+pub mod configfile;
+pub mod fragment;
 pub mod template;
 
 const DRIVER_NAME: &str = "substrate";
@@ -148,6 +150,12 @@ pub struct SubstrateComputeConfig {
     /// tokens are picked up without a driver restart. Unset disables
     /// bearer auth.
     pub api_bearer_token_path: Option<std::path::PathBuf>,
+    /// The ActorTemplate fragment from the configuration file: the
+    /// containers, volumes, resources and snapshot config every sandbox
+    /// gets. None synthesizes one container from the request alone.
+    pub template_fragment: Option<ateapi::ActorTemplate>,
+    /// Egress rules every sandbox's actor gets before its first resume.
+    pub egress_rules: Vec<ateapi::EgressRule>,
 }
 
 impl Default for SubstrateComputeConfig {
@@ -168,6 +176,8 @@ impl Default for SubstrateComputeConfig {
             api_client_key_path: None,
             api_tls_server_name: None,
             api_bearer_token_path: None,
+            template_fragment: None,
+            egress_rules: Vec::new(),
         }
     }
 }
@@ -392,6 +402,42 @@ impl SubstrateComputeDriver {
             tls = tls.domain_name(name);
         }
         Ok(Some(tls))
+    }
+
+    /// Stop and suspend both end with the actor SUSPENDED and its snapshot
+    /// in durable storage. A CRASHED actor cannot be checkpointed; RevertActor
+    /// puts it back at its last snapshot instead, which is the gateway's
+    /// Error, Stop, Start recovery.
+    async fn checkpoint(&self, actor_name: String) -> Result<(), Status> {
+        let mut client = self.control_client().await?;
+        let actor = ateapi::ObjectRef {
+            atespace: self.config.atespace.clone(),
+            name: actor_name,
+        };
+        let state = client
+            .get_actor(ateapi::GetActorRequest {
+                actor: Some(actor.clone()),
+            })
+            .await?
+            .into_inner()
+            .status
+            .unwrap_or_default()
+            .state();
+        if state == ateapi::ActorState::Crashed {
+            client
+                .revert_actor(ateapi::RevertActorRequest { actor: Some(actor) })
+                .await?;
+            return Ok(());
+        }
+        client
+            .suspend_actor(ateapi::SuspendActorRequest {
+                actor: Some(actor),
+                options: Some(ateapi::SuspendOptions {
+                    mode: ateapi::DurabilityMode::Synchronous as i32,
+                }),
+            })
+            .await?;
+        Ok(())
     }
 }
 
@@ -677,13 +723,14 @@ impl ComputeDriver for SubstrateComputeDriver {
         request: Request<GetCapabilitiesRequest>,
     ) -> Result<Response<GetCapabilitiesResponse>, Status> {
         use openshell_core::extension_protocol::{
-            ExtensionFamily, extension_metadata, validate_gateway_metadata,
+            COMPUTE_SUSPEND_RESUME, ExtensionFamily, extension_metadata, validate_gateway_metadata,
         };
         let extension = Some(extension_metadata(
             ExtensionFamily::Compute,
             "openshell-driver-substrate",
             env!("CARGO_PKG_VERSION"),
-            [],
+            // Suspend and resume are Substrate's own verbs.
+            [COMPUTE_SUSPEND_RESUME.to_string()],
         ));
         validate_gateway_metadata(
             ExtensionFamily::Compute,
@@ -842,6 +889,27 @@ impl ComputeDriver for SubstrateComputeDriver {
             }
             Err(status) => return Err(status),
         }
+        // Before the first resume: the egress caches a missing policy.
+        if !self.config.egress_rules.is_empty() {
+            match client
+                .create_actor_egress_policy(ateapi::CreateActorEgressPolicyRequest {
+                    actor: Some(actor_ref.clone()),
+                    egress_policy: Some(ateapi::EgressPolicy {
+                        metadata: Some(ateapi::ResourceMetadata {
+                            atespace: atespace.clone(),
+                            name: "default".to_string(),
+                            ..Default::default()
+                        }),
+                        rules: self.config.egress_rules.clone(),
+                    }),
+                })
+                .await
+            {
+                Ok(_) => {}
+                Err(status) if status.code() == tonic::Code::AlreadyExists => {}
+                Err(status) => return Err(status),
+            }
+        }
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(actor_ref),
@@ -875,34 +943,17 @@ impl ComputeDriver for SubstrateComputeDriver {
     ) -> Result<Response<StopSandboxResponse>, Status> {
         let req = request.into_inner();
         let actor_name = require_actor_name(&req.sandbox_id, &req.name)?;
-        let mut client = self.control_client().await?;
-        // OpenShell "stop" -> Substrate "suspend" (checkpoint + free the
-        // worker slot, snapshot retained).
-        client
-            .suspend_actor(ateapi::SuspendActorRequest {
-                actor: Some(ateapi::ObjectRef {
-                    atespace: self.config.atespace.clone(),
-                    name: actor_name,
-                }),
-                // Return once the snapshot is in durable storage, so a stopped
-                // sandbox survives its worker.
-                options: Some(ateapi::SuspendOptions {
-                    mode: ateapi::DurabilityMode::Synchronous as i32,
-                }),
-            })
-            .await?;
+        self.checkpoint(actor_name).await?;
         Ok(Response::new(StopSandboxResponse {}))
     }
 
     async fn suspend_sandbox(
         &self,
-        _request: Request<SuspendSandboxRequest>,
+        request: Request<SuspendSandboxRequest>,
     ) -> Result<Response<SuspendSandboxResponse>, Status> {
-        // Not advertised (openshell.compute.suspend-resume): stop_sandbox is
-        // the suspend.
-        Err(Status::unimplemented(
-            "substrate driver suspends on stop_sandbox",
-        ))
+        let actor_name = require_actor_name(&request.into_inner().sandbox, "")?;
+        self.checkpoint(actor_name).await?;
+        Ok(Response::new(SuspendSandboxResponse::default()))
     }
 
     async fn delete_sandbox(

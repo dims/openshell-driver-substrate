@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use openshell_core::proto::compute::v1::compute_driver_server::ComputeDriverServer;
-use openshell_driver_substrate::{SubstrateComputeConfig, SubstrateComputeDriver};
+use openshell_driver_substrate::{SubstrateComputeConfig, SubstrateComputeDriver, configfile};
 
 #[derive(Parser)]
 #[command(name = "openshell-driver-substrate")]
@@ -69,6 +69,11 @@ struct Args {
     #[arg(long, env = "SUBSTRATE_API_BEARER_TOKEN_PATH")]
     api_bearer_token_path: Option<PathBuf>,
 
+    /// Configuration file (TOML): the ActorTemplate fragment and the egress
+    /// policy every sandbox gets.
+    #[arg(long, env = "SUBSTRATE_DRIVER_CONFIG")]
+    config: Option<PathBuf>,
+
     #[arg(long, env = "OPENSHELL_LOG_LEVEL", default_value = "info")]
     log_level: String,
 }
@@ -93,6 +98,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if worker_selector.is_empty() {
         return Err("--worker-selector needs at least one key=value".into());
     }
+    let loaded = match &args.config {
+        Some(path) => configfile::load(path)?,
+        None => configfile::Loaded {
+            template_fragment: None,
+            egress_rules: Vec::new(),
+        },
+    };
     let driver = SubstrateComputeDriver::new(SubstrateComputeConfig {
         api_endpoint: args.api_endpoint,
         atespace: args.atespace,
@@ -104,6 +116,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_client_key_path: args.api_tls_key,
         api_tls_server_name: args.api_tls_server_name,
         api_bearer_token_path: args.api_bearer_token_path,
+        template_fragment: loaded.template_fragment,
+        egress_rules: loaded.egress_rules,
         ..Default::default()
     });
 
@@ -121,8 +135,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::UnixListener::bind(&args.bind_socket)?;
     tracing::info!(socket = %args.bind_socket.display(), "starting openshell-driver-substrate");
 
+    // Reflection, so grpcurl needs no proto files. v1alpha serves older clients.
+    let reflection = || {
+        tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(openshell_core::FILE_DESCRIPTOR_SET)
+            .with_service_name("openshell.compute.v1.ComputeDriver")
+    };
     tonic::transport::Server::builder()
         .add_service(ComputeDriverServer::new(driver))
+        .add_service(reflection().build_v1()?)
+        .add_service(reflection().build_v1alpha()?)
         .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener))
         .await?;
     Ok(())

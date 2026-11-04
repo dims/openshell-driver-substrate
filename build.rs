@@ -18,11 +18,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::set_var("PROTOC_INCLUDE", protoc_bin_vendored::include_path()?);
     }
 
+    let out_dir = std::path::PathBuf::from(env::var("OUT_DIR")?);
     tonic_prost_build::configure()
         .build_server(false) // client-only -- the driver speaks to ate-api-server
         .build_client(true)
         // Deterministic map encoding: template names hash the encoded template.
         .btree_map(".")
+        // fragment.rs decodes protojson through this descriptor set.
+        .file_descriptor_set_path(out_dir.join("ateapi.bin"))
         .compile_protos(&["proto/ateapi.proto"], &["proto"])?;
 
     Ok(())
