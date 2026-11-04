@@ -139,7 +139,9 @@ upstream and what to fix first here.
    Deployment uses `Recreate`, and the launch Service selects every gateway
    pod (`harness/gateway/deployment.yaml.tmpl`). A second replica would answer
    204 or 403 for bundles it does not hold. Every rollout is downtime for the
-   API; running sandboxes continue and their supervisors reconnect. The
+   API; running sandboxes continue and their supervisors reconnect after a
+   backoff, about 30 s in the runs, during which the gateway shows them
+   Provisioning (`SupervisorNotConnected`). The
    gateway's state dir (`XDG_STATE_HOME`) is an emptyDir: its database and
    its credential-store key are pointed at the data volume by name
    (`gateway.toml.tmpl`), and anything else it may keep there is lost on a

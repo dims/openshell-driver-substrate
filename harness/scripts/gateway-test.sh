@@ -55,9 +55,9 @@ wait_phase() {  # name phase seconds
 actor() { kubectl-ate get actors -a "$ATESPACE" "${ID[$1]}" -o json 2>/dev/null; }
 actor_state() { actor "$1" | jq -r '.status.state // empty'; }
 worker_pod() { actor "$1" | jq -r '.status.workerAssignment.workerPod // empty'; }
-wait_actor() {  # name state seconds
+wait_actor() {  # name state-pattern seconds: polls twice a second
   local i
-  for ((i = 0; i < $3; i++)); do [ "$(actor_state "$1")" = "$2" ] && return 0; sleep 1; done
+  for ((i = 0; i < 2 * $3; i++)); do [[ $(actor_state "$1") =~ ^($2)$ ]] && return 0; sleep 0.5; done
   echo "the actor of $1 is $(actor_state "$1"), wanted $2" >&2; return 1
 }
 port_forward() {  # open, or reopen after a pod restart
@@ -158,11 +158,13 @@ os sandbox stop alice || fail stop; wait_phase alice Stopped 60 || fail "stop ph
 os sandbox start alice || fail start; wait_phase alice Ready 120 || fail "start phase"
 chat alice "Say hi in three words." || fail chat; expect_turns alice 1 || fail status
 
-step "a Substrate-side resume behind a stop: the gateway must stay Stopped"
+step "a Substrate-side resume behind a stop: the driver undoes it, the gateway stays Stopped"
 os sandbox stop alice || fail stop; wait_phase alice Stopped 60 || fail "stop phase"
 kubectl-ate resume actor -a "$ATESPACE" "${ID[alice]}" >/dev/null 2>&1 || fail "kubectl-ate resume"
-wait_actor alice ACTOR_STATE_RUNNING 60 || fail "the actor did not resume"
-sleep 8; phase alice
+# The watch loop suspends it again within a tick, so RUNNING may be gone before a poll sees it.
+wait_actor alice 'ACTOR_STATE_RUNNING|ACTOR_STATE_SUSPENDING' 60 || fail "the actor did not resume"
+wait_actor alice ACTOR_STATE_SUSPENDED 90 || fail "the driver did not suspend the actor again"
+phase alice
 [ "$(getj alice | jq -r '.phase // empty')" = "Stopped" ] || fail "the gateway left Stopped on a resume it did not ask for"
 os sandbox start alice || fail "start after the resume behind the gateway's back"
 wait_phase alice Ready 120 || fail "start phase"
@@ -184,8 +186,8 @@ kubectl-ate resume actor -a "$ATESPACE" "${ID[alice]}" >/dev/null 2>&1 || fail "
 wait_phase alice Ready 90 || fail "the gateway did not return to Ready after the Substrate-side resume"
 expect_turns alice 1 || fail "memory lost across the Substrate suspend"
 
-step "bob was never involved"
-[ "$(getj bob | jq -r '.phase // empty')" = "Ready" ] || fail "bob is not Ready"
+step "bob was never involved: Ready again once his supervisor reconnected to the restarted gateway"
+wait_phase bob Ready 120 || fail "bob did not return to Ready after the gateway restart"
 expect_turns bob 0 || fail "bob's status"
 
 step "alice's worker dies: Error for her, nothing for bob, then stop and start"
