@@ -108,17 +108,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def client(args):
     """status | chat <message> | egress <url>: ask the server on loopback."""
     base = f"http://127.0.0.1:{PORT}"
-    try:
-        if args[0] == "status":
-            status, body = fetch(f"{base}/status")
-        elif args[0] == "chat":
-            status, body = fetch(f"{base}/chat", {"message": " ".join(args[1:])}, timeout=90)
-        elif args[0] == "egress":
-            status, body = fetch(f"{base}/egress?url={args[1]}")
-        else:
-            sys.exit("usage: agent.py [status | chat <message> | egress <url>]")
-    except urllib.error.HTTPError as e:
-        status, body = e.code, e.read().decode("utf-8", "replace")
+    if args[0] == "status":
+        url, data, timeout = f"{base}/status", None, 30
+    elif args[0] == "chat":
+        url, data, timeout = f"{base}/chat", {"message": " ".join(args[1:])}, 90
+    elif args[0] == "egress":
+        url, data, timeout = f"{base}/egress?url={args[1]}", None, 30
+    else:
+        sys.exit("usage: agent.py [status | chat <message> | egress <url>]")
+    for attempt in range(10):  # right after Ready the server may still be binding
+        try:
+            status, body = fetch(url, data, timeout=timeout)
+            break
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read().decode("utf-8", "replace")
+            break
+        except ConnectionRefusedError:
+            if attempt == 9:
+                raise
+            time.sleep(0.5)
     print(body)
     sys.exit(0 if status == 200 else 1)
 
