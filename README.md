@@ -46,12 +46,12 @@ Substrate's actor lifecycle:
 
 | OpenShell call | What the driver does |
 |---|---|
-| `create_sandbox` | `CreateActorTemplate` (reused by content hash), `CreateActor`, `CreateActorEgressPolicy` when rules are configured, store the bundle, `ResumeActor` |
-| `start_sandbox` | store the bundle of the new generation, `ResumeActor` |
-| `stop_sandbox`, `suspend_sandbox` | `SuspendActor` with synchronous durability; `RevertActor` for a `CRASHED` actor |
-| `delete_sandbox` | `DeleteActor`, drop the bundle |
+| `create_sandbox` | `CreateActorTemplate` (reused by content hash), `CreateActor`, `CreateActorEgressPolicy` when rules are configured, store the bundle bound to the actor's uid, `ResumeActor` |
+| `start_sandbox` | store the bundle of the new generation, clear the stopped mark, `ResumeActor` |
+| `stop_sandbox`, `suspend_sandbox` | set the stopped mark, then `SuspendActor` with synchronous durability; `RevertActor` for a `CRASHED` actor |
+| `delete_sandbox` | `DeleteActor`, drop the bundle and the mark |
 | `get_sandbox` / `list_sandboxes` | `GetActor` / `ListActors`, the actors of `oshl-` templates |
-| `watch_sandboxes` | polls `ListActors` every 2 s (Substrate has no watch RPC) |
+| `watch_sandboxes` | polls `ListActors` every 2 s (Substrate has no watch RPC); suspends again a stopped actor Substrate resumed |
 | `ensure_workspace` | `GetAtespace`, then `CreateAtespace` when it is missing |
 | `delete_workspace` | no-op: one atespace serves every workspace |
 
@@ -80,7 +80,9 @@ from a `systemInfo` volume, which Substrate rewrites on every restore, and
 polls that URL. An EgressPolicy rule makes atenet-egress replace the
 `Authorization` header with a Substrate-minted actor JWT, so the driver knows
 which actor asks and answers only with that actor's bundle; it verifies the
-token against the IdP's JWKS. The launcher writes the supervisor's and the
+token against the IdP's JWKS and the token's actor uid against the bundle's,
+and the sandbox checks the same uid against `/run/ate/actor-uid` before it
+starts. The launcher writes the supervisor's and the
 sandbox's files, starts `openshell-supervisor` against the gateway (the
 `[gateway]` section), then `openshell-sandbox`, and the supervisor's session
 takes the sandbox to `Ready`. A new generation from `start` or `resume`
@@ -194,7 +196,7 @@ log is `$WORK/logs/install.log`. Knobs: `WORK`, `SUBSTRATE_REF`, `ATESPACE`,
 
 Substrate, OpenShell and kata run unmodified. One gap stays: micro-VM
 containers run without `no_new_privileges`, and `SecurityContext` has no field
-for it, so the helpdesk launcher sets it itself (step 2).
+for it, so the launcher in `runtime/` sets it itself.
 
 ### 2. Build the example
 
@@ -356,11 +358,12 @@ names; a refused name shows as `NET:REFUSE ... policy_dns_ineligible`.
 `kubectl-ate delete actor-template` returns `Aborted: another operation is in
 progress` while that template's golden warm-up runs. Retry after it finishes.
 
-For a template without a wakeup probe on every container, which is every
-template in this repo, the warm-up snapshots at a fixed 20 seconds after the
-actor starts, whether or not the containers are ready. A supervisor that has
-not attached by then is captured in that state and stays that way in every
-restore.
+The golden snapshot is taken when every container's wakeup probe answers
+200 (`/healthz` on the two launchers and the relay); a probe that never
+answers fails the golden actor after 30 s and the template records the error,
+so `create_sandbox` fails instead of snapshotting a dead container. Without
+a gateway the sandbox launcher answers only once the workload accepts
+connections, so that snapshot holds a live workload.
 
 ### Where the output is
 
@@ -382,8 +385,8 @@ sandbox and started the workload.
 [`docs/shortcomings.md`](docs/shortcomings.md) lists what the driver, the
 launcher and the harness do not do, and which of it needs a change in
 OpenShell or Substrate. The two that matter most: a resume through the
-gateway restarts the workload, and only an image built like the helpdesk
-image runs.
+gateway restarts the workload, and only an image built on the runtime image
+runs.
 
 ## License
 

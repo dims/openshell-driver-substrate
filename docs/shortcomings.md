@@ -149,8 +149,9 @@ upstream and what to fix first here.
    bundle store leaves running sandboxes whose launchers get 204 until the
    next `start` mints a bundle, and the driver reports them under their ids,
    which the gateway adopts as their names (it takes the name from every
-   snapshot, and a start waiting at that moment aborts). The same rename shows for one tick between `CreateActor` and
-   `store_bundle` in `create_sandbox`. Ownership is by name: any actor of a
+   snapshot, and a start waiting at that moment aborts). The same rename
+   shows for one tick between `CreateActor` and `store_bundle` in
+   `create_sandbox`. Ownership is by name: any actor of a
    template named `oshl-*` is reported as a sandbox (`list_driver_actors`),
    and the driver's token holds `editor` on the whole atespace, in the same
    process that serves the launch endpoint.
@@ -191,10 +192,9 @@ upstream and what to fix first here.
    boundary private key from any pod for the token's 600 s. A token of another
    incarnation of the actor, the same name after a delete and a recreate, is
    refused, and the sandbox checks the bundle's uid claim against
-   `/run/ate/actor-uid`. Inside the actor,
-   any process in any container that can open a TCP connection to the launch
-   host gets the same; the workload is kept out by OpenShell's policy, not by
-   the driver.
+   `/run/ate/actor-uid`. Inside the actor, any process in any container that
+   can open a TCP connection to the launch host gets the same; the workload is
+   kept out by OpenShell's policy, not by the driver.
 3. **Bundles hold live secrets at rest.** Each file under the driver's state
    directory carries those secrets, mode 0600, unencrypted, until the sandbox
    is deleted (`src/launch.rs`, `BundleStore`).
@@ -294,7 +294,7 @@ upstream and what to fix first here.
 
 ## Tests
 
-1. **CI runs no cluster.** `cargo test --lib` (21 pure tests), fmt, clippy,
+1. **CI runs no cluster.** `cargo test --lib` (25 pure tests), fmt, clippy,
    the proto diff, shellcheck and `py_compile` (`.github/workflows/ci.yml`).
 2. **Untested in the unit tests:** `src/bundle.rs`, the launch handler
    (401, 403, 204, 200, the generation compare), `ActorJwtVerifier`, the watch

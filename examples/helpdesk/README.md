@@ -44,7 +44,7 @@ namespace.
 
 | # | Beat | What you see | Under the covers |
 |---|---|---|---|
-| 1 | Template and golden snapshot | One `ActorTemplate` names the three containers. Substrate boots it once, waits 20 s, and snapshots the whole VM. | The supervisor logs `Runtime-initiated Sandbox Protocol listener ready` and `Isolation boundary attached`; the sandbox logs `Landlock ruleset built` and `PROC:LAUNCH python3`. ateworker writes the memory ranges, the rootfs uppers and the durable dirs to the bucket. |
+| 1 | Template and golden snapshot | One `ActorTemplate` names the three containers. Substrate boots it once, waits until every container's wakeup probe answers (the agent accepts connections), and snapshots the whole VM. | The supervisor logs `Runtime-initiated Sandbox Protocol listener ready` and `Isolation boundary attached`; the sandbox logs `Landlock ruleset built` and `PROC:LAUNCH python3`. ateworker writes the memory ranges, the rootfs uppers and the durable dirs to the bucket. |
 | 2 | Two agents from that snapshot | `create actor` and `resume` bring up alice and bob, each on its own worker: a worker hosts as many actors as fit, and each helpdesk actor asks for the whole worker's CPU. | `Actor restored (overlay rootfs) in ~330 ms`. Nothing boots: both are the same frozen process image, so both start at `turns: 0`. Each actor also gets a Substrate `EgressPolicy` for the model host. |
 | 3 | Egress is an allow-list | `https://example.com/` is refused. The model host answers. | The supervisor's policy DNS refuses the name (`NET:REFUSE ... policy_dns_ineligible`) and denies the connect; for the model host it maps the name (`Policy DNS mapped ...`) and logs `NET:OPEN ALLOWED /usr/local/bin/python3.12 -> ollama...:11434 [policy:model engine:opa]`. |
 | 4 | alice answers | `/chat` returns the model's reply, `turns: 1`. | `OCSF HTTP:POST ALLOWED POST http://.../v1/chat/completions`. The request went through the supervisor's proxy, which is where a provider credential would be attached. The agent never holds one. |
@@ -266,6 +266,7 @@ because those are world-writable.
 | `/egress` to the model host says `reached: false` | The host is not in `data.yaml`, or the binary path is not `/usr/local/bin/python3.12`. | `data.yaml.tmpl`, then `build.sh`. |
 | `create actor-template` fails with `FailedPrecondition ... persistence` | The atespace does not exist. | `kind-up.sh` creates it. |
 | `delete actor-template` says `Aborted: another operation is in progress` | Its golden warm-up is running. | Retry after it tags. |
+| Beat 1 never gets a golden tag and `errorMessage` names a wakeup probe | A container's `/healthz` never answered within 30 s; the sandbox launcher answers only once the agent accepts on 8080. | The sandbox container's lines in the worker pod log. |
 | Beat 8: alice stays `RUNNING` on a `DRAINING` worker | The pod was deleted without `--force`. The pool's grace period is an hour and ateworker waits for the guest workloads. | `kubectl delete pod --grace-period=0 --force`, as `run.sh` does. |
 
 ## Cleanup
