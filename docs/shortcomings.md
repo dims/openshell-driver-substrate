@@ -16,8 +16,8 @@ upstream and what to fix first here.
    `harness/gateway/template.yaml.tmpl`, `examples/helpdesk/data.yaml.tmpl`).
    OpenShell's docker driver injects the sandbox binary into any image; this
    driver cannot. A stock OpenShell sandbox image passes
-   `validate_sandbox_create` and dies at boot, which shows as Provisioning for
-   up to 1800 s (Lifecycle 6).
+   `validate_sandbox_create`; its activation then fails the wakeup probe after
+   30 s, because nothing in it answers `/healthz`.
 2. **The workload identity is fixed.** `src/bundle.rs` writes uid and gid
    65532 into every bundle and never reads the spec's `workload_identity` or
    the image's `USER`. A policy's `run_as_user` has no effect, and an image
@@ -78,9 +78,12 @@ upstream and what to fix first here.
 2. **A Substrate-side resume of a gateway-stopped sandbox is undone, not
    prevented.** `kubectl-ate resume`, or a connection through `kubectl-ate
    proxy actor`, which the router answers by resuming the actor, restores the
-   VM; the driver reports Stopped throughout and suspends it again within a
-   watch tick plus one checkpoint. In between the supervisor retries a denied
-   logon. An operator who wants the actor up has to `openshell sandbox start`.
+   VM; the driver reports Stopped throughout and suspends it again from the
+   watch loop, within a tick plus one checkpoint (`suspend_again` in
+   `src/lib.rs`). In between the supervisor retries a denied logon. A client
+   that keeps connecting through the router makes the actor flap between a
+   restore and a checkpoint every few seconds. An operator who wants the
+   actor up has to `openshell sandbox start`.
 3. **A stop cut in flight settles as Stopped.** The mark goes on before
    `SuspendActor`, so the gateway's recovery after a driver restart, a
    gateway restart or a transport error sees `PodTerminating` while the
@@ -95,14 +98,16 @@ upstream and what to fix first here.
    reports `Ready=False (DependenciesNotReady)` so the gateway keeps the
    credentials, but the gateway admits only `delete` in that phase and has no
    deadline for it. Recovery is `kubectl-ate resume`, outside the gateway.
-6. **Nothing restarts a dead supervisor or sandbox.** The launcher notices a
-   dead child only after its current poll returns, up to 25 s later, and then
-   exits; `openshell-sandbox` kills the workload after its own 30 s recovery
-   timeout. The container is gone, the actor stays `RUNNING`, Substrate
-   reports it so, and the gateway waits in Provisioning on
-   `SupervisorNotConnected`: 1800 s before the supervisor's first report, no
-   deadline after it. Nothing but the worker pod log names the cause. The fix
-   is `delete`.
+6. **Nothing restarts a dead supervisor or sandbox.** The supervisor's
+   launcher notices a dead child only after its current poll returns, up to
+   25 s later, the sandbox's within a second; both then exit, and
+   `openshell-sandbox` kills the workload after its own 30 s recovery timeout.
+   The container is gone, the actor stays `RUNNING`, Substrate reports it so,
+   and the gateway waits in Provisioning on `SupervisorNotConnected`: 1800 s
+   before the supervisor's first report, no deadline after it. The wakeup
+   probes run only on an activation, so the next resume fails after 30 s
+   instead; until then nothing but the worker pod log names the cause. The
+   fix is `delete`.
 7. **No capacity handling, no retries.** `ResumeActor` returns
    `ResourceExhausted` when no worker has room; `Aborted` comes back for a
    concurrent operation or a version conflict. The driver retries neither and
@@ -112,20 +117,23 @@ upstream and what to fix first here.
 8. **`suspend` and `stop` block on the upload.** `SuspendActor` runs with
    synchronous durability (`src/lib.rs`, `checkpoint`), so the RPC lasts as
    long as the checkpoint of the whole guest memory takes to reach the object
-   store.
+   store. The watch loop's suspend of a resumed actor pays the same.
 9. **The first `create` of a new image shape blocks on the golden snapshot.**
-    `ensure_ready` in `src/template.rs` waits for the boot, the wakeup probes
-    and the checkpoint, up to `template_ready_timeout_secs`, inside the
-    gateway's `CreateSandbox` call. A golden failure deletes the template
-    while other creates may be polling the same name, which then see
-    `NotFound`; a timeout leaves the template and its golden actor behind.
-10. **The golden snapshot proves nothing on the gateway path.** The golden
-    actor has no egress policy, so its launchers get 403 every 5 s and never
-    start OpenShell; the qualification gates and the boundary attach run per
-    actor after every restore. The wakeup probes only say the launchers and
-    the relay are up; a probe that never answers fails the activation after
-    30 s instead of snapshotting a dead container. `run.sh`'s warm-up check
-    has no gateway-path equivalent.
+   `ensure_ready` in `src/template.rs` waits for the boot, the wakeup probes
+   and the checkpoint, up to `template_ready_timeout_secs`, inside the
+   gateway's `CreateSandbox` call. A golden failure deletes the template
+   while other creates may be polling the same name, which then see
+   `NotFound`; a timeout leaves the template and its golden actor behind.
+10. **Every activation waits for the probes, and the probes say little.** An
+    activation completes only when the two launchers and the relay answer
+    `/healthz`, and fails after 30 s if one does not. On the gateway path the
+    answer means the launchers are polling, not that OpenShell works: the
+    golden actor has no egress policy, its launchers get 403 every 5 s and
+    never start OpenShell, and the qualification gates and the boundary attach
+    run per actor after every restore. Without a gateway the sandbox launcher
+    answers only while the workload accepts on `WORKLOAD_PORT`, so a workload
+    that stops listening fails its next resume. `run.sh`'s warm-up check has
+    no gateway-path equivalent.
 
 ## State and recovery
 
@@ -143,18 +151,18 @@ upstream and what to fix first here.
    its credential-store key are pointed at the data volume by name
    (`gateway.toml.tmpl`), and anything else it may keep there is lost on a
    restart.
-3. **Little reconciliation.** The driver drops the bundles of vanished actors
-   at startup and suspends a resumed actor the gateway stopped, nothing more.
-   A lost gateway database leaves actors in Substrate that no one owns. A lost
-   bundle store leaves running sandboxes whose launchers get 204 until the
-   next `start` mints a bundle, and the driver reports them under their ids,
-   which the gateway adopts as their names (it takes the name from every
-   snapshot, and a start waiting at that moment aborts). The same rename
-   shows for one tick between `CreateActor` and `store_bundle` in
-   `create_sandbox`. Ownership is by name: any actor of a
-   template named `oshl-*` is reported as a sandbox (`list_driver_actors`),
-   and the driver's token holds `editor` on the whole atespace, in the same
-   process that serves the launch endpoint.
+3. **Little reconciliation.** The driver drops the bundles and marks of
+   vanished actors once, at startup, if `ate-api-server` answers then, and
+   suspends a resumed actor the gateway stopped; nothing more. A lost gateway
+   database leaves actors in Substrate that no one owns. A lost bundle store
+   leaves running sandboxes whose launchers get 204 until the next `start`
+   mints a bundle, and the driver reports them under their ids, which the
+   gateway adopts as their names (it takes the name from every snapshot, and
+   a start waiting at that moment aborts). The same rename shows for one tick
+   between `CreateActor` and `store_bundle` in `create_sandbox`. Ownership is
+   by name: any actor of a template named `oshl-*` is reported as a sandbox
+   (`list_driver_actors`), and the driver's token holds `editor` on the whole
+   atespace, in the same process that serves the launch endpoint.
 4. **The watch is a poll.** `watch_sandboxes` lists every page of the
    atespace every 2 s and diffs; cost grows with the atespace, a change
    reaches the gateway up to 2 s plus one list later, and a `ListActors` that
@@ -170,8 +178,9 @@ upstream and what to fix first here.
    `launcher.py`); the lifecycle runs measured 2 to 4 s.
 7. **Bundle store housekeeping.** One corrupt file under `state_dir` stops the
    driver from starting, `.json.tmp` leftovers are never removed, writes are
-   not fsynced, and a crash between `DeleteActor` and `remove` leaves a bundle
-   with live secrets that nothing reaps (`src/launch.rs`, `delete_sandbox`).
+   not fsynced, and a bundle left by a crash between `DeleteActor` and
+   `remove` keeps its live secrets until the next driver start reaps it
+   (`src/launch.rs`, `delete_sandbox`, `reap_orphan_bundles`).
 
 ## Security
 
@@ -185,16 +194,16 @@ upstream and what to fix first here.
    egress config), so a servicedns or harness-CA certificate would not verify.
    The second part is an upstream change.
 2. **A bundle is a bearer secret for the sandbox's lifetime.** The endpoint
-   checks the actor JWT and compares generations; there is no one-shot
-   delivery, and the bundle stays until `delete`. The driver cannot tell the
-   egress from a direct caller, so anyone who captures the clear-text actor
-   JWT can fetch the supervisor's gateway token, the sandbox token and the
-   boundary private key from any pod for the token's 600 s. A token of another
-   incarnation of the actor, the same name after a delete and a recreate, is
-   refused, and the sandbox checks the bundle's uid claim against
-   `/run/ate/actor-uid`. Inside the actor, any process in any container that
-   can open a TCP connection to the launch host gets the same; the workload is
-   kept out by OpenShell's policy, not by the driver.
+   checks the actor JWT, its uid against the bundle's, and the generation;
+   there is no one-shot delivery, and the bundle stays until `delete`. The
+   driver cannot tell the egress from a direct caller, so anyone who captures
+   the clear-text actor JWT can fetch the supervisor's gateway token, the
+   sandbox token and the boundary private key from any pod for the token's
+   600 s. A token of another incarnation of the actor, the same name after a
+   delete and a recreate, is refused, and the sandbox checks the bundle's uid
+   claim against `/run/ate/actor-uid`. Inside the actor, any process in any
+   container that can open a TCP connection to the launch host gets the same;
+   the workload is kept out by OpenShell's policy, not by the driver.
 3. **Bundles hold live secrets at rest.** Each file under the driver's state
    directory carries those secrets, mode 0600, unencrypted, until the sandbox
    is deleted (`src/launch.rs`, `BundleStore`).
@@ -218,10 +227,12 @@ upstream and what to fix first here.
    policy that grants `/run` or `/` hands them over. The image gives `/etc` to
    that user so the launcher can rewrite `resolv.conf`; the launcher and the
    supervisor are not confined.
-7. **The relay is unauthenticated.** `relay.py` exposes the workload port on
-   the actor's address to anything atenet-router admits, outside OpenShell's
-   own ingress, without an audit record. Its ports are the fragment's
-   (`RELAY_PORT`, `WORKLOAD_PORT`), not the request's.
+7. **The relay and the health ports are unauthenticated.** `relay.py` exposes
+   the workload port on the actor's address to anything atenet-router admits,
+   outside OpenShell's own ingress, without an audit record. Its ports are the
+   fragment's (`RELAY_PORT`, `WORKLOAD_PORT`), not the request's. The three
+   `/healthz` listeners (17901 to 17903) answer the same callers; they reveal
+   only that a launcher is up.
 8. **A removed IdP key verifies for up to five minutes.** The JWKS cache is
    fetched again after that age or on an unknown `kid`, and a cold cache during
    an IdP outage holds the verifier's lock for the 10 s HTTP timeout per
@@ -245,10 +256,10 @@ upstream and what to fix first here.
    fragment asks for two cores (`harness/manifests`,
    `harness/gateway/template.yaml.tmpl`). The soak runs are sequential; there
    is no load test.
-3. **Build on the target architecture.** `build.sh` mirrors one platform's
-   manifests and `gateway-up.sh` wraps a host-built glibc binary in an Ubuntu
-   24.04 image, so a host with a newer glibc yields a driver that does not
-   start. No image is published.
+3. **Build on the target architecture.** `runtime/build.sh` mirrors one
+   platform's manifests and `gateway-up.sh` wraps a host-built glibc binary in
+   an Ubuntu 24.04 image, so a host with a newer glibc yields a driver that
+   does not start. No image is published.
 4. **The OpenShell pin is expensive to move.** `src/bundle.rs` and
    `harness/bootstrap-gen` build `BoundaryConfig`, `SandboxRuntimeDescriptor`
    and `SupervisorAuthBundle` by hand against rev 5d25211.
@@ -297,15 +308,19 @@ upstream and what to fix first here.
 1. **CI runs no cluster.** `cargo test --lib` (25 pure tests), fmt, clippy,
    the proto diff, shellcheck and `py_compile` (`.github/workflows/ci.yml`).
 2. **Untested in the unit tests:** `src/bundle.rs`, the launch handler
-   (401, 403, 204, 200, the generation compare), `ActorJwtVerifier`, the watch
-   diff, `checkpoint`'s revert of a crashed actor, the create sequence, and
-   all of `launcher.py` and `relay.py`.
+   (401, 403, 204, 200, the generation and uid checks), `ActorJwtVerifier`,
+   the watch diff, `suspend_again` and the per-actor lock, `checkpoint`'s
+   revert of a crashed actor, the create sequence, and all of `launcher.py`
+   and `relay.py`.
 3. **`tests/live.rs` is ignored by default**, returns silently without its
    variables, and covers create, stop, start, list and delete without a
    gateway or a launch endpoint; its "Ready" is Substrate's `RUNNING`.
 4. **The gateway path runs only by hand.** `harness/scripts/gateway-test.sh`
-   drives it start to finish and `examples/helpdesk/soak.sh` the kubectl-ate
-   demo, but CI has no cluster, so neither runs there.
+   drives it start to finish, a resume behind a stop and a gateway pod
+   restart included, and `examples/helpdesk/soak.sh` the kubectl-ate demo,
+   but CI has no cluster, so neither runs there. Nothing interrupts a
+   lifecycle step, races a stop with a start, or recreates an actor under the
+   same name.
 
 ## What needs a change upstream
 
@@ -317,7 +332,7 @@ upstream and what to fix first here.
 - Substrate: no watch RPC, no labels on actors (ownership by name), templates
   never garbage-collected, no `no_new_privileges` field, `Linux.Seccomp`,
   `ApparmorProfile` and `Sysctl` not settable from a template, `Aborted` on
-  concurrent operations, a golden snapshot with no readiness check, and an
+  concurrent operations, wakeup probes that run on activation only, and an
   egress that verifies an `https` origin against the public roots only, so no
   in-cluster service can sit behind an `https` rule.
 
@@ -334,6 +349,6 @@ upstream and what to fix first here.
 3. Durable lifecycle records with phases, reconciled against Substrate at
    startup and on a schedule, and fault tests that interrupt each phase,
    race a stop with a start, and recreate an actor under the same name
-   (State 3).
+   (State 3, Tests 4).
 4. OpenShell's own ingress for published services, the supervisor's app
    listener behind Substrate's router, instead of the relay (Security 7).
