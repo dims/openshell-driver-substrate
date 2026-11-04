@@ -12,7 +12,7 @@
 //! protocol as OpenShell's in-tree Docker/Podman/Kubernetes drivers, so
 //! wiring it in is gateway configuration, not a source change.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -252,6 +252,10 @@ pub struct SubstrateComputeDriver {
     channel: Arc<Mutex<Option<Channel>>>,
     /// Where the launch endpoint reads from; None without the endpoint.
     bundles: Option<Arc<launch::BundleStore>>,
+    /// The actors the gateway stopped or suspended. Any other suspension is
+    /// Substrate's own and is reported as a wait, so the gateway keeps the
+    /// sandbox's credentials for the supervisor's return.
+    stopped: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for SubstrateComputeDriver {
@@ -269,7 +273,27 @@ impl SubstrateComputeDriver {
             config: Arc::new(config),
             channel: Arc::new(Mutex::new(None)),
             bundles: None,
+            stopped: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
+    }
+
+    fn mark_stopped(&self, name: &str, stopped: bool) {
+        let mut set = self
+            .stopped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stopped {
+            set.insert(name.to_string());
+        } else {
+            set.remove(name);
+        }
+    }
+
+    fn stopped_set(&self) -> HashSet<String> {
+        self.stopped
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     #[must_use]
@@ -473,18 +497,21 @@ impl SubstrateComputeDriver {
             .state();
         if state == ateapi::ActorState::Crashed {
             client
-                .revert_actor(ateapi::RevertActorRequest { actor: Some(actor) })
+                .revert_actor(ateapi::RevertActorRequest {
+                    actor: Some(actor.clone()),
+                })
                 .await?;
-            return Ok(());
+        } else {
+            client
+                .suspend_actor(ateapi::SuspendActorRequest {
+                    actor: Some(actor.clone()),
+                    options: Some(ateapi::SuspendOptions {
+                        mode: ateapi::DurabilityMode::Synchronous as i32,
+                    }),
+                })
+                .await?;
         }
-        client
-            .suspend_actor(ateapi::SuspendActorRequest {
-                actor: Some(actor),
-                options: Some(ateapi::SuspendOptions {
-                    mode: ateapi::DurabilityMode::Synchronous as i32,
-                }),
-            })
-            .await?;
+        self.mark_stopped(&actor.name, true);
         Ok(())
     }
 }
@@ -499,6 +526,7 @@ type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>
 fn actor_to_driver_sandbox(
     actor: &ateapi::Actor,
     names: &HashMap<String, String>,
+    stopped: &HashSet<String>,
 ) -> DriverSandbox {
     let meta = actor.metadata.clone().unwrap_or_default();
     DriverSandbox {
@@ -509,12 +537,12 @@ fn actor_to_driver_sandbox(
             .unwrap_or_else(|| meta.name.clone()),
         namespace: meta.atespace.clone(),
         spec: None,
-        status: Some(actor_to_driver_status(actor)),
+        status: Some(actor_to_driver_status(actor, stopped.contains(&meta.name))),
         workspace: meta.atespace,
     }
 }
 
-fn actor_to_driver_status(actor: &ateapi::Actor) -> DriverSandboxStatus {
+fn actor_to_driver_status(actor: &ateapi::Actor, gateway_stopped: bool) -> DriverSandboxStatus {
     let name = actor
         .metadata
         .as_ref()
@@ -532,7 +560,7 @@ fn actor_to_driver_status(actor: &ateapi::Actor) -> DriverSandboxStatus {
         instance_id,
         agent_fd: String::new(),
         sandbox_fd: String::new(),
-        conditions: actor_state_conditions(state),
+        conditions: actor_state_conditions(state, gateway_stopped),
         deleting: state == ateapi::ActorState::Deleting,
         resolved_identity: None,
         fence_evidence: None,
@@ -555,7 +583,17 @@ fn condition(r#type: &str, status: &str, reason: &str, message: &str) -> DriverC
 /// allowlist, so in-flight states carry a transient reason or no `Ready`
 /// condition at all. `Bootstrapping=True` lets a Stopped sandbox start
 /// again. A crashed actor is a deliberate Error: it needs `RevertActor`.
-fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
+///
+/// A stop retires the sandbox's credentials on the gateway, so a suspension
+/// the gateway did not ask for (`gateway_stopped` false: an operator or a
+/// policy on the Substrate side) is reported as Provisioning instead: the
+/// supervisor inside the snapshot still holds valid credentials, and the
+/// gateway is Ready again when Substrate resumes the actor and the
+/// supervisor reconnects.
+fn actor_state_conditions(
+    state: ateapi::ActorState,
+    gateway_stopped: bool,
+) -> Vec<DriverCondition> {
     use ateapi::ActorState::{
         Crashed, Deleting, Resuming, Reverting, Running, Suspended, Suspending, Unspecified,
     };
@@ -566,6 +604,12 @@ fn actor_state_conditions(state: ateapi::ActorState) -> Vec<DriverCondition> {
             "True",
             REASON_RUNNING,
             "actor is running",
+        )],
+        Suspending | Suspended if !gateway_stopped => vec![condition(
+            "Ready",
+            "False",
+            "DependenciesNotReady",
+            "actor is checkpointed by Substrate; it is back when Substrate resumes it",
         )],
         Resuming => vec![
             condition(
@@ -862,7 +906,11 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner();
 
         Ok(Response::new(GetSandboxResponse {
-            sandbox: Some(actor_to_driver_sandbox(&actor, &self.names().await)),
+            sandbox: Some(actor_to_driver_sandbox(
+                &actor,
+                &self.names().await,
+                &self.stopped_set(),
+            )),
         }))
     }
 
@@ -873,9 +921,10 @@ impl ComputeDriver for SubstrateComputeDriver {
         let mut client = self.control_client().await?;
         let actors = list_driver_actors(&mut client, &self.config.atespace).await?;
         let names = self.names().await;
+        let stopped = self.stopped_set();
         let sandboxes = actors
             .iter()
-            .map(|a| actor_to_driver_sandbox(a, &names))
+            .map(|a| actor_to_driver_sandbox(a, &names, &stopped))
             .collect();
         Ok(Response::new(ListSandboxesResponse { sandboxes }))
     }
@@ -975,6 +1024,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .unwrap_or_default();
         self.store_bundle(&actor_name, &sandbox, &launch_authentication, false)
             .await?;
+        self.mark_stopped(&actor_name, false);
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(actor_ref),
@@ -997,6 +1047,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 .await?;
         }
         let mut client = self.control_client().await?;
+        self.mark_stopped(&actor_name, false);
         client
             .resume_actor(ateapi::ResumeActorRequest {
                 actor: Some(ateapi::ObjectRef {
@@ -1056,6 +1107,7 @@ impl ComputeDriver for SubstrateComputeDriver {
                 .await
                 .map_err(|e| Status::internal(format!("bundle of {actor_name}: {e}")))?;
         }
+        self.mark_stopped(&actor_name, false);
         Ok(Response::new(DeleteSandboxResponse { deleted }))
     }
 
@@ -1100,10 +1152,11 @@ impl ComputeDriver for SubstrateComputeDriver {
                     }
                 };
                 let names = driver.names().await;
+                let stopped = driver.stopped_set();
                 let current: HashMap<String, DriverSandbox> = actors
                     .iter()
                     .map(|a| {
-                        let sandbox = actor_to_driver_sandbox(a, &names);
+                        let sandbox = actor_to_driver_sandbox(a, &names, &stopped);
                         (sandbox.id.clone(), sandbox)
                     })
                     .collect();
@@ -1359,9 +1412,10 @@ mod tests {
             "a new ActorState needs a row in the match below"
         );
 
-        for state in states {
-            let conds = actor_state_conditions(state);
+        for (state, gateway_stopped) in states.iter().flat_map(|s| [(*s, true), (*s, false)]) {
+            let conds = actor_state_conditions(state, gateway_stopped);
             let has = |t: &str, s: &str| conds.iter().any(|c| c.r#type == t && c.status == s);
+            let reason = |r: &str| conds.iter().any(|c| c.r#type == "Ready" && c.reason == r);
             for c in conds
                 .iter()
                 .filter(|c| c.r#type == "Ready" && c.status == "False")
@@ -1376,6 +1430,14 @@ mod tests {
             }
             match state {
                 Running => assert!(has("Ready", "True")),
+                // Substrate's own suspension keeps the gateway waiting, with
+                // the credentials valid; the gateway's is a stop.
+                Suspending | Suspended if !gateway_stopped => {
+                    assert!(
+                        reason("DependenciesNotReady") && !has("Suspended", "True"),
+                        "{state:?}"
+                    );
+                }
                 Suspended => {
                     assert!(
                         has("Suspended", "True") && !has("Ready", "True"),
@@ -1388,11 +1450,7 @@ mod tests {
                         "{state:?}"
                     );
                 }
-                Crashed => assert!(
-                    conds
-                        .iter()
-                        .any(|c| c.r#type == "Ready" && c.reason == CONDITION_EXITED)
-                ),
+                Crashed => assert!(reason(CONDITION_EXITED)),
                 Suspending | Deleting | Unspecified => {
                     assert!(
                         !has("Ready", "True") && !has("Suspended", "True"),
