@@ -23,8 +23,8 @@ suspend keeps its memory. See [Known gaps](#known-gaps).
 ## How it fits together
 
 [`docs/architecture.md`](docs/architecture.md) has the full picture: every
-component, the lifecycle, and sequence diagrams for create, request path,
-suspend and resume, and host death.
+component, the lifecycle, and sequence diagrams for create, the request
+path, suspend and resume, host death, and how a sandbox gets its credentials.
 
 ```
 openshell CLI -> openshell-gateway  (stock, unmodified binary)
@@ -323,8 +323,8 @@ is the pair.
 The launcher's lines in the worker pod log say what it waits for: `launch
 endpoint unreachable` while the egress has no policy yet or the Service is
 not up, `launch endpoint answered 401` or `403` when the driver refused the
-actor JWT (the driver's log says why), and `generation <id> (epoch N,
-resume=...) published` when the files are in place. The driver logs `bundle
+actor JWT (the driver's log says why), and `generation <id> (epoch N)
+published` when the files are in place. The driver logs `bundle
 handed out` for each delivery. A supervisor that dies logs its reason just
 before `the supervisor exited`; the SSH relay's socket, for example, must sit
 on the container's own filesystem, because a durable dir takes no Unix

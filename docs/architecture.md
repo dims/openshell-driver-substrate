@@ -76,7 +76,7 @@ flowchart TB
 
   cli --> gw
   gw -- "compute_driver.proto" --> driver
-  driver -- "CreateActorTemplate, CreateActor, ResumeActor,<br/>SuspendActor, DeleteActor, GetActor, ListActors" --> api
+  driver -- "Control RPCs, listed below" --> api
   kate -- "Control" --> api
   api -- "Restore, Checkpoint" --> atelet
   ctl -. "creates, replaces" .-> pod
@@ -87,8 +87,9 @@ flowchart TB
   router --> relay
   sup -- "allowed connections, atunnel" --> egress
   egress --> model
-  sup -. "GET /v1/launch, actor JWT added by the egress;<br/>gRPC session, TLS passthrough" .-> egress
-  egress -. "launch endpoint, gateway" .-> driver
+  sup -. "GET /v1/launch (the egress adds the actor JWT),<br/>supervisor session (TLS passthrough)" .-> egress
+  egress -. "GET /v1/launch with the actor JWT as Bearer" .-> driver
+  egress -. "supervisor session" .-> gw
 
   class gw stock
   class driver ours
@@ -161,7 +162,7 @@ is written against the gateway's phase rules and pinned by a table test:
 | RUNNING | `Ready=True` (ContainerRunning) | Ready |
 | RESUMING, REVERTING | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
 | SUSPENDING, after the gateway's stop or suspend | `Suspended=False` (PodTerminating, the reason the gateway reads as a stop in flight) | Provisioning |
-| SUSPENDED, after the gateway's stop or suspend | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
+| SUSPENDED, after the gateway's stop or suspend | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped, or Suspended after the gateway's own suspend, which its lifecycle controller keeps |
 | SUSPENDING, SUSPENDED, by Substrate alone | `Ready=False` (DependenciesNotReady) | Provisioning: the gateway keeps the credentials, and the supervisor's return after a Substrate resume makes it Ready again |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
@@ -186,7 +187,7 @@ restore; see [Credentials](#credentials).
 
 The shape comes from the configuration file's fragment: its containers
 replace the synthesized one, the container named `sandbox` takes the
-request's image and environment, and volumes, snapshot settings and limits
+request's image, and volumes, snapshot settings and limits
 come from the fragment when it sets them. A fragment may not name the
 template, pick the pool or add a capability. The helpdesk fragment is three
 containers (sandbox, supervisor, relay), two durable dirs, the identity
@@ -309,7 +310,7 @@ sequenceDiagram
   Note over SB,SU: without a gateway: the static files from the image and its volume.<br/>With one: the supervisor's launcher fetches the bundle first (see Credentials)
   SU->>SU: start openshell-supervisor --role isolation-backend --backend-descriptor-file, --auth-bundle-file<br/>(plus --policy-rules, --policy-data without a gateway)
   SU->>SU: listen on 169.254.17.2:17777 · "Runtime-initiated Sandbox Protocol listener ready"
-  SB->>SB: nameserver 127.0.0.53; wait for the listener; setpriv --no-new-privs openshell-sandbox (uid 65532 from the image)
+  SB->>SB: nameserver 127.0.0.53, wait for the listener, then setpriv --no-new-privs openshell-sandbox (uid 65532 from the image)
   SB->>SB: read bootstrap.json, then unlink it
   Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp, seccomp notification,<br/>socket virtualization, DNS relay bind, loopback confinement
   SB->>SU: dial the boundary, serve TLS on the connection
@@ -347,8 +348,10 @@ stateDiagram-v2
     Ready=True, reason ContainerRunning
   end note
   note right of SUSPENDED
-    gateway phase Stopped
+    gateway phase Stopped after its stop, Suspended after its suspend
     Suspended=True and Ready=False (ContainerStopped)
+    by Substrate alone, Provisioning
+    Ready=False (DependenciesNotReady), credentials kept
   end note
   note left of RESUMING
     gateway phase Provisioning
@@ -399,7 +402,7 @@ sequenceDiagram
   GW->>D: ValidateSandboxCreate(sandbox)
   D-->>GW: ok, or InvalidArgument when the image has no @sha256 digest
   GW->>D: CreateSandbox(sandbox, launch_authentication)
-  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: the fragment, image, env, worker selector, limits
+  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: the fragment, image, worker selector, limits
   D->>API: CreateActorTemplate(name, spec)
   alt template is new
     API->>R: reconcile
@@ -429,7 +432,7 @@ sequenceDiagram
   W->>S: fetch snapshot
   W-->>API: RUNNING (≈ 330 ms)
   D-->>GW: CreateSandboxResponse
-  Note over D,W: the launcher in the actor fetches the bundle and starts the supervisor and the sandbox;<br/>the supervisor's session takes the gateway to Ready (see Credentials)
+  Note over D,W: the launcher in the actor fetches the bundle and starts the supervisor and the sandbox,<br/>and the supervisor's session takes the gateway to Ready (see Credentials)
   loop watch_sandboxes: ListActors every 2 s, diffed
     D-->>GW: DriverSandbox with conditions
     Note over GW,D: derive_phase: Ready=True → Ready, Suspended=True → Stopped,<br/>Ready=False with a transient reason → Provisioning
@@ -516,7 +519,7 @@ sequenceDiagram
   AM->>AM: tear the VM down · "Actor checkpointed"
   AT->>AT: resetActorDirs (CAP_DAC_OVERRIDE for files uid 65532 created)
   API->>API: SUSPENDED · worker assignment cleared, worker shows 0/1000
-  Note over OP,S: --mode sync returns after the upload; the default returns once the node holds the snapshot
+  Note over OP,S: --mode sync returns after the upload, the default once the node holds the snapshot
   OP->>API: ResumeActor(alice)
   API->>API: SUSPENDED → RESUMING · pick a free Worker, maybe another pod
   API->>AT: Restore
@@ -525,6 +528,7 @@ sequenceDiagram
   AM->>AM: cloud-hypervisor restore, virtiofs lowers, tap · "Actor restored in ≈ 330 ms"
   API->>API: RUNNING
   Note over OP,S: process memory is back: turns and booted as they were
+  Note over OP,S: through the gateway a new generation follows. The launcher fetches its bundle<br/>and restarts the supervisor and the sandbox, so the workload starts again
 ```
 
 A checkpoint pauses the VM, writes guest memory plus the rootfs upper layers
@@ -604,10 +608,10 @@ sequenceDiagram
   EG->>D: the same request, Authorization: Bearer <actor JWT><br/>(EgressPolicy rule: replaceHeaders with actorJwt, audience = the driver)
   D->>D: verify the JWT against the IdP's JWKS: issuer, audience, sub = actor/<atespace>/<name>
   D-->>L: the bundle, or 204 after a 20 s long poll when nothing is newer
-  L->>SU: write the files; stop the previous supervisor; start the new one<br/>OPENSHELL_ENDPOINT, OPENSHELL_TLS_CA, sandbox id and name, main-process spec
+  L->>SU: write the files, stop the previous supervisor, start the new one<br/>OPENSHELL_ENDPOINT, OPENSHELL_TLS_CA, sandbox id and name, main-process spec
   SU->>GW: ConnectSupervisor through the egress (tlsPassthrough rule) · "supervisor session: accepted"
   L->>SB: publish the generation
-  SB->>SB: copy bootstrap.json, server.crt, server.key into /.openshell/channel/sandbox;<br/>restart openshell-sandbox
+  SB->>SB: copy bootstrap.json, server.crt, server.key into /.openshell/channel/sandbox,<br/>then restart openshell-sandbox
   SB->>SU: dial 169.254.17.2:17777, serve TLS · "Isolation boundary attached"
   SU->>GW: configuration report · Ready
 ```
