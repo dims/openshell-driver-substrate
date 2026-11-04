@@ -13,9 +13,12 @@ on a Unix socket. It maps each gateway call onto Substrate's `Control` API
 snapshot into a micro-VM. Inside the VM, stock OpenShell binaries run
 unmodified: `openshell-sandbox` holds the workload, `openshell-supervisor`
 enforces policy and audits, and a small relay container makes the workload
-reachable through Substrate's ingress. Nothing in OpenShell, Substrate, the
-guest kernel or kata is forked or patched; the one gap the demo image works
-around, `no_new_privs`, is in the README's known gaps.
+reachable through Substrate's ingress. A launcher in the image fetches each
+sandbox's gateway-minted credentials from the driver after the restore, so
+one golden snapshot serves every sandbox and a stock gateway takes one to
+`Ready`. Nothing in OpenShell, Substrate, the guest kernel or kata is forked
+or patched; the one gap the demo image works around, `no_new_privs`, is in
+the README's known gaps.
 
 ## The big picture
 
@@ -36,7 +39,7 @@ flowchart TB
   end
 
   subgraph repo["this repository"]
-    driver["openshell-driver-substrate<br/>ComputeDriver gRPC server on a Unix socket<br/>a sandbox is an Actor, a workload is one ActorTemplate<br/>named by the hash of its own contents"]
+    driver["openshell-driver-substrate<br/>ComputeDriver gRPC server on a Unix socket<br/>a sandbox is an Actor, a workload is one ActorTemplate<br/>named by the hash of its own contents<br/>launch endpoint: the bundle for each actor, on its actor JWT"]
   end
 
   subgraph substrate["Substrate control plane"]
@@ -61,8 +64,8 @@ flowchart TB
   subgraph vm["micro-VM, address 169.254.17.2"]
     direction LR
     relay["relay container, plain<br/>0.0.0.0:8081 → 127.0.0.1:8080"]
-    sbx["sandbox container<br/>sandbox-entry.sh → openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay at 127.0.0.53"]
-    sup["supervisor container<br/>openshell-supervisor, isolation-backend role<br/>listens on 169.254.17.2:17777<br/>OPA policy, policy DNS, egress proxy, TLS CA, OCSF audit"]
+    sbx["sandbox container<br/>launcher.py → openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay at 127.0.0.53"]
+    sup["supervisor container, same image<br/>launcher.py → openshell-supervisor, isolation-backend role<br/>fetches its bundle from the driver, listens on 169.254.17.2:17777<br/>session to the gateway; OPA policy, policy DNS, egress proxy, TLS CA, OCSF audit"]
     relay -- "loopback" --> sbx
     sbx -- "dials the boundary: TLS to 169.254.17.2:17777" --> sup
   end
@@ -84,6 +87,8 @@ flowchart TB
   router --> relay
   sup -- "allowed connections, atunnel" --> egress
   egress --> model
+  sup -. "GET /v1/launch, actor JWT added by the egress;<br/>gRPC session, TLS passthrough" .-> egress
+  egress -. "launch endpoint, gateway" .-> driver
 
   class gw stock
   class driver ours
@@ -100,9 +105,9 @@ Three trust domains meet here:
 
 | Domain | Runs | Trusts |
 |---|---|---|
-| OpenShell gateway and this driver | outside the cluster, or as a pod | `ate-api-server` over TLS with a bearer token whose audience is `api.ate-system.svc` |
+| OpenShell gateway and this driver | one pod in the atespace (`harness/scripts/gateway-up.sh`), or the driver alone on a host | `ate-api-server` over TLS with a bearer token whose audience is `api.ate-system.svc`; the IdP's JWKS for the actor JWTs on the launch endpoint |
 | Substrate control plane and node agents | namespace `ate-system`, one atelet per node, one ateworker per worker pod | Kubernetes RBAC, image digests, the object store |
-| The guest | one micro-VM per actor | its own kernel and cloud-hypervisor; inside it, the sandbox trusts only the key embedded in its bootstrap |
+| The guest | one micro-VM per actor | its own kernel and cloud-hypervisor; inside it, the sandbox trusts only the gateway keys in its bootstrap, and the supervisor the gateway's CA from its bundle |
 
 ## Components
 
@@ -121,20 +126,23 @@ five minutes (`ProvisioningTimedOut`).
 ### openshell-driver-substrate, this repository
 
 `src/main.rs` parses flags (or `SUBSTRATE_*` and `OPENSHELL_*` environment
-variables), binds the socket, and serves `ComputeDriverServer`.
+variables), loads the configuration file (`--config`: the ActorTemplate
+fragment, the egress rules, the `[launch]` endpoint and the `[gateway]` the
+supervisors dial; `src/configfile.rs`, protojson YAML decoded in
+`src/fragment.rs`), binds the socket, serves `ComputeDriverServer` with
+reflection, and the launch endpoint when configured.
 
 `src/lib.rs` implements the trait:
 
 | ComputeDriver call | What the driver does |
 |---|---|
-| `get_capabilities` | Checks the gateway's extension metadata, names itself `substrate`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false; CPU and memory limits are supported, GPUs are not. |
-| `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (ate-api-server rejects an unpinned image; the check saves a round trip) and resource limits that parse as Kubernetes quantities; rejects `spec.command`, GPU requests and `user_namespaces`. |
-| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `ResumeActor`. |
-| `start_sandbox` | `ResumeActor`. |
-| `stop_sandbox` | `SuspendActor` with synchronous durability: checkpoint, upload, free the worker, keep the snapshot. |
-| `suspend_sandbox` | Unimplemented; the driver does not advertise suspend-resume, `stop_sandbox` is the suspend. |
-| `delete_sandbox` | `DeleteActor`; Substrate deletes from any state. The template stays; other actors may share it. |
-| `get_sandbox`, `list_sandboxes` | `GetActor`; `ListActors` walked to the last page (1000 per page), keeping the actors of `oshl-` templates. |
+| `get_capabilities` | Checks the gateway's extension metadata, names itself `substrate` and advertises `openshell.compute.suspend-resume`; `gateway_manages_lifecycle`, `supports_sandbox_authentication` and `driver_reports_runtime_readiness` are false; CPU and memory limits are supported, GPUs are not. |
+| `validate_sandbox_create` | Requires `spec.template.image` with an `@sha256:` digest (ate-api-server rejects an unpinned image; the check saves a round trip) and resource limits that parse as Kubernetes quantities; rejects GPU requests and `user_namespaces`, and `spec.command` when there is no launch endpoint to carry it. |
+| `create_sandbox` | Names the template, `ensure_ready` (below), `CreateActor` (an `AlreadyExists` for an actor of the same template is a retried create and is fine), `CreateActorEgressPolicy` with the configured rules (before the first resume: the egress caches a missing policy), the bundle from `spec.launch_authentication` into the store, `ResumeActor`. |
+| `start_sandbox` | The bundle of the new generation into the store, `ResumeActor`. |
+| `stop_sandbox`, `suspend_sandbox` | `SuspendActor` with synchronous durability: checkpoint, upload, free the worker, keep the snapshot. A `CRASHED` actor gets `RevertActor` instead, back to its last snapshot. |
+| `delete_sandbox` | `DeleteActor`; Substrate deletes from any state. The bundle is dropped. The template stays; other actors may share it. |
+| `get_sandbox`, `list_sandboxes` | `GetActor`; `ListActors` walked to the last page (1000 per page), keeping the actors of `oshl-` templates. The gateway's name for a sandbox comes from its bundle; the actor is named by the sandbox id. |
 | `watch_sandboxes` | Substrate has no watch RPC. The driver polls `ListActors` every 2 s, diffs against the last snapshot, and emits changed and deleted sandboxes. It stops when the gateway drops the stream. |
 | `ensure_workspace` | `GetAtespace`, then `CreateAtespace` when it is missing, for the one configured atespace. The trait carries workspace identity only on create, so one atespace serves every workspace. |
 | `delete_workspace` | No-op. |
@@ -152,8 +160,9 @@ is written against the gateway's phase rules and pinned by a table test:
 |---|---|---|
 | RUNNING | `Ready=True` (ContainerRunning) | Ready |
 | RESUMING, REVERTING | `Bootstrapping=True`, `Ready=False` (ContainerStarting) | Provisioning; `Bootstrapping=True` is what lets a Stopped sandbox start |
-| SUSPENDING | `Suspended=False` (PodTerminating, the reason the gateway reads as a stop in flight) | Provisioning |
-| SUSPENDED | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
+| SUSPENDING, after the gateway's stop or suspend | `Suspended=False` (PodTerminating, the reason the gateway reads as a stop in flight) | Provisioning |
+| SUSPENDED, after the gateway's stop or suspend | `Suspended=True`, `Ready=False` (ContainerStopped) | Stopped |
+| SUSPENDING, SUSPENDED, by Substrate alone | `Ready=False` (DependenciesNotReady) | Provisioning: the gateway keeps the credentials, and the supervisor's return after a Substrate resume makes it Ready again |
 | CRASHED | `Ready=False` (ContainerExited) | Error, on purpose: it needs `RevertActor` |
 | DELETING | `Ready=False` (ContainerStopped); the status `deleting` flag is set | Deleting |
 
@@ -173,16 +182,21 @@ gets a new one.
 Nothing per sandbox may be in a template. A snapshot freezes process memory,
 so a per-sandbox value baked into it would come back identical in every actor
 restored from it. The sandbox id and the gateway-minted token are left out for
-that reason, and a test asserts it. That is also why the gateway path cannot
-reach Ready today; see [Credentials](#credentials).
+that reason, and a test asserts it. The per-sandbox part arrives after the
+restore; see [Credentials](#credentials).
 
-The synthesized shape is one container: capabilities dropped (`openshell-sandbox`
-refuses to run with any capability in its bounding set), memory snapshots, and
-a worker selector whose pool decides the sandbox class (micro-VM in the
-harness). Substrate mounts a tmpfs at `/tmp`, where the Landlock probe writes.
-The helpdesk example uses a hand-written three-container template instead,
-because it needs a supervisor and a relay; the two shapes differ only in what
-they contain, not in how Substrate treats them.
+The shape comes from the configuration file's fragment: its containers
+replace the synthesized one, the container named `sandbox` takes the
+request's image and environment, and volumes, snapshot settings and limits
+come from the fragment when it sets them. A fragment may not name the
+template, pick the pool or add a capability. The helpdesk fragment is three
+containers (sandbox, supervisor, relay), two durable dirs, the identity
+volume and, without a gateway, the supervisor's files volume. Without a
+fragment the template is one container. Either way every container drops all
+capabilities (`openshell-sandbox` refuses to run with any capability in its
+bounding set), the template takes memory snapshots, and a worker selector
+names the pool that decides the sandbox class (micro-VM in the harness).
+Substrate mounts a tmpfs at `/tmp`, where the Landlock probe writes.
 
 `ensure_ready` creates the template, tolerates `AlreadyExists`, then polls
 `GetActorTemplate` every 2 s until `status.goldenSnapshotStatus.goldenTag` is
@@ -233,26 +247,39 @@ the next create rebuilds it), or 180 s pass (DeadlineExceeded).
 ### Inside the micro-VM
 
 One guest, one network namespace with the address `169.254.17.2`, three
-containers from the helpdesk template:
+containers from the helpdesk fragment, all from one image. `launcher.py` is
+the first process of the first two, the image's uid 65532 with no capability.
+With `LAUNCH_URL` set (the gateway path) it works from the bundle it fetches;
+without it, from the files the image and its volumes carry.
 
-- **sandbox**: `sandbox-entry.sh` is the container's first process, already
-  the image's uid 65532 with no capability. It points `/etc/resolv.conf` at
-  the sandbox's DNS relay (the image's `/etc` belongs to that user), waits for
-  the supervisor's listener, and hands off with `setpriv --no-new-privs`, a
-  `prctl` any process may make for itself. `openshell-sandbox` then reads
-  its bootstrap and unlinks it, refuses to run unless it is non-root,
-  capability-free and `no_new_privs`, and probes the kernel for Landlock,
-  seccomp user notification, socket virtualization, loopback confinement and
-  a DNS relay bind. Then it dials its supervisor at `169.254.17.2:17777` and
-  serves TLS over that connection. It forks the workload under seccomp and
-  Landlock and brokers the workload's network calls.
-- **supervisor**: `openshell-supervisor --role isolation-backend` listens
-  where its runtime descriptor says, authenticates the sandbox's token pair,
-  loads the Rego policy and data into Open Policy Agent (OPA), answers the
-  workload's DNS for the hosts the policy names, installs a TLS-interception
-  certificate authority (CA) the workload trusts, starts the workload through
-  the sandbox, decides every connection, proxies the allowed ones, and writes
-  Open Cybersecurity Schema Framework (OCSF) audit lines.
+- **sandbox**: the launcher points `/etc/resolv.conf` at the sandbox's DNS
+  relay (the image's `/etc` belongs to that user), waits for the supervisor's
+  listener and for the generation the supervisor published, copies that
+  generation's bootstrap and TLS pair into `/.openshell/channel/sandbox`, and
+  starts `openshell-sandbox` under `setpriv --no-new-privs`, a `prctl` any
+  process may make for itself. `openshell-sandbox` reads its bootstrap and
+  unlinks it, refuses to run unless it is non-root, capability-free and
+  `no_new_privs`, and probes the kernel for Landlock, seccomp user
+  notification, socket virtualization, loopback confinement and a DNS relay
+  bind. Then it dials its supervisor at `169.254.17.2:17777` and serves TLS
+  over that connection. It forks the workload under seccomp and Landlock and
+  brokers the workload's network calls. A new generation restarts it.
+- **supervisor**: the launcher reads the actor's name and atespace from the
+  `systemInfo` mount on every poll (the files are right after a restore from
+  the shared snapshot), long-polls the driver's launch endpoint, writes the
+  runtime descriptor, the auth bundle and the gateway CA, and starts
+  `openshell-supervisor --role isolation-backend` with `OPENSHELL_ENDPOINT`,
+  the sandbox id and name, the main-process spec and the SSH relay socket
+  (on the container's own filesystem: a durable dir takes no Unix socket).
+  The supervisor listens where its descriptor says, authenticates the
+  sandbox's token pair, opens its session to the gateway, fetches the policy
+  from it and loads it into Open Policy Agent (OPA), answers the workload's
+  DNS for the hosts the policy names, installs a TLS-interception certificate
+  authority (CA) the workload trusts, starts the workload through the sandbox,
+  decides every connection, proxies the allowed ones, serves `exec` and
+  `forward` over its SSH relay, and writes Open Cybersecurity Schema Framework
+  (OCSF) audit lines. Without a gateway it takes the policy files from the
+  image volume instead.
 - **relay**: plain `asyncio` in a plain container. The sandbox's broker refuses
   `accept(2)` from a non-loopback peer, so Substrate's router cannot reach the
   agent directly. The relay accepts on the actor's address and connects over
@@ -271,30 +298,31 @@ sequenceDiagram
   autonumber
   participant A as ateworker-microvm
   participant K as kata-agent
-  participant SB as sandbox container<br/>sandbox-entry.sh, openshell-sandbox
-  participant SU as supervisor container<br/>openshell-supervisor
+  participant SB as sandbox container<br/>launcher.py sandbox, openshell-sandbox
+  participant SU as supervisor container<br/>launcher.py supervisor, openshell-supervisor
   participant RL as relay container
   participant WL as workload<br/>python3 agent.py
 
   A->>K: create containers from the OCI specs
-  K->>SB: start sandbox-entry.sh /openshell-sandbox --bootstrap /.openshell/channel/sandbox/bootstrap.json
-  K->>SU: start openshell-supervisor --role isolation-backend<br/>--backend-descriptor-file, --auth-bundle-file, --policy-rules, --policy-data
+  K->>SB: start launcher.py sandbox
+  K->>SU: start launcher.py supervisor
   K->>RL: start python3 relay.py
-  SU->>SU: read runtime-descriptor.json and auth.json (JWT pair, no expiry)
+  Note over SB,SU: without a gateway: the static files from the image and its volume.<br/>With one: the supervisor's launcher fetches the bundle first (see Credentials)
+  SU->>SU: start openshell-supervisor --role isolation-backend --backend-descriptor-file, --auth-bundle-file<br/>(plus --policy-rules, --policy-data without a gateway)
   SU->>SU: listen on 169.254.17.2:17777 · "Runtime-initiated Sandbox Protocol listener ready"
-  SB->>SB: nameserver 127.0.0.53; wait for the listener; setpriv --no-new-privs (uid 65532 from the image)
+  SB->>SB: nameserver 127.0.0.53; wait for the listener; setpriv --no-new-privs openshell-sandbox (uid 65532 from the image)
   SB->>SB: read bootstrap.json, then unlink it
   Note over SB,SU: qualification gates: non-root uid+gid, empty capability sets,<br/>no_new_privs, task-memory probe, Landlock allow/deny under /tmp, seccomp notification,<br/>socket virtualization, DNS relay bind, loopback confinement
   SB->>SU: dial the boundary, serve TLS on the connection
   SU->>SB: present the sandbox token
   SB-->>SU: verified against the embedded key · "Isolation boundary attached"
-  SU->>SU: load policy.rego + data.yaml into OPA
+  SU->>SU: load the policy into OPA (from the gateway, or policy.rego + data.yaml)
   SB->>SB: create /run/openshell-supervisor-ca for the CA, build the Landlock ruleset · "Landlock ruleset built"
   SU->>SB: start_agent(python3 /opt/helpdesk/agent.py, child_env)
   SB->>WL: fork, apply seccomp + Landlock, exec · "PROC:LAUNCH python3"
   WL->>WL: listen 0.0.0.0:8080 inside the sandbox
   RL->>RL: listen 0.0.0.0:8081, forward to 127.0.0.1:8080
-  Note over A,WL: the template reconciler checkpoints this whole VM at 20 s,<br/>and every actor is a restore of it, with booted set before the snapshot
+  Note over A,WL: without a gateway the template reconciler checkpoints this whole VM at 20 s,<br/>and every actor is a restore of it, with booted set before the snapshot.<br/>With one, the golden actor holds two launchers still polling, and all of this happens per actor after the restore
 ```
 
 ## Lifecycle
@@ -305,10 +333,10 @@ stateDiagram-v2
   [*] --> SUSPENDED: CreateActor, holds the golden snapshot
   SUSPENDED --> RESUMING: ResumeActor (create_sandbox, start_sandbox)
   RESUMING --> RUNNING: RestoreWorkload done
-  RUNNING --> SUSPENDING: SuspendActor (stop_sandbox)
+  RUNNING --> SUSPENDING: SuspendActor (stop_sandbox, suspend_sandbox)
   SUSPENDING --> SUSPENDED: CheckpointWorkload done, worker freed
   RUNNING --> CRASHED: worker pod gone, syncer releases the actor
-  CRASHED --> REVERTING: RevertActor (kubectl-ate revert)
+  CRASHED --> REVERTING: RevertActor (stop_sandbox, kubectl-ate revert)
   REVERTING --> SUSPENDED: back at the last external snapshot
   RUNNING --> DELETING: DeleteActor (delete_sandbox)
   SUSPENDED --> DELETING: DeleteActor
@@ -338,8 +366,22 @@ An actor is born `SUSPENDED`, holding its template's golden snapshot. Resume
 and suspend move it between `RUNNING` and `SUSPENDED` through a restore or a
 checkpoint. If its worker pod disappears it is `CRASHED`; from there only
 `RevertActor`, which puts it back at its last external snapshot, or delete are
-allowed. The driver never issues a revert; the gateway sees `CRASHED` as Error
-and an operator uses `kubectl-ate revert actor`.
+allowed. The gateway sees `CRASHED` as Error; its `stop` makes the driver
+revert the actor, and the next `start` restores it.
+
+The gateway's own suspend (`openshell sandbox suspend`) goes through
+`suspend_sandbox` and shows as phase Suspended; `resume` and `start` mint a
+new generation and restore the actor. Inside, the launcher replaces the
+supervisor and the sandbox, so the workload restarts: OpenShell v0.1.7 gives a
+new-generation supervisor no way onto a running sandbox (the sandbox keeps its
+first TLS identity and session id in memory, and `openshell-sandbox` does not
+implement `SuspendBoundary`). The restore itself is still a restore, not a
+boot. A suspend from the Substrate side (`kubectl-ate suspend`) keeps the
+whole VM, workload memory included. The driver reports it as a wait, not a
+stop: the gateway shows Provisioning, keeps the sandbox's credentials and
+admits only `delete`, and is Ready again, memory intact, when Substrate
+resumes the actor and the supervisor reconnects. A stop would retire the
+credentials and force a new generation.
 
 ## Sequences
 
@@ -357,8 +399,8 @@ sequenceDiagram
 
   GW->>D: ValidateSandboxCreate(sandbox)
   D-->>GW: ok, or InvalidArgument when the image has no @sha256 digest
-  GW->>D: CreateSandbox(sandbox)
-  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: image, env,<br/>gateway endpoint, worker selector, limits
+  GW->>D: CreateSandbox(sandbox, launch_authentication)
+  Note over D,API: name = "oshl-" + sha256(encoded template)[:8]<br/>inputs: the fragment, image, env, worker selector, limits
   D->>API: CreateActorTemplate(name, spec)
   alt template is new
     API->>R: reconcile
@@ -380,12 +422,15 @@ sequenceDiagram
   end
   D->>API: CreateActor(name = sandbox id, template)
   Note over D,API: actor starts SUSPENDED,<br/>holding the golden snapshot
+  D->>API: CreateActorEgressPolicy(the configured rules)
+  D->>D: bundle from launch_authentication, kept on disk
   D->>API: ResumeActor
   API->>API: pick a free Worker
   API->>W: Restore
   W->>S: fetch snapshot
   W-->>API: RUNNING (≈ 330 ms)
   D-->>GW: CreateSandboxResponse
+  Note over D,W: the launcher in the actor fetches the bundle and starts the supervisor and the sandbox;<br/>the supervisor's session takes the gateway to Ready (see Credentials)
   loop watch_sandboxes: ListActors every 2 s, diffed
     D-->>GW: DriverSandbox with conditions
     Note over GW,D: derive_phase: Ready=True → Ready, Suspended=True → Stopped,<br/>Ready=False with a transient reason → Provisioning
@@ -394,8 +439,10 @@ sequenceDiagram
 
 The first `create_sandbox` for a workload pays for the golden snapshot: about
 30 s in all, a few seconds of boot, the fixed 20 s warm-up, and the checkpoint.
-Every later one, and every later actor of the same template, is a restore. The
-gateway's five-minute provisioning ceiling is comfortably above this.
+Every later one, and every later actor of the same template, is a restore,
+and `Ready` follows about two seconds later, once the launcher has the bundle
+and the supervisor's session is up. The gateway's provisioning ceiling is far
+above this.
 
 ### Reaching the agent, and the two egress layers
 
@@ -485,7 +532,10 @@ A checkpoint pauses the VM, writes guest memory plus the rootfs upper layers
 and the durable dirs to the object store, and tears the VM down. The worker is
 free at once. A resume picks any free worker, possibly on a different pod,
 fetches the snapshot, and restores in about 330 ms. Process memory is exactly
-as it was: the agent's chat history and its `booted` timestamp included.
+as it was: the agent's chat history and its `booted` timestamp included. When
+the gateway drives the resume, its new generation then replaces the
+supervisor and the sandbox inside the restored VM, and the workload starts
+again; see [Lifecycle](#lifecycle).
 
 ### A host dies
 
@@ -526,53 +576,57 @@ that suspends idle sandboxes bounds that loss to the idle window.
 
 ## Credentials
 
+OpenShell's sandbox and supervisor authenticate to each other with a pair of
+Ed25519-signed JWTs and TLS material bound to one session id, and the
+supervisor authenticates to the gateway with a token from the same bundle.
+The gateway mints a bundle per sandbox and per start (`launch_authentication`
+on `CreateSandbox` and `StartSandbox`), with a new runtime generation and
+auth epoch each time. A template is shared and a snapshot freezes memory, so
+none of this may be in the golden snapshot. It reaches the actor after the
+restore:
+
 ```mermaid
-flowchart LR
-  classDef file fill:#fef9c3,stroke:#ca8a04,color:#713f12
-  classDef img fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
-  classDef vol fill:#fdf4ff,stroke:#a21caf,color:#701a75
+sequenceDiagram
+  autonumber
+  participant GW as openshell-gateway
+  participant D as driver<br/>bundle store, launch endpoint
+  participant API as ate-api-server
+  participant EG as atenet egress
+  participant L as launcher<br/>supervisor container
+  participant SU as openshell-supervisor
+  participant SB as launcher + openshell-sandbox<br/>sandbox container
 
-  key["signing.key.pem<br/>Ed25519, any key is a trust anchor"]:::file
-  gen["bootstrap-gen<br/>BOOTSTRAP_CHILD_ENV → workload env"]
-  bs["bootstrap.json · server.crt · server.key<br/>BoundaryConfig: dial 169.254.17.2:17777,<br/>verification key, provisioning evidence, child_env"]:::file
-  rd["runtime-descriptor.json<br/>SandboxRuntimeDescriptor: listen on 169.254.17.2:17777,<br/>the boundary's TLS trust anchor"]:::file
-  ab["auth.json<br/>SupervisorAuthBundle: gateway and sandbox JWTs,<br/>no expiry"]:::file
-  pkg["build.sh<br/>owner 65532, dirs 0700, files 0600 → bootstrap.tar"]
-  simg["helpdesk-sandbox image<br/>python:3.12-slim + /openshell-sandbox<br/>+ agent.py, relay.py, sandbox-entry.sh + bootstrap.tar"]:::img
-  fimg["openshell-bootstrap-files image<br/>/supervisor/{runtime-descriptor.json, auth.json,<br/>policy.rego, data.yaml}"]:::img
-  sbx["sandbox container<br/>reads and unlinks its bootstrap,<br/>so it must sit on the writable rootfs"]:::vol
-  sup["supervisor container<br/>image volume at /.openshell, read-only is fine"]:::vol
-
-  key --> gen
-  gen --> bs
-  gen --> rd
-  gen --> ab
-  bs --> pkg --> simg --> sbx
-  rd --> fimg
-  ab --> fimg
-  fimg --> sup
+  GW->>D: CreateSandbox / StartSandbox(launch_authentication, generation)
+  D->>D: bundle: auth.json and runtime-descriptor.json for the supervisor,<br/>bootstrap.json + a fresh TLS pair for the sandbox, the gateway endpoint and CA,<br/>the main-process spec · on disk, 0600
+  D->>API: CreateActorEgressPolicy (first create), ResumeActor
+  Note over L: restored from the golden snapshot, still polling
+  L->>L: read /run/ate/actor-name and atespace (systemInfo, rewritten on every restore)
+  L->>EG: GET http://openshell-driver:17790/v1/launch/<atespace>/<name>?generation=<current>
+  EG->>D: the same request, Authorization: Bearer <actor JWT><br/>(EgressPolicy rule: replaceHeaders with actorJwt, audience = the driver)
+  D->>D: verify the JWT against the IdP's JWKS: issuer, audience, sub = actor/<atespace>/<name>
+  D-->>L: the bundle, or 204 after a 20 s long poll when nothing is newer
+  L->>SU: write the files; stop the previous supervisor; start the new one<br/>OPENSHELL_ENDPOINT, OPENSHELL_TLS_CA, sandbox id and name, main-process spec
+  SU->>GW: ConnectSupervisor through the egress (tlsPassthrough rule) · "supervisor session: accepted"
+  L->>SB: publish the generation
+  SB->>SB: copy bootstrap.json, server.crt, server.key into /.openshell/channel/sandbox;<br/>restart openshell-sandbox
+  SB->>SU: dial 169.254.17.2:17777, serve TLS · "Isolation boundary attached"
+  SU->>GW: configuration report · Ready
 ```
 
-OpenShell's sandbox and supervisor authenticate to each other with a pair of
-Ed25519-signed JWTs and TLS material bound to one session id. In a normal
-deployment the gateway mints them per sandbox and refreshes them. Here
-`harness/bootstrap-gen` mints them with a local key and no expiry (a gateway
-would refresh them; this harness has nothing to refresh from, and a snapshot
-can sit for days), and the helpdesk images carry them: the sandbox's half
-baked into the writable rootfs, owned by the sandbox user (it consumes its
-bootstrap), the supervisor's half as a read-only image volume.
+Three things make this safe. The egress mints the actor JWT only for that
+actor's own request, so the driver knows who asks without a shared secret in
+any image. The driver hands out only that actor's bundle, over a route only
+the EgressPolicy allows. And the bundle files are owned by the sandbox user,
+mode 0600, on the writable rootfs or a durable dir, never in the golden
+snapshot; the sandbox consumes its bootstrap on read.
+
+The run without a gateway (`examples/helpdesk/run.sh`) has nothing to mint
+per sandbox. There `harness/bootstrap-gen` mints one bundle with a local
+Ed25519 key and no expiry, `build.sh` bakes the sandbox's half into the
+image's writable rootfs and puts the supervisor's half on a read-only image
+volume, and the launcher starts the binaries on those files.
 `SandboxLaunchAuthentication` validates against the key it embeds, so any key
 is an accepted trust anchor.
-
-This is where the gateway path stops. The gateway's credentials are per
-sandbox, a template is shared, and a snapshot freezes memory, so there is no
-place in Substrate today to hand an actor a per-sandbox secret before its
-first boot. The synthesized one-container template therefore has no supervisor,
-no supervisor session forms, and the gateway holds the sandbox at Provisioning.
-Two ways out, both outside this repository: a per-actor secret or file source
-in Substrate, written before first boot and not into the golden snapshot; or
-OpenShell's isolation-backend API, where the driver registers a backend and
-the supervisor opens the boundary through it.
 
 ## What a snapshot is, and what it is not
 

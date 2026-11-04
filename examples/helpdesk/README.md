@@ -6,6 +6,10 @@ resumed, loses its host, and comes back from its last snapshot. The other is
 never touched. After each step, `run.sh` prints what Substrate and OpenShell
 logged for it, so the mechanics are on screen and not taken on faith.
 
+The same image runs under a stock `openshell-gateway` through the driver;
+see "Drive it from a stock gateway" in the root README. This page is the run
+without a gateway, driven by `kubectl-ate`.
+
 OpenShell's isolation holds (Landlock, seccomp-mediated egress, a policy DNS
 that answers for one host), the agent is reachable from outside the actor, and
 its memory survives a suspend and resume. The chat history is a Python list in
@@ -15,17 +19,25 @@ process memory; the `turns` count in every reply is the evidence.
 
 ```
 actor  (one micro-VM, one guest network namespace, address 169.254.17.2)
-├─ sandbox     openshell-sandbox + python3 + agent.py   (the workload's filesystem)
-├─ supervisor  openshell-supervisor                     (policy, OPA, proxy, CA; listens on :17777)
-└─ relay       relay.py                                 (plain container; ingress)
+├─ sandbox     launcher.py sandbox    -> openshell-sandbox -> python3 agent.py  (the workload's filesystem)
+├─ supervisor  launcher.py supervisor -> openshell-supervisor                   (policy, OPA, proxy, CA; listens on :17777)
+└─ relay       relay.py                                                          (plain container; ingress)
 ```
 
-The workload is a child of the sandbox, so `python3` lives in the sandbox
-image, not the supervisor's. `openshell-sandbox` is a static musl binary, so
-any base works; `Dockerfile` puts it on `python:3.12-slim`. The supervisor
-listens on the actor's address and the sandbox dials it: OpenShell refuses a
-boundary listener on loopback and a supervisor peer on the sandbox's own
-address, and the two containers share one network namespace.
+One image, `helpdesk-sandbox`, serves all three: both OpenShell binaries are
+static musl, so `Dockerfile` copies them from the release images onto
+`python:3.12-slim` next to the agent. The workload is a child of the sandbox,
+so `python3` lives there. `launcher.py` is the first process of the sandbox
+and of the supervisor container. Without `LAUNCH_URL` it starts the binaries
+on the files the image and its volumes carry (this page). With it, the
+supervisor role fetches the bundle the gateway minted for this actor from the
+driver and the sandbox role follows (the gateway path). The supervisor keeps
+its own container because its policy DNS resolves upstream names through
+the container's resolver, and the sandbox's resolver must be the sandbox's
+own relay. The supervisor listens on the actor's address and the sandbox
+dials it: OpenShell refuses a boundary listener on loopback and a supervisor
+peer on the sandbox's own address, and the containers share one network
+namespace.
 
 ## The ten beats
 
@@ -72,8 +84,8 @@ images, and writes their digests to `out/helpdesk.env` for `run.sh`:
 
 | Image | Contents |
 |---|---|
-| `helpdesk-sandbox` | `openshell-sandbox` from the release image, `python:3.12-slim`, `agent.py`, `relay.py`, `sandbox-entry.sh`, the baked bootstrap |
-| `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, OpenShell's stock `sandbox-policy.rego` as `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume |
+| `helpdesk-sandbox` | `openshell-sandbox` and `openshell-supervisor` from the release images, `python:3.12-slim`, `agent.py`, `relay.py`, `launcher.py`, the baked bootstrap |
+| `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, OpenShell's stock `sandbox-policy.rego` as `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume, for the run without a gateway |
 
 Knobs: `ATESPACE` (default `ate-openshell-microvm`), `MODEL_HOST` (default
 `ollama.<atespace>.svc.cluster.local`), `MODEL_PORT` (`11434`), `MODEL_NAME`
@@ -183,11 +195,13 @@ of memory, not uptime.
 | `soak.sh` | `run.sh` N times in a row, one log per run, stops at the first failure. |
 | `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
 | `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
-| `sandbox-entry.sh` | The sandbox container's first process, already uid 65532 with no capability: points the resolver at the sandbox's DNS relay, waits for the supervisor's listener, then starts `openshell-sandbox` under `setpriv --no-new-privs`. |
-| `Dockerfile` | The sandbox image: `openshell-sandbox` from the release image, python, the agent, the entry script, the baked bootstrap. |
-| `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. |
+| `launcher.py` | The first process of the sandbox and the supervisor container, uid 65532 with no capability. Sandbox role: points the resolver at the sandbox's DNS relay, waits for the supervisor's listener, starts `openshell-sandbox` under `setpriv --no-new-privs`. Supervisor role: starts `openshell-supervisor` on the static files, or with `LAUNCH_URL` on the bundle fetched from the driver, and replaces it on a new generation. |
+| `Dockerfile` | The image: both OpenShell binaries from the release images, python, the agent, the relay, the launcher, the baked bootstrap. |
+| `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. Also the `--policy` for `openshell sandbox create`. |
 | `egress-policy.yaml.tmpl` | Substrate's egress gate for one actor: the model host by name, port `MODEL_PORT`. |
-| `template.yaml.tmpl` | The `ActorTemplate`: three containers, three volumes, memory snapshots, the micro-VM pool by label. |
+| `egress-policy-gateway.yaml.tmpl` | The same for the gateway path: the driver's launch endpoint with the actor JWT put on the request, the gateway through TLS passthrough, the model host. |
+| `template.yaml.tmpl` | The `ActorTemplate` fragment: three containers, the supervisor's files volume, two durable dirs, the identity volume, memory snapshots. `run.sh` prepends the name and the pool; the driver adds its own. |
+| `template-gateway.yaml.tmpl` | The fragment for the gateway path: the same without the static files, both launchers with `LAUNCH_URL`. |
 | `ollama.yaml.tmpl` | The model endpoint in the atespace: a Deployment that pulls the model and a Service. `kind-up.sh` applies it. |
 
 ## How the pieces fit
@@ -220,7 +234,7 @@ kubectl-ate create egress-policy -a "${ATESPACE}" alice -f egress-policy.yaml
 **DNS.** The sandbox answers the workload's DNS at `127.0.0.53` and the
 broker refuses any other nameserver. Substrate writes the actor gateway into
 `/etc/resolv.conf` in the rootfs base layer and keeps the actor's own edits,
-so `sandbox-entry.sh` replaces the file with `nameserver 127.0.0.53` on the
+so the launcher replaces the file with `nameserver 127.0.0.53` on the
 golden boot and every restore keeps it. The image's `/etc` belongs to the
 sandbox user so that replacement needs no root; the workload's Landlock
 policy keeps `/etc` read-only for the workload itself.
@@ -248,9 +262,9 @@ because those are world-writable.
 |---|---|---|
 | Beat 1 never gets a golden tag and the template's `errorMessage` says `GoldenActorCrashed ... MANIFEST_UNKNOWN` | A template names a digest the registry does not have. | `build.sh` asks the registry for every digest; do not take digests from `docker inspect`. |
 | `/chat` returns 502 `RemoteDisconnected` | No Substrate `EgressPolicy`: atenet-egress answered 403. | `run.sh` creates one per actor; by hand, the `kubectl-ate create egress-policy` above. |
-| Beat 3 says `Temporary failure in name resolution` for every host | The workload's resolver is not `127.0.0.53`. | `sandbox-entry.sh` writes it; check the sandbox container's `/etc/resolv.conf`. |
+| Beat 3 says `Temporary failure in name resolution` for every host | The workload's resolver is not `127.0.0.53`. | The launcher writes it; check the sandbox container's `/etc/resolv.conf`. |
 | `run.sh` stops at beat 1 with `never logged 'Isolation boundary attached' and 'PROC:LAUNCH'`, or at beat 2 with `never answered /status` | The sandbox did not clear its qualification gates or never started; the container is dead behind a live actor. | `kubectl logs -n "${ATESPACE}" <worker-pod> \| grep -i openshell` and the gates table in the root README. |
-| `sandbox-entry: no supervisor listener on 169.254.17.2:17777` | The supervisor did not start or did not bind the actor address. | The supervisor container's log lines in the worker pod log. |
+| `launcher[sandbox] no supervisor listener on 169.254.17.2:17777` | The supervisor did not start or did not bind the actor address. | The supervisor container's log lines in the worker pod log. |
 | `run.sh` stops before beat 1 with `did not answer a chat ... within 120 s` | The Ollama pod is not ready, or the model is not pulled. | `kubectl -n "${ATESPACE}" get pods`; `kind-up.sh` waits for the rollout. |
 | `/egress` to the model host says `reached: false` | The host is not in `data.yaml`, or the binary path is not `/usr/local/bin/python3.12`. | `data.yaml.tmpl`, then `build.sh`. |
 | `create actor-template` fails with `FailedPrecondition ... persistence` | The atespace does not exist. | `kind-up.sh` creates it. |
