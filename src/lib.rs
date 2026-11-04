@@ -278,6 +278,13 @@ impl SubstrateComputeDriver {
         self
     }
 
+    async fn names(&self) -> HashMap<String, String> {
+        match &self.bundles {
+            Some(store) => store.names().await,
+            None => HashMap::new(),
+        }
+    }
+
     /// Store the bundle the launcher inside the actor fetches. Nothing to do
     /// without the launch endpoint, or without launch authentication, which
     /// a caller that is not a gateway does not send.
@@ -485,15 +492,21 @@ impl SubstrateComputeDriver {
 type WatchStream = Pin<Box<dyn Stream<Item = Result<WatchSandboxesEvent, Status>> + Send>>;
 
 /// Project a Substrate `Actor` into the gateway-facing `DriverSandbox`
-/// shape. Sandbox id and name both map to the actor's resource name --
-/// Substrate has no separate "name" concept and reusing it keeps lookups
-/// symmetric. `spec` is `None`: the
-/// gateway already has the spec it gave us at create time.
-fn actor_to_driver_sandbox(actor: &ateapi::Actor) -> DriverSandbox {
+/// shape. The actor is named by the sandbox id; the gateway's own name for
+/// it comes from the bundle when there is one, and the gateway refuses a
+/// snapshot that renames a sandbox. `spec` is `None`: the gateway already
+/// has the spec it gave us at create time.
+fn actor_to_driver_sandbox(
+    actor: &ateapi::Actor,
+    names: &HashMap<String, String>,
+) -> DriverSandbox {
     let meta = actor.metadata.clone().unwrap_or_default();
     DriverSandbox {
         id: meta.name.clone(),
-        name: meta.name.clone(),
+        name: names
+            .get(&meta.name)
+            .cloned()
+            .unwrap_or_else(|| meta.name.clone()),
         namespace: meta.atespace.clone(),
         spec: None,
         status: Some(actor_to_driver_status(actor)),
@@ -849,7 +862,7 @@ impl ComputeDriver for SubstrateComputeDriver {
             .into_inner();
 
         Ok(Response::new(GetSandboxResponse {
-            sandbox: Some(actor_to_driver_sandbox(&actor)),
+            sandbox: Some(actor_to_driver_sandbox(&actor, &self.names().await)),
         }))
     }
 
@@ -859,7 +872,11 @@ impl ComputeDriver for SubstrateComputeDriver {
     ) -> Result<Response<ListSandboxesResponse>, Status> {
         let mut client = self.control_client().await?;
         let actors = list_driver_actors(&mut client, &self.config.atespace).await?;
-        let sandboxes = actors.iter().map(actor_to_driver_sandbox).collect();
+        let names = self.names().await;
+        let sandboxes = actors
+            .iter()
+            .map(|a| actor_to_driver_sandbox(a, &names))
+            .collect();
         Ok(Response::new(ListSandboxesResponse { sandboxes }))
     }
 
@@ -1082,10 +1099,11 @@ impl ComputeDriver for SubstrateComputeDriver {
                         continue;
                     }
                 };
+                let names = driver.names().await;
                 let current: HashMap<String, DriverSandbox> = actors
                     .iter()
                     .map(|a| {
-                        let sandbox = actor_to_driver_sandbox(a);
+                        let sandbox = actor_to_driver_sandbox(a, &names);
                         (sandbox.id.clone(), sandbox)
                     })
                     .collect();

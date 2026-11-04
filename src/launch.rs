@@ -113,6 +113,16 @@ impl BundleStore {
         self.bundles.lock().await.get(name).cloned()
     }
 
+    /// The gateway's sandbox name for each actor that has a bundle.
+    pub async fn names(&self) -> HashMap<String, String> {
+        self.bundles
+            .lock()
+            .await
+            .iter()
+            .map(|(actor, bundle)| (actor.clone(), bundle.sandbox_name.clone()))
+            .collect()
+    }
+
     pub async fn remove(&self, name: &str) -> std::io::Result<()> {
         self.bundles.lock().await.remove(name);
         match std::fs::remove_file(self.dir.join(format!("{name}.json"))) {
@@ -240,16 +250,18 @@ async fn launch(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     let Some(token) = token else {
+        tracing::warn!(%atespace, %name, "launch request without a bearer token");
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let actor = match svc.verifier.verify(token).await {
         Ok(actor) => actor,
         Err(err) => {
-            tracing::warn!(%err, "launch request refused");
+            tracing::warn!(%atespace, %name, %err, "launch request refused");
             return StatusCode::UNAUTHORIZED.into_response();
         }
     };
     if atespace != svc.atespace || actor != format!("{atespace}/{name}") {
+        tracing::warn!(%atespace, %name, %actor, "launch request for another actor");
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut changes = svc.store.changed.subscribe();
@@ -258,6 +270,7 @@ async fn launch(
         if let Some(bundle) = svc.store.get(&name).await
             && query.generation.as_deref() != Some(bundle.generation.as_str())
         {
+            tracing::info!(%name, generation = %bundle.generation, "bundle handed out");
             return Json(bundle).into_response();
         }
         tokio::select! {
