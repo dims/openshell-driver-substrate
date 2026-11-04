@@ -24,14 +24,15 @@ actor  (one micro-VM, one guest network namespace, address 169.254.17.2)
 └─ relay       relay.py                                                          (plain container; ingress)
 ```
 
-One image, `helpdesk-sandbox`, serves all three: both OpenShell binaries are
-static musl, so `Dockerfile` copies them from the release images onto
-`python:3.12-slim` next to the agent. The workload is a child of the sandbox,
-so `python3` lives there. `launcher.py` is the first process of the sandbox
-and of the supervisor container. Without `LAUNCH_URL` it starts the binaries
-on the files the image and its volumes carry (this page). With it, the
-supervisor role fetches the bundle the gateway minted for this actor from the
-driver and the sandbox role follows (the gateway path). The supervisor keeps
+The sandbox container runs `helpdesk-sandbox`: the runtime image
+([`runtime/`](../../runtime), both OpenShell binaries, python, the launcher
+and the relay) plus `agent.py` and the baked bootstrap. The supervisor and
+relay containers run the runtime image itself. `launcher.py` is the first
+process of the sandbox and of the supervisor container. Without `LAUNCH_URL`
+it starts the binaries on the files the image and its volumes carry and the
+command in `WORKLOAD` (this page). With it, the supervisor role fetches the
+bundle the gateway minted for this actor from the driver and the sandbox role
+follows (the gateway path). The supervisor keeps
 its own container because its policy DNS resolves upstream names through
 the container's resolver, and the sandbox's resolver must be the sandbox's
 own relay. The supervisor listens on the actor's address and the sandbox
@@ -76,15 +77,15 @@ On PATH: `docker`, `cargo`, `go`, `kubectl`, `kubectl-ate` (the one
 REGISTRY=localhost:5001 examples/helpdesk/build.sh
 ```
 
-This mirrors the release's `sandbox` and `supervisor` images from
-`ghcr.io/nvidia/openshell` into the registry, mints a credential set with the
-model endpoint in the workload's environment, bakes it into the sandbox image,
-fetches OpenShell's stock policy at the pinned rev, builds and pushes the two
-images, and writes their digests to `out/helpdesk.env` for `run.sh`:
+This builds the runtime image (`runtime/build.sh`), mints a credential set
+with the model endpoint in the workload's environment, bakes it into the
+sandbox image, fetches OpenShell's stock policy at the pinned rev, builds and
+pushes the two images, and writes their digests to `out/helpdesk.env` for
+`run.sh`:
 
 | Image | Contents |
 |---|---|
-| `helpdesk-sandbox` | `openshell-sandbox` and `openshell-supervisor` from the release images, `python:3.12-slim`, `agent.py`, `relay.py`, `launcher.py`, the baked bootstrap |
+| `helpdesk-sandbox` | the runtime image, `agent.py`, the baked bootstrap |
 | `openshell-bootstrap-files` | `runtime-descriptor.json`, `auth.json`, OpenShell's stock `sandbox-policy.rego` as `policy.rego`, the rendered `data.yaml`; mounted read-only as an image volume, for the run without a gateway |
 
 Knobs: `ATESPACE` (default `ate-openshell-microvm`), `MODEL_HOST` (default
@@ -190,18 +191,14 @@ of memory, not uptime.
 
 | File | Purpose |
 |---|---|
-| `build.sh` | Mirrors the release images, mints and bakes the credentials, fetches the policy, builds and pushes the two images, writes `out/helpdesk.env`. |
+| `build.sh` | Builds the runtime image, mints and bakes the credentials, fetches the policy, builds and pushes the two images, writes `out/helpdesk.env`. |
 | `run.sh` | The ten beats. Prints the matching Substrate and OpenShell log lines after each. |
 | `soak.sh` | `run.sh` N times in a row, one log per run, stops at the first failure. |
 | `agent.py` | The workload. `/status`, `/egress?url=`, `/chat`. History in a Python list. Reads `OPENAI_BASE_URL` and `HELPDESK_MODEL` from its environment. |
-| `relay.py` | Accepts on the actor's address, connects to the agent over loopback. See below. |
-| `launcher.py` | The first process of the sandbox and the supervisor container, uid 65532 with no capability. Sandbox role: points the resolver at the sandbox's DNS relay, waits for the supervisor's listener, starts `openshell-sandbox` under `setpriv --no-new-privs`. Supervisor role: starts `openshell-supervisor` on the static files, or with `LAUNCH_URL` on the bundle fetched from the driver, and replaces it on a new generation. |
-| `Dockerfile` | The image: both OpenShell binaries from the release images, python, the agent, the relay, the launcher, the baked bootstrap. |
+| `Dockerfile` | The image: the runtime image plus the agent and the baked bootstrap. |
 | `data.yaml.tmpl` | The policy data: filesystem rules, Landlock as a hard requirement, uid 65532, one network policy for the model host from python. Also the `--policy` for `openshell sandbox create`. |
 | `egress-policy.yaml.tmpl` | Substrate's egress gate for one actor: the model host by name, port `MODEL_PORT`. |
-| `egress-policy-gateway.yaml.tmpl` | The same for the gateway path: the driver's launch endpoint with the actor JWT put on the request, the gateway through TLS passthrough, the model host. |
-| `template.yaml.tmpl` | The `ActorTemplate` fragment: three containers, the supervisor's files volume, two durable dirs, the identity volume, memory snapshots. `run.sh` prepends the name and the pool; the driver adds its own. |
-| `template-gateway.yaml.tmpl` | The fragment for the gateway path: the same without the static files, both launchers with `LAUNCH_URL`. |
+| `template.yaml.tmpl` | The `ActorTemplate` fragment for the run without a gateway: the helpdesk image in the sandbox container, the runtime image in the supervisor and relay containers, the supervisor's files volume, two durable dirs, the identity volume, memory snapshots. `run.sh` prepends the name and the pool; `driver-up.sh` hands it to the driver. The gateway's fragment is `harness/gateway/template.yaml.tmpl`. |
 | `ollama.yaml.tmpl` | The model endpoint in the atespace: a Deployment that pulls the model and a Service. `kind-up.sh` applies it. |
 
 ## How the pieces fit

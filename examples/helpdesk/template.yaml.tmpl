@@ -1,11 +1,12 @@
-# The driver's template fragment: what every helpdesk actor is made of. The
-# driver adds the name, the atespace and the worker selector; run.sh prepends
-# the same for kubectl-ate. The sandbox container's image is the request's.
-# Both containers run launcher.py; see its docstring for the two modes.
+# The demo's template fragment for the run without a gateway: the helpdesk
+# image in the sandbox container, the runtime image for the supervisor and the
+# relay, static credentials from the image and its volume. run.sh prepends the
+# name, the atespace and the worker selector; driver-up.sh hands it to the
+# driver as its fragment. runtime/README.md has the two launcher modes.
 containers:
   - name: sandbox
     image: "${SANDBOX_IMAGE}"
-    command: ["python3", "/opt/helpdesk/launcher.py", "sandbox"]
+    command: ["python3", "/opt/openshell-substrate/launcher.py", "sandbox"]
     securityContext:
       capabilities:
         drop: ["ALL"]
@@ -18,8 +19,11 @@ containers:
   # the sandbox's relay, and the supervisor's policy DNS needs the actor's
   # resolver for upstream lookups.
   - name: supervisor
-    image: "${SANDBOX_IMAGE}"
-    command: ["python3", "/opt/helpdesk/launcher.py", "supervisor"]
+    image: "${RUNTIME_IMAGE}"
+    command: ["python3", "/opt/openshell-substrate/launcher.py", "supervisor"]
+    env:
+      - name: WORKLOAD
+        value: "python3 /opt/helpdesk/agent.py"
     securityContext:
       capabilities:
         drop: ["ALL"]
@@ -30,10 +34,10 @@ containers:
         mountPath: "/run/openshell"
       - name: identity
         mountPath: "/run/ate"
-  # Not part of the sandbox. See relay.py.
+  # Not part of the sandbox. See runtime/relay.py.
   - name: relay
-    image: "${SANDBOX_IMAGE}"
-    command: ["python3", "/opt/helpdesk/relay.py"]
+    image: "${RUNTIME_IMAGE}"
+    command: ["python3", "/opt/openshell-substrate/relay.py"]
     securityContext:
       capabilities:
         drop: ["ALL"]

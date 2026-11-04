@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # A stock OpenShell gateway and this driver as one pod in the harness cluster,
 # the Services the actors dial, the access policy the driver needs, and the
-# openshell CLI on this host. Needs a cluster from kind-up.sh and the images
-# from examples/helpdesk/build.sh. Rerun after either changes.
+# openshell CLI on this host. Needs a cluster from kind-up.sh and the runtime
+# image from runtime/build.sh. Rerun after either changes.
 #
 #   harness/scripts/gateway-up.sh
 #
 # Environment: WORK (default $HOME/openshell-substrate), REGISTRY (default
 # localhost:5001), ATESPACE (default ate-openshell-microvm), OPENSHELL_VERSION
-# (default 0.1.7). The model host and port come from out/helpdesk.env.
+# (default 0.1.7), MODEL_HOST and MODEL_PORT (default the Ollama Service
+# kind-up.sh deploys in the atespace, 11434): the one host the egress rules
+# let a workload reach besides the gateway and the driver.
 set -o errexit -o nounset -o pipefail
 shopt -s inherit_errexit
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -20,6 +22,7 @@ OPENSHELL_VERSION=${OPENSHELL_VERSION:-0.1.7}
 GATEWAY_IMAGE_REF=ghcr.io/nvidia/openshell/gateway:${OPENSHELL_VERSION}
 export GATEWAY_PORT=17670 GATEWAY_HEALTH_PORT=17671 LAUNCH_PORT=17790 LAUNCH_AUDIENCE=openshell-driver-substrate
 export GATEWAY_HOST=openshell-gateway.${ATESPACE}.svc.cluster.local LAUNCH_HOST=openshell-driver.${ATESPACE}.svc.cluster.local
+export MODEL_HOST=${MODEL_HOST:-ollama.${ATESPACE}.svc.cluster.local} MODEL_PORT=${MODEL_PORT:-11434}
 mkdir -p "$DIR/pki" "$WORK/bin"
 export PATH=$WORK/bin:$PATH
 render() { "$REPO/harness/scripts/render.sh" "$1"; }
@@ -28,11 +31,11 @@ step() { printf '\n== %s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 fail() { echo "FAILED: $*" >&2; exit 1; }
 
 step "tools"
-for t in docker kubectl kubectl-ate cargo go openssl curl; do command -v "$t" >/dev/null || fail "$t is not on PATH"; done
-[ -f "$REPO/out/helpdesk.env" ] || fail "no out/helpdesk.env: run examples/helpdesk/build.sh"
+for t in docker kubectl kubectl-ate cargo go openssl curl python3; do command -v "$t" >/dev/null || fail "$t is not on PATH"; done
+[ -f "$REPO/out/runtime.env" ] || fail "no out/runtime.env: run runtime/build.sh"
 set -o allexport
 # shellcheck source=/dev/null
-. "$REPO/out/helpdesk.env"
+. "$REPO/out/runtime.env"
 set +o allexport
 CRANE=$REPO/out/bin/crane
 [ -x "$CRANE" ] || GOBIN=$REPO/out/bin go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
@@ -87,8 +90,8 @@ kubectl -n "$ATESPACE" create configmap ate-ca --from-file=ctb.crt="$DIR/ctb.crt
 step "configuration"
 render "$REPO/harness/gateway/gateway.toml.tmpl" > "$DIR/gateway.toml"
 render "$REPO/harness/gateway/driver.toml.tmpl" > "$DIR/driver.toml"
-render "$REPO/examples/helpdesk/template-gateway.yaml.tmpl" > "$DIR/template.yaml"
-render "$REPO/examples/helpdesk/egress-policy-gateway.yaml.tmpl" > "$DIR/egress-policy.yaml"
+render "$REPO/harness/gateway/template.yaml.tmpl" > "$DIR/template.yaml"
+render "$REPO/harness/gateway/egress-policy.yaml.tmpl" > "$DIR/egress-policy.yaml"
 kubectl -n "$ATESPACE" create configmap openshell-gateway-config --from-file=gateway.toml="$DIR/gateway.toml" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n "$ATESPACE" create configmap openshell-driver-config --from-file=driver.toml="$DIR/driver.toml" --from-file=template.yaml="$DIR/template.yaml" --from-file=egress-policy.yaml="$DIR/egress-policy.yaml" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 

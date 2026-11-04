@@ -7,13 +7,13 @@ upstream and what to fix first here.
 
 ## What a gateway user loses
 
-1. **Only an image built like the helpdesk image runs.** The sandbox container
-   must carry `/openshell-sandbox`, `python3`, `setpriv` and
-   `/opt/helpdesk/launcher.py`, run as uid and gid 65532, own `/etc`, have
-   `/.openshell/channel/sandbox`, and come with a `--policy` that names its
-   paths and its binary, because the gateway's default policy allows no
-   egress and no `/opt/helpdesk` (`examples/helpdesk/Dockerfile`,
-   `examples/helpdesk/template-gateway.yaml.tmpl`, `data.yaml.tmpl`).
+1. **Only an image built on the runtime image runs.** The sandbox container
+   must carry what `runtime/README.md` lists: both OpenShell binaries,
+   `python3`, `setpriv`, the launcher at its path, uid and gid 65532, `/etc`
+   owned by that user, the channel directory, and a `--policy` that names the
+   workload's paths and binary, because the gateway's default policy allows no
+   egress and knows no `/opt` (`runtime/Dockerfile`,
+   `harness/gateway/template.yaml.tmpl`, `examples/helpdesk/data.yaml.tmpl`).
    OpenShell's docker driver injects the sandbox binary into any image; this
    driver cannot. A stock OpenShell sandbox image passes
    `validate_sandbox_create` and dies at boot, which shows as Provisioning for
@@ -23,12 +23,12 @@ upstream and what to fix first here.
    the image's `USER`. A policy's `run_as_user` has no effect, and an image
    with another user fails the sandbox's identity check inside the VM, after
    `create` returned Ok.
-3. **The supervisor and relay containers always run the harness image.** The
-   fragment names `${SANDBOX_IMAGE}` for all three containers and
+3. **The supervisor and relay containers run the operator's runtime image.**
+   The fragment names `${RUNTIME_IMAGE}` for all three containers and
    `apply_fragment` replaces only the `sandbox` container's image
    (`src/template.rs`); `gateway-up.sh` freezes that fragment into a
    ConfigMap. Nothing checks that the request image's `openshell-sandbox` and
-   the operator's `openshell-supervisor` are the same release. A fragment
+   the runtime image's `openshell-supervisor` are the same release. A fragment
    without a container named `sandbox` is accepted and the request's image
    lands in the first one.
 4. **No GPUs, no user namespaces.** `validate_substrate_sandbox` in
@@ -63,9 +63,8 @@ upstream and what to fix first here.
    empty, so the gateway's rootfs-tar path is off too.
 10. **A sandbox command needs the launch endpoint.** Without `[launch]` the
     driver rejects `spec.command`, names every sandbox by its id, and runs it
-    on whatever credentials the image carries; the launcher's no-gateway
-    branch can start only `python3 /opt/helpdesk/agent.py`
-    (`harness/scripts/driver-up.sh`, `launcher.py`).
+    on whatever credentials the image carries, with the command the fragment
+    puts in `WORKLOAD` (`harness/scripts/driver-up.sh`, `runtime/launcher.py`).
 
 ## Lifecycle
 
@@ -74,7 +73,7 @@ upstream and what to fix first here.
    its first identity in memory, checks the generation in every token and
    answers `SuspendBoundary` with Unimplemented; a dedicated supervisor has no
    takeover. The launcher therefore replaces both processes
-   (`examples/helpdesk/launcher.py`). Only a Substrate-side suspend keeps the
+   (`runtime/launcher.py`). Only a Substrate-side suspend keeps the
    workload's memory.
 2. **A Substrate-side resume of a gateway-stopped sandbox strands it.** After
    `openshell sandbox stop` the actor is `SUSPENDED` and anything on the
@@ -191,8 +190,8 @@ upstream and what to fix first here.
 ## Security
 
 1. **The launch hop is plain HTTP** from atenet-egress to the driver's
-   Service (`examples/helpdesk/egress-policy-gateway.yaml.tmpl`). An `https`
-   rule with the trust bundle from a `systemInfo` source would close it.
+   Service (`harness/gateway/egress-policy.yaml.tmpl`). An `https` rule with
+   the trust bundle from a `systemInfo` source would close it.
 2. **A bundle is a bearer secret for the sandbox's lifetime.** The endpoint
    checks the actor JWT and compares generations; there is no one-shot
    delivery, and the bundle stays until `delete`. The driver cannot tell the
@@ -227,8 +226,8 @@ upstream and what to fix first here.
    supervisor are not confined.
 7. **The relay is unauthenticated.** `relay.py` exposes the workload port on
    the actor's address to anything atenet-router admits, outside OpenShell's
-   own ingress, without an audit record. Its ports are fixed at 8081 and
-   8080: a workload moved with `--env HELPDESK_PORT` loses it.
+   own ingress, without an audit record. Its ports are the fragment's
+   (`RELAY_PORT`, `WORKLOAD_PORT`), not the request's.
 8. **The JWKS cache never drops a key.** A key removed from the IdP verifies
    tokens until an unknown `kid` forces a refresh, and a cold cache during an
    IdP outage holds the verifier's lock for the 10 s HTTP timeout per request.
@@ -248,9 +247,9 @@ upstream and what to fix first here.
    and multi-node clusters are untested in this version. Ollama keeps its
    model on an emptyDir and pulls it again after every restart.
 2. **Two sandboxes at a time.** The pool has two workers of two cores and the
-   helpdesk template asks for two cores (`harness/manifests`,
-   `template-gateway.yaml.tmpl`). The soak runs are sequential; there is no
-   load test.
+   fragment asks for two cores (`harness/manifests`,
+   `harness/gateway/template.yaml.tmpl`). The soak runs are sequential; there
+   is no load test.
 3. **Build on the target architecture.** `build.sh` mirrors one platform's
    manifests and `gateway-up.sh` wraps a host-built glibc binary in an Ubuntu
    24.04 image, so a host with a newer glibc yields a driver that does not
@@ -271,8 +270,7 @@ upstream and what to fix first here.
    `kubectl-ate` while the cluster stays on the installed revision, treats one
    existing Deployment as a finished install and never re-renders the pool;
    `build.sh` downloads `policy.rego` from GitHub with no checksum;
-   `gateway-up.sh` accepts any `openshell` on `PATH` whatever its version and
-   does not list `python3` among the tools it checks.
+   `gateway-up.sh` accepts any `openshell` on `PATH` whatever its version.
 8. **Demo credentials are loose.** `bootstrap-gen` writes its tokens 0644
    under `out/`, and `build.sh` bakes them into two images pushed to the
    registry. Only the demo pair trusts that key.
@@ -280,11 +278,6 @@ upstream and what to fix first here.
    domains in the sandbox's `resolv.conf`, so workloads need fully qualified
    names; `prep-host.sh` pipes remote installers into a root shell and sets
    host sysctls.
-10. **Generic pieces live under `examples/helpdesk`.** `launcher.py`,
-    `relay.py`, the image contract in `Dockerfile`, `template-gateway.yaml.tmpl`
-    and the launch and gateway rules of `egress-policy-gateway.yaml.tmpl` are
-    what every workload on this driver needs, not the helpdesk. `build.sh`
-    mixes mirroring the OpenShell images with building the demo.
 
 ## Operations
 
@@ -313,10 +306,9 @@ upstream and what to fix first here.
 3. **`tests/live.rs` is ignored by default**, returns silently without its
    variables, and covers create, stop, start, list and delete without a
    gateway or a launch endpoint; its "Ready" is Substrate's `RUNNING`.
-4. **Nothing in the repository drives the gateway path.** `run.sh` and
-   `soak.sh` cover the kubectl-ate demo. `openshell sandbox create`, `exec`,
-   `logs`, `suspend`, `resume`, `stop`, `start` and `delete` through a
-   gateway were checked by hand on both architectures and have no script here.
+4. **The gateway path runs only by hand.** `harness/scripts/gateway-test.sh`
+   drives it start to finish and `examples/helpdesk/soak.sh` the kubectl-ate
+   demo, but CI has no cluster, so neither runs there.
 
 ## What needs a change upstream
 

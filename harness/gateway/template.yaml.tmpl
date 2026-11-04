@@ -1,11 +1,12 @@
-# The template fragment for the gateway path: both containers run launcher.py
-# with LAUNCH_URL, so the supervisor fetches this actor's bundle from the
-# driver and nothing per sandbox is in the image. See template.yaml.tmpl for
-# the shape without a gateway.
+# The ActorTemplate fragment the driver gives every sandbox: the request's
+# image in the sandbox container, the runtime image for the supervisor and the
+# relay, both launchers with LAUNCH_URL so the supervisor fetches this actor's
+# bundle from the driver. Rendered by gateway-up.sh into the driver's
+# ConfigMap. runtime/README.md says what the sandbox image must contain.
 containers:
   - name: sandbox
-    image: "${SANDBOX_IMAGE}"
-    command: ["python3", "/opt/helpdesk/launcher.py", "sandbox"]
+    image: "${RUNTIME_IMAGE}"  # the request's image replaces it
+    command: ["python3", "/opt/openshell-substrate/launcher.py", "sandbox"]
     env:
       - name: LAUNCH_URL
         value: "http://${LAUNCH_HOST}:${LAUNCH_PORT}"
@@ -17,9 +18,12 @@ containers:
         mountPath: "/run/openshell"
       - name: supervisor-ca
         mountPath: "/run/openshell-supervisor-ca"
+  # The supervisor keeps its own container: the sandbox's resolver points at
+  # the sandbox's relay, and the supervisor's policy DNS needs the actor's
+  # resolver for upstream lookups.
   - name: supervisor
-    image: "${SANDBOX_IMAGE}"
-    command: ["python3", "/opt/helpdesk/launcher.py", "supervisor"]
+    image: "${RUNTIME_IMAGE}"
+    command: ["python3", "/opt/openshell-substrate/launcher.py", "supervisor"]
     env:
       - name: LAUNCH_URL
         value: "http://${LAUNCH_HOST}:${LAUNCH_PORT}"
@@ -31,10 +35,10 @@ containers:
         mountPath: "/run/openshell"
       - name: identity
         mountPath: "/run/ate"
-  # Not part of the sandbox. See relay.py.
+  # Not part of the sandbox. See runtime/relay.py.
   - name: relay
-    image: "${SANDBOX_IMAGE}"
-    command: ["python3", "/opt/helpdesk/relay.py"]
+    image: "${RUNTIME_IMAGE}"
+    command: ["python3", "/opt/openshell-substrate/relay.py"]
     securityContext:
       capabilities:
         drop: ["ALL"]

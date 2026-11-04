@@ -65,7 +65,7 @@ flowchart TB
     direction LR
     relay["relay container, plain<br/>0.0.0.0:8081 → 127.0.0.1:8080"]
     sbx["sandbox container<br/>launcher.py → openshell-sandbox → python3 agent.py<br/>uid 65532, no capabilities, no_new_privs<br/>seccomp broker, Landlock, DNS relay at 127.0.0.53"]
-    sup["supervisor container, same image<br/>launcher.py → openshell-supervisor, isolation-backend role<br/>fetches its bundle from the driver, listens on 169.254.17.2:17777<br/>session to the gateway; OPA policy, policy DNS, egress proxy, TLS CA, OCSF audit"]
+    sup["supervisor container, runtime image<br/>launcher.py → openshell-supervisor, isolation-backend role<br/>fetches its bundle from the driver, listens on 169.254.17.2:17777<br/>session to the gateway; OPA policy, policy DNS, egress proxy, TLS CA, OCSF audit"]
     relay -- "loopback" --> sbx
     sbx -- "dials the boundary: TLS to 169.254.17.2:17777" --> sup
   end
@@ -195,10 +195,10 @@ The shape comes from the configuration file's fragment: its containers
 replace the synthesized one, the container named `sandbox` takes the
 request's image, and volumes, snapshot settings and limits
 come from the fragment when it sets them. A fragment may not name the
-template, pick the pool or add a capability. The helpdesk fragment is three
-containers (sandbox, supervisor, relay), two durable dirs, the identity
-volume and, without a gateway, the supervisor's files volume. Without a
-fragment the template is one container. Either way every container drops all
+template, pick the pool or add a capability. The harness fragment is three
+containers (sandbox, supervisor, relay), two durable dirs and the identity
+volume; the demo's adds the supervisor's files volume for the run without a
+gateway. Without a fragment the template is one container. Either way every container drops all
 capabilities (`openshell-sandbox` refuses to run with any capability in its
 bounding set), the template takes memory snapshots, and a worker selector
 names the pool that decides the sandbox class (micro-VM in the harness).
@@ -253,10 +253,12 @@ the next create rebuilds it), or 180 s pass (DeadlineExceeded).
 ### Inside the micro-VM
 
 One guest, one network namespace with the address `169.254.17.2`, three
-containers from the helpdesk fragment, all from one image. `launcher.py` is
-the first process of the first two, the image's uid 65532 with no capability.
-With `LAUNCH_URL` set (the gateway path) it works from the bundle it fetches;
-without it, from the files the image and its volumes carry.
+containers from the harness fragment (`harness/gateway/template.yaml.tmpl`):
+the request's image in the sandbox container, the runtime image (`runtime/`)
+in the other two. `launcher.py` is the first process of the first two, uid
+65532 with no capability. With `LAUNCH_URL` set (the gateway path) it works
+from the bundle it fetches; without it, from the files the image and its
+volumes carry and the command in `WORKLOAD`.
 
 - **sandbox**: the launcher points `/etc/resolv.conf` at the sandbox's DNS
   relay (the image's `/etc` belongs to that user), waits for the supervisor's

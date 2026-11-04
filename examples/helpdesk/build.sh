@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
-# Mint the credentials, then build and push the two helpdesk images.
+# Build the runtime image, mint the credentials for the run without a gateway,
+# then build and push the two helpdesk images.
 #
 #   REGISTRY=localhost:5001 examples/helpdesk/build.sh
 #
-# The OpenShell sandbox and supervisor images are the release Cargo.toml pins,
-# mirrored from ghcr.io into REGISTRY so a template can name them by that
-# registry's digest. MODEL_HOST is the DNS name of an OpenAI-compatible
-# endpoint the actor can reach; it goes into the workload's environment and is
-# the only host the sandbox policy allows.
+# MODEL_HOST is the DNS name of an OpenAI-compatible endpoint the actor can
+# reach; it goes into the workload's environment and is the only host the
+# sandbox policy allows.
 set -o errexit -o nounset -o pipefail
 shopt -s inherit_errexit
 # Same inputs, same digests: BuildKit stamps the build time into the image and
@@ -18,27 +17,20 @@ ATESPACE=${ATESPACE:-ate-openshell-microvm}
 MODEL_HOST=${MODEL_HOST:-ollama.${ATESPACE}.svc.cluster.local}
 MODEL_PORT=${MODEL_PORT:-11434}
 MODEL_NAME=${MODEL_NAME:-qwen2.5:1.5b}
-OPENSHELL_VERSION=${OPENSHELL_VERSION:-0.1.7}
+export OPENSHELL_VERSION=${OPENSHELL_VERSION:-0.1.7}
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "${HERE}/../.." && pwd)
 OUT=${REPO}/out
 CTX=${OUT}/helpdesk
 for t in docker cargo go openssl; do command -v "$t" >/dev/null || { echo "$t is not on PATH" >&2; exit 1; }; done
-mkdir -p "${OUT}/bin" "${CTX}/files/supervisor"
+mkdir -p "${CTX}/files/supervisor"
 
-# crane asks the registry for a tag's digest, which is what the template must
-# name: Docker's RepoDigests report the upstream index digest for a mirrored tag.
-GOBIN=${OUT}/bin go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
-CRANE=${OUT}/bin/crane
+REGISTRY=${REGISTRY} "${REPO}/runtime/build.sh"
+# shellcheck source=/dev/null  # RUNTIME_IMAGE
+. "${OUT}/runtime.env"
+CRANE=${OUT}/bin/crane  # installed by runtime/build.sh
 digest() { echo "$1@$("${CRANE}" digest "$1")"; }
-
-# Stock OpenShell images, this platform's manifest only, mirrored into the registry.
-PLATFORM=linux/$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
-for img in sandbox supervisor; do
-  "${CRANE}" copy --platform "${PLATFORM}" "ghcr.io/nvidia/openshell/${img}:${OPENSHELL_VERSION}" \
-    "${REGISTRY}/openshell-${img}:${OPENSHELL_VERSION}" >/dev/null
-done
 
 # Credentials, minted once per model setting and kept in out/: a mint means
 # new digests, a new template and a new golden snapshot. `rm -rf out` mints again.
@@ -64,12 +56,11 @@ tar --sort=name --owner=65532 --group=65532 --numeric-owner --mtime=@0 --mode='u
   -cf "${CTX}/bootstrap.tar" -C "${BAKE}" .
 rm -rf "${BAKE}"
 
-# The sandbox image: stock openshell-sandbox, python, the agent, its bootstrap.
-cp "${HERE}"/{Dockerfile,agent.py,relay.py,launcher.py} "${CTX}/"
+# The sandbox image: the runtime image, the agent, its bootstrap.
+cp "${HERE}"/{Dockerfile,agent.py} "${CTX}/"
 find "${CTX}" -maxdepth 1 -type f -exec touch -d @0 {} +
 docker build -q --provenance=false --sbom=false \
-  --build-arg "SANDBOX_IMAGE=${REGISTRY}/openshell-sandbox:${OPENSHELL_VERSION}" \
-  --build-arg "SUPERVISOR_IMAGE=${REGISTRY}/openshell-supervisor:${OPENSHELL_VERSION}" \
+  --build-arg "RUNTIME_IMAGE=${RUNTIME_IMAGE}" \
   -t "${REGISTRY}/helpdesk-sandbox:dev" "${CTX}" >/dev/null
 docker push -q "${REGISTRY}/helpdesk-sandbox:dev" >/dev/null
 
@@ -87,11 +78,10 @@ docker build -q --provenance=false --sbom=false -t "${REGISTRY}/openshell-bootst
 docker push -q "${REGISTRY}/openshell-bootstrap-files:dev" >/dev/null
 
 SANDBOX_IMAGE=$(digest "${REGISTRY}/helpdesk-sandbox:dev")
-SUPERVISOR_IMAGE=$(digest "${REGISTRY}/openshell-supervisor:${OPENSHELL_VERSION}")
 BOOTSTRAP_FILES_IMAGE=$(digest "${REGISTRY}/openshell-bootstrap-files:dev")
 cat > "${OUT}/helpdesk.env" <<ENV
 SANDBOX_IMAGE=${SANDBOX_IMAGE}
-SUPERVISOR_IMAGE=${SUPERVISOR_IMAGE}
+RUNTIME_IMAGE=${RUNTIME_IMAGE}
 BOOTSTRAP_FILES_IMAGE=${BOOTSTRAP_FILES_IMAGE}
 MODEL_HOST=${MODEL_HOST}
 MODEL_PORT=${MODEL_PORT}

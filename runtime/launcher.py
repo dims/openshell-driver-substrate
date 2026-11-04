@@ -8,11 +8,16 @@ come from the systemInfo mount; atenet-egress puts the actor JWT on the
 request), writes the supervisor's files on its own filesystem, lays the
 sandbox's files out on the shared durable dir and starts the supervisor; a
 newer generation replaces both. The sandbox role watches that dir and runs
-openshell-sandbox on the current generation. Without LAUNCH_URL both roles use
-the files the image and its volumes carry, which is the demo without a gateway.
+openshell-sandbox on the current generation.
+
+Without LAUNCH_URL both roles use static files: the supervisor's descriptor,
+auth bundle and policy under /opt/supervisor-files/supervisor, the sandbox's
+bootstrap and TLS pair in its channel directory, and the workload command in
+WORKLOAD. That is the run without a gateway.
 """
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -153,13 +158,17 @@ def fetch(name, atespace, generation):
 
 def supervisor_role():
     if not LAUNCH_URL:
+        workload = shlex.split(os.environ.get("WORKLOAD", ""))
+        if not workload:
+            log("WORKLOAD is required without LAUNCH_URL")
+            sys.exit(2)
         start_supervisor(
             ["--role", "isolation-backend", "--sandbox-id", "test-sandbox-1",
              "--backend-descriptor-file", f"{STATIC_SUPERVISOR}/runtime-descriptor.json",
              "--auth-bundle-file", f"{STATIC_SUPERVISOR}/auth.json",
              "--policy-rules", f"{STATIC_SUPERVISOR}/policy.rego",
              "--policy-data", f"{STATIC_SUPERVISOR}/data.yaml",
-             "--log-level", "info", "--", "python3", "/opt/helpdesk/agent.py"],
+             "--log-level", "info", "--", *workload],
             {},
         )
         sys.exit(child.wait())

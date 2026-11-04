@@ -58,6 +58,8 @@ step "configuration"
 [ -f "$REPO/out/helpdesk.env" ] || fail "no out/helpdesk.env: run examples/helpdesk/build.sh"
 set -o allexport
 # shellcheck source=/dev/null
+. "$REPO/out/runtime.env"
+# shellcheck source=/dev/null
 . "$REPO/out/helpdesk.env"
 set +o allexport
 "$REPO/harness/scripts/render.sh" "$REPO/examples/helpdesk/template.yaml.tmpl" > "$DIR/template.yaml"

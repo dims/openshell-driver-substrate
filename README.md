@@ -107,14 +107,16 @@ src/                  the driver
 proto/                ateapi.proto, used by build.rs
 tests/live.rs         full lifecycle against a real cluster
 docs/                 architecture, shortcomings
-examples/helpdesk/    the demo: a Python agent under OpenShell; the launcher and the templates
+runtime/              the image every workload starts from: the OpenShell binaries, the launcher, the relay
+examples/helpdesk/    the demo: a Python agent on the runtime image, and the run without a gateway
 harness/
   bootstrap-gen/      mints the Ed25519 / JSON Web Token (JWT) / TLS bundle for the demo without a gateway
-  gateway/            the gateway and driver pod: Deployment, gateway.toml, driver.toml, access policy
+  gateway/            the gateway and driver pod: Deployment, gateway.toml, driver.toml, the actor fragment, the egress rules, access policy
   manifests/          the WorkerPool
   scripts/prep-host.sh  packages, Docker, Go, kind, kubectl and Rust on Ubuntu 24.04
   scripts/kind-up.sh    Substrate on kind, the pool, the atespace and the model endpoint
   scripts/gateway-up.sh the stock gateway and this driver in the cluster, the openshell CLI
+  scripts/gateway-test.sh one sandbox through the gateway, start to finish
   scripts/driver-up.sh  the driver alone on this host, for grpcurl
   scripts/render.sh     renders a .tmpl from the environment
 ```
@@ -200,12 +202,14 @@ for it, so the helpdesk launcher sets it itself (step 2).
 REGISTRY=localhost:5001 examples/helpdesk/build.sh
 ```
 
-This mirrors the release's `sandbox` and `supervisor` images from
-`ghcr.io/nvidia/openshell` into the registry, mints the credentials for the
-run without a gateway, builds the helpdesk image (both OpenShell binaries,
-python, the agent, the launcher) and the supervisor's files image, and writes
-their digests to `out/helpdesk.env`. Only this platform's manifest is
-mirrored, so build on the architecture the cluster runs. Substrate's API requires image digests, and Docker's own
+This builds the runtime image first (`runtime/build.sh`: the release's
+`sandbox` and `supervisor` images mirrored from `ghcr.io/nvidia/openshell`
+into the registry, python, the launcher and the relay; its digest goes to
+`out/runtime.env`), mints the credentials for the run without a gateway,
+builds the helpdesk image on top of the runtime image and the supervisor's
+files image, and writes their digests to `out/helpdesk.env`. Only this
+platform's manifest is mirrored, so build on the architecture the cluster
+runs. Substrate's API requires image digests, and Docker's own
 `RepoDigests` name the upstream index for a mirrored tag, so the digests come
 from the registry. Knobs: `REGISTRY` (required), `ATESPACE`, `MODEL_HOST`,
 `MODEL_PORT`, `MODEL_NAME`, `OPENSHELL_VERSION`.
@@ -240,13 +244,13 @@ serves `ComputeDriver` on a socket in a shared `emptyDir` and its launch
 endpoint on a port, with two Services, `openshell-gateway:17670` and
 `openshell-driver:17790`. It builds the driver image from this checkout,
 makes the gateway's TLS pair and Ed25519 JWT keys, renders
-`harness/gateway/*.tmpl` and the helpdesk's gateway-mode fragment and egress
-policy into ConfigMaps, labels the namespace for API access, gives the
-driver's ServiceAccount the `editor` role on the atespace, and installs the
-`openshell` CLI under `$WORK/bin`. Rerun it after `build.sh` or a driver
-change: the pod restarts, its database and bundles are on volumes, and the
+`harness/gateway/*.tmpl`, the actor fragment and the egress rules among them,
+into ConfigMaps, labels the namespace for API access, gives the driver's
+ServiceAccount the `editor` role on the atespace, and installs the `openshell`
+CLI under `$WORK/bin`. Rerun it after `runtime/build.sh` or a driver change:
+the pod restarts, its database and bundles are on volumes, and the
 supervisors reconnect. Knobs: `WORK`, `REGISTRY`, `ATESPACE`,
-`OPENSHELL_VERSION`; the model host and port come from `out/helpdesk.env`.
+`OPENSHELL_VERSION`, `MODEL_HOST`, `MODEL_PORT`.
 
 Then, with a port-forward to the gateway:
 
@@ -271,8 +275,12 @@ The agent is reachable the demo's way too, with `kubectl-ate proxy actor`
 on the sandbox id (`openshell sandbox get alice -o json | jq -r .id`). The
 policy file matters: without one, the gateway's default Landlock rules do not
 cover `/opt/helpdesk` and the workload exits with `Permission denied`. The
-image must run as uid and gid 65532: the bundle names that identity and
-`openshell-sandbox` checks it.
+`--from` image must be built on the runtime image, as the helpdesk image is;
+[`runtime/README.md`](runtime/README.md) has the contract.
+`harness/scripts/gateway-test.sh` runs all of the above and more in one go:
+create, exec, logs, a chat, suspend and resume, stop and start, a
+Substrate-side resume behind a stop, a gateway pod restart, a Substrate-side
+suspend with the memory check, delete.
 
 To run the driver on this host instead, against a port-forward to
 `ate-api-server` with a 24 h token, and talk to it with `grpcurl` over the

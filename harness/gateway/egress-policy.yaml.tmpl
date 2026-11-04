@@ -1,6 +1,7 @@
-# Substrate's egress gate for an actor on the gateway path: the driver's
+# Substrate's egress gate for every actor the driver makes: the driver's
 # launch endpoint, with the actor's JWT put on the request; the gateway,
-# whose TLS passes through; and the model host. Render with render.sh.
+# whose TLS passes through; and the hosts the workloads may reach, here the
+# model endpoint. Rendered by gateway-up.sh into the driver's ConfigMap.
 metadata:
   atespace: ${ATESPACE}
   name: default

@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Loopback relay: accepts on the actor's address and connects to the agent
+"""Loopback relay: accepts on the actor's address and connects to the workload
 over loopback. It runs as a plain container next to the sandbox, so it is not
-mediated; it stands in for the gateway's loopback service endpoint, which needs
-the gateway path. The agent only ever sees a loopback peer, which its network
-broker allows."""
+mediated; it stands in for the gateway's loopback service endpoint. The
+workload only ever sees a loopback peer, which its network broker allows.
+RELAY_PORT is where it listens (8081), WORKLOAD_PORT where it connects (8080)."""
 import asyncio
 import os
 
 LISTEN = int(os.environ.get("RELAY_PORT", "8081"))
-TARGET = int(os.environ.get("HELPDESK_PORT", "8080"))
+TARGET = int(os.environ.get("WORKLOAD_PORT", "8080"))
 
 
 async def pipe(reader, writer):
