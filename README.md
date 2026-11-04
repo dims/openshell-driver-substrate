@@ -43,7 +43,7 @@ flowchart TB
   egress["atenet egress<br/>adds the actor JWT"]
   router["atenet router<br/>mTLS ingress"]
 
-  subgraph vm["one actor, one microVM"]
+  subgraph vm["one actor, one micro-VM"]
     direction LR
     relay["relay"] -- "loopback" --> sbx["sandbox<br/>openshell-sandbox"] -- "boundary, TLS" --> sup["supervisor<br/>openshell-supervisor"]
   end
